@@ -417,7 +417,7 @@ func executeDiffApproved(ctx *pendingDiffContext, accepted, rejected []int) []to
 
 	for i, pd := range ctx.diffs {
 		if decisions[i] {
-			res := tools.Execute(pd.Call.Name, pd.Call.Input, ctx.workDir, ctx.allowed, ctx.cexec, ctx.snapFn)
+			res := tools.Execute(pd.Call.Name, pd.Call.Input, ctx.workDir, ctx.allowed, ctx.cexec, ctx.snapFn, nil)
 			results = append(results, toolExecResult{call: pd.Call, output: res.Output, isError: res.IsError})
 		} else {
 			relPath := pd.FilePath

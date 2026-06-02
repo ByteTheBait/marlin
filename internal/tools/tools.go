@@ -88,6 +88,17 @@ func All() []Def {
 			},
 			Required: []string{"path"},
 		},
+		{
+			Name: "search_codebase",
+			Description: "Search the project index using TF-IDF ranking. Returns the most relevant files " +
+				"for a query with scored snippets. Use this before read_file on large codebases to find " +
+				"the right file without reading everything. Returns an error if the index hasn't been built yet.",
+			Properties: map[string]Prop{
+				"query": {Type: "string", Description: "Search terms or natural language description of what you're looking for."},
+				"limit": {Type: "string", Description: "Maximum number of results to return (default 5, max 20)."},
+			},
+			Required: []string{"query"},
+		},
 	}
 }
 
@@ -95,9 +106,14 @@ func All() []Def {
 // isAllowed gates run_command in normal mode.
 // containerExec, when non-nil, routes run_command through a sandbox instead of
 // the host shell — the allow-list is bypassed when a container is active.
-// snapshotFn, when non-nil, is called before write_file and edit_file so the
-// caller can keep a reversible history of every AI-driven file modification.
-func Execute(name, inputJSON, workDir string, isAllowed func(string) bool, containerExec func(cmd, workDir string) (string, error), snapshotFn func(absPath, tool string)) Result {
+// snapshotFn, when non-nil, is called before write_file and edit_file.
+// searchFn, when non-nil, handles search_codebase queries.
+func Execute(name, inputJSON, workDir string,
+	isAllowed func(string) bool,
+	containerExec func(cmd, workDir string) (string, error),
+	snapshotFn func(absPath, tool string),
+	searchFn func(query string, limit int) string,
+) Result {
 	var input map[string]string
 	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
 		// Try with interface{} and coerce
@@ -256,6 +272,25 @@ func Execute(name, inputJSON, workDir string, isAllowed func(string) bool, conta
 			return Result{Output: err.Error(), IsError: true}
 		}
 		return Result{Output: "created " + path}
+
+	case "search_codebase":
+		if searchFn == nil {
+			return Result{Output: "index not built — run /index first", IsError: true}
+		}
+		query := strings.TrimSpace(input["query"])
+		if query == "" {
+			return Result{Output: "query is required", IsError: true}
+		}
+		limit := 5
+		if l := strings.TrimSpace(input["limit"]); l != "" {
+			fmt.Sscan(l, &limit)
+			if limit < 1 {
+				limit = 1
+			} else if limit > 20 {
+				limit = 20
+			}
+		}
+		return Result{Output: searchFn(query, limit)}
 
 	default:
 		return Result{Output: "unknown tool: " + name, IsError: true}

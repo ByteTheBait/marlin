@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -20,6 +21,7 @@ import (
 	"marlin/internal/config"
 	"marlin/internal/container"
 	"marlin/internal/history"
+	"marlin/internal/index"
 	infomod "marlin/internal/info"
 	"marlin/internal/providers"
 	"marlin/internal/snapshots"
@@ -80,6 +82,12 @@ type attachFileMsg struct {
 type sandboxReadyMsg struct {
 	mgr *container.Manager
 	err error
+}
+
+type indexBuiltMsg struct {
+	idx   *index.Index
+	stats index.BuildStats
+	err   error
 }
 
 type chatEntry struct {
@@ -152,6 +160,8 @@ var allCommandDefs = []cmdDef{
 	{"/allow", "<prefix>", "allow a shell command prefix"},
 	{"/sandbox", "[on|off|status]", "toggle isolated sandbox mode"},
 	{"/diff-mode", "[on|off]", "review AI file writes before they're applied"},
+	{"/index", "[status]", "build TF-IDF search index for this project"},
+	{"/search", "<query>", "search the codebase index"},
 	{"/revert", "<file> [n]", "show or restore file snapshots"},
 	{"/resume", "", "resume the most recent session"},
 	{"/history", "[n|clear]", "list or load saved sessions"},
@@ -213,6 +223,9 @@ type ChatModel struct {
 	// diff-mode: show diffs and ask for approval before applying AI file writes
 	diffMode bool
 	diffCtx  *pendingDiffContext
+
+	// TF-IDF codebase index (nil until /index is run)
+	codeIndex *index.Index
 
 	// inline tool display: name of the most recently dispatched tool
 	currentTool string
@@ -295,7 +308,7 @@ func NewChat(cfg *config.Config, registry *providers.Registry, width, height int
 		m.addSystem("Type /help for commands.")
 	}
 
-	// Load input history and create a session for this launch.
+	// Load input history, session, and saved index for this launch.
 	m.historyIdx = -1
 	if dir, err := config.Dir(); err == nil {
 		m.marlinDir = dir
@@ -305,6 +318,10 @@ func NewChat(cfg *config.Config, registry *providers.Registry, width, height int
 			projectName = m.projectInfo.Name
 		}
 		m.session = history.NewSession(projectName, wd)
+		// Load a previously built index if one exists.
+		if idx, err := index.Load(dir, wd); err == nil {
+			m.codeIndex = idx
+		}
 	}
 
 	m.refreshViewport()
@@ -598,6 +615,13 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 					}
 				}
 				diffOn := m.diffMode
+				codeIdx := m.codeIndex
+				var searchFn func(string, int) string
+				if codeIdx != nil {
+					searchFn = func(q string, lim int) string {
+						return index.FormatResults(index.Search(codeIdx, q, lim), q)
+					}
+				}
 				return m, func() tea.Msg {
 					var immediate []toolExecResult
 					var diffs []PendingDiff
@@ -608,7 +632,13 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 								continue
 							}
 						}
-						res := tools.Execute(call.Name, call.Input, workDir, allowed, cexec, snapFn)
+						res := tools.Execute(call.Name, call.Input, workDir, allowed, cexec, snapFn, searchFn)
+						// Keep index fresh after writes.
+						if (call.Name == "write_file" || call.Name == "edit_file") && !res.IsError && codeIdx != nil {
+							if absPath := resolveToolPath(call, workDir); absPath != "" {
+								index.UpdateFile(codeIdx, absPath)
+							}
+						}
 						immediate = append(immediate, toolExecResult{call: call, output: res.Output, isError: res.IsError})
 					}
 					if len(diffs) > 0 {
@@ -709,6 +739,21 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 				SandboxBackend: sandboxBackendName(m.sandboxManager),
 			}
 		}
+
+	case indexBuiltMsg:
+		if msg.err != nil {
+			m.addError("Index build failed: " + msg.err.Error())
+		} else {
+			m.codeIndex = msg.idx
+			if m.marlinDir != "" {
+				index.Save(m.marlinDir, msg.idx)
+			}
+			m.addSystem(fmt.Sprintf(
+				"Index built: %d files, %d terms in %s. Use /search <query> or the AI will use it automatically.",
+				msg.stats.Files, msg.stats.Terms, msg.stats.Elapsed.Round(time.Millisecond),
+			))
+		}
+		m.refreshViewport()
 
 	case cmdOutputMsg:
 		if msg.err != nil {
@@ -893,7 +938,11 @@ func (m *ChatModel) effectiveSystemPrompt() string {
 	sb.WriteString("- edit_file: replace a specific string in a file (preferred for targeted edits)\n")
 	sb.WriteString("- run_command: run a shell command\n")
 	sb.WriteString("- list_directory: list files in a directory\n")
-	sb.WriteString("- create_directory: create a directory\n\n")
+	sb.WriteString("- create_directory: create a directory\n")
+	if m.codeIndex != nil {
+		sb.WriteString(fmt.Sprintf("- search_codebase: search %d indexed files with TF-IDF — use this to find relevant files before reading them\n", m.codeIndex.FileCount))
+	}
+	sb.WriteString("\n")
 	sb.WriteString("When asked to create a file, write code, edit something, or run a command — DO IT with the appropriate tool. ")
 	sb.WriteString("Do not explain how the user could do it themselves. Do not ask for confirmation before using tools. Just act.\n\n")
 
@@ -1679,6 +1728,38 @@ func (m *ChatModel) handleCommand(input string) tea.Cmd {
 			m.addSystem("Usage: /sandbox [on|off|status]")
 		}
 
+	case "/index":
+		if len(args) > 0 && strings.ToLower(args[0]) == "status" {
+			if m.codeIndex == nil {
+				m.addSystem("No index built. Run /index to build one.")
+			} else {
+				m.addSystem(fmt.Sprintf("Index: %d files, %d terms, built %s.",
+					m.codeIndex.FileCount, m.codeIndex.TermCount,
+					m.codeIndex.BuiltAt.Format("Jan 02 15:04")))
+			}
+			return nil
+		}
+		wd := m.workDir
+		m.addSystem(fmt.Sprintf("Building index for %s…", wd))
+		m.refreshViewport()
+		return func() tea.Msg {
+			idx, stats, err := index.Build(wd, nil)
+			return indexBuiltMsg{idx: idx, stats: stats, err: err}
+		}
+
+	case "/search":
+		if len(args) == 0 {
+			m.addSystem("Usage: /search <query>")
+			return nil
+		}
+		if m.codeIndex == nil {
+			m.addError("No index. Run /index first.")
+			return nil
+		}
+		query := strings.Join(args, " ")
+		results := index.Search(m.codeIndex, query, 8)
+		m.addSystem(index.FormatResults(results, query))
+
 	case "/diff-mode":
 		sub := ""
 		if len(args) > 0 {
@@ -1894,6 +1975,8 @@ func helpText() string {
 		{"/exec <cmd>", "run a shell command (must be /allow-ed first)"},
 		{"/allow <prefix>", "allow a shell command prefix (e.g. /allow npm)"},
 		{"/sandbox [on|off|status]", "toggle isolated sandbox mode (AI runs commands freely, safely)"},
+		{"/index [status]", "build (or check) the TF-IDF codebase search index"},
+		{"/search <query>", "search the index and show ranked results with snippets"},
 		{"/revert <file> [n]", "list file snapshots or restore one (AI snapshots before every edit)"},
 		{"/resume", "resume the most recent saved session"},
 		{"/history [n|clear]", "list saved sessions, load one by number, or clear all"},
@@ -1987,6 +2070,27 @@ func (m *ChatModel) renderSuggestions() string {
 		BorderForeground(colCobalt).
 		Width(m.width - 6).
 		Render(strings.Join(lines, "\n"))
+}
+
+// resolveToolPath extracts the absolute file path from a write_file or edit_file call.
+func resolveToolPath(call providers.ToolCall, workDir string) string {
+	var input map[string]string
+	if err := json.Unmarshal([]byte(call.Input), &input); err != nil {
+		return ""
+	}
+	p := input["path"]
+	if p == "" {
+		return ""
+	}
+	if strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, p[2:])
+		}
+	}
+	if filepath.IsAbs(p) {
+		return p
+	}
+	return filepath.Join(workDir, p)
 }
 
 func (m *ChatModel) saveSession() {
