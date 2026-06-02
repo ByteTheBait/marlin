@@ -13,6 +13,7 @@ const (
 	viewSplash viewState = iota
 	viewChat
 	viewEditor
+	viewFileTree
 )
 
 type App struct {
@@ -22,6 +23,7 @@ type App struct {
 	splash    SplashModel
 	chat      ChatModel
 	editor    EditorModel
+	fileTree  FileTreeModel
 	statusBar StatusBar
 	width     int
 	height    int
@@ -63,6 +65,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.chat.Resize(a.width, a.height-1)
 		case viewEditor:
 			a.editor.Resize(a.width, a.height-1)
+		case viewFileTree:
+			a.fileTree.Resize(a.width, a.height-1)
 		}
 		return a, nil
 
@@ -90,6 +94,19 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.statusBar.SetMode("chat")
 		a.statusBar.SetInfo("")
 		a.statusBar.SetCursor(0, 0)
+		return a, nil
+
+	case OpenFileTreeMsg:
+		a.state = viewFileTree
+		a.fileTree = NewFileTree(msg.Dir, a.width, a.height-1)
+		a.statusBar.SetMode("files")
+		a.statusBar.SetInfo(msg.Dir)
+		return a, a.fileTree.Init()
+
+	case FileTreeCloseMsg:
+		a.state = viewChat
+		a.statusBar.SetMode("chat")
+		a.statusBar.SetInfo("")
 		return a, nil
 
 	case SetStatusMsg:
@@ -125,6 +142,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.statusBar.SetCursor(a.editor.cursor.row+1, a.editor.cursor.col+1)
 		return a, cmd
+
+	case viewFileTree:
+		var cmd tea.Cmd
+		a.fileTree, cmd = a.fileTree.Update(msg)
+		return a, cmd
 	}
 
 	return a, nil
@@ -140,6 +162,8 @@ func (a App) View() string {
 		content = a.chat.View()
 	case viewEditor:
 		content = a.editor.View()
+	case viewFileTree:
+		content = a.fileTree.View()
 	}
 
 	statusView := a.statusBar.View()

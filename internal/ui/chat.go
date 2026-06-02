@@ -22,6 +22,7 @@ import (
 	"marlin/internal/history"
 	infomod "marlin/internal/info"
 	"marlin/internal/providers"
+	"marlin/internal/snapshots"
 	"marlin/internal/tools"
 )
 
@@ -149,10 +150,12 @@ var allCommandDefs = []cmdDef{
 	{"/exec", "<cmd>", "run shell command (must be /allow-ed)"},
 	{"/allow", "<prefix>", "allow a shell command prefix"},
 	{"/sandbox", "[on|off|status]", "toggle isolated sandbox mode"},
+	{"/revert", "<file> [n]", "show or restore file snapshots"},
+	{"/resume", "", "resume the most recent session"},
 	{"/history", "[n|clear]", "list or load saved sessions"},
 	{"/edit", "<file>", "open file in editor"},
-	{"/open", "<file>", "open file read-only"},
-	{"/view", "<file>", "open file read-only"},
+	{"/view", "[dir]", "browse file tree (arrow keys, Enter to open)"},
+	{"/open", "<file>", "open file read-only in editor"},
 	{"/cat", "<file>", "print file contents"},
 	{"/ls", "[dir]", "list directory"},
 	{"/cd", "<dir>", "change working directory"},
@@ -198,6 +201,9 @@ type ChatModel struct {
 	rateLimited    bool
 	rateLimitSecs  int // countdown seconds remaining
 	rateLimitTotal int // total wait (for display)
+
+	// viewport auto-scroll: true = follow new content; false = user has scrolled up
+	atBottom bool
 
 	// sandbox / container mode
 	sandboxMode    bool
@@ -257,6 +263,7 @@ func NewChat(cfg *config.Config, registry *providers.Registry, width, height int
 		renderer: renderer,
 		width:    width,
 		height:   height,
+		atBottom: true,
 	}
 
 	// Load or initiate info.json
@@ -396,19 +403,21 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 			return m, nil
 
 		case tea.KeyUp:
-			// Intercept only when the textarea is single-line (no newlines).
-			// Multi-line content keeps normal cursor-up behavior.
+			// Navigate input history when single-line, but only swallow the key
+			// when we actually moved to a history entry. Otherwise fall through so
+			// the viewport can scroll up.
 			if m.inputHistory != nil && !strings.Contains(m.textarea.Value(), "\n") {
-				if m.historyIdx == -1 {
-					m.historyDraft = m.textarea.Value()
-				}
 				if next := m.historyIdx + 1; next < len(m.inputHistory.Entries) {
+					if m.historyIdx == -1 {
+						m.historyDraft = m.textarea.Value()
+					}
 					m.historyIdx = next
 					m.textarea.SetValue(m.inputHistory.Entries[m.historyIdx])
 					m.updateSuggestions()
 					m.refreshViewport()
+					return m, nil
 				}
-				return m, nil
+				// History exhausted — fall through to viewport scroll.
 			}
 
 		case tea.KeyDown:
@@ -438,6 +447,7 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 			m.suggestions = nil
 			m.historyIdx = -1
 			m.historyDraft = ""
+			m.atBottom = true
 			if m.inputHistory != nil {
 				m.inputHistory.Add(input)
 			}
@@ -554,14 +564,21 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 				calls := msg.toolCalls
 				workDir := m.workDir
 				allowed := m.isAllowed
+				marlinDir := m.marlinDir
 				var cexec func(string, string) (string, error)
 				if m.sandboxMode && m.sandboxManager != nil && m.sandboxManager.IsRunning() {
 					cexec = m.sandboxManager.Exec
 				}
+				var snapFn func(string, string)
+				if marlinDir != "" {
+					snapFn = func(absPath, tool string) {
+						snapshots.Take(marlinDir, workDir, absPath, tool)
+					}
+				}
 				return m, func() tea.Msg {
 					results := make([]toolExecResult, len(calls))
 					for i, call := range calls {
-						res := tools.Execute(call.Name, call.Input, workDir, allowed, cexec)
+						res := tools.Execute(call.Name, call.Input, workDir, allowed, cexec, snapFn)
 						results[i] = toolExecResult{call: call, output: res.Output, isError: res.IsError}
 					}
 					return toolsExecutedMsg{results: results}
@@ -656,9 +673,17 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 		m.updateSuggestions()
 		m.refreshViewport()
 
+		prevOffset := m.viewport.YOffset
 		var vpCmd tea.Cmd
 		m.viewport, vpCmd = m.viewport.Update(msg)
 		cmds = append(cmds, vpCmd)
+
+		// Track whether user has scrolled away from the bottom.
+		if m.viewport.YOffset < prevOffset {
+			m.atBottom = false
+		} else if m.viewport.AtBottom() {
+			m.atBottom = true
+		}
 	}
 
 	return m, tea.Batch(cmds...)
@@ -888,7 +913,9 @@ func (m *ChatModel) refreshViewport() {
 	}
 
 	m.viewport.SetContent(sb.String())
-	m.viewport.GotoBottom()
+	if m.atBottom {
+		m.viewport.GotoBottom()
+	}
 }
 
 func (m *ChatModel) renderEntry(e chatEntry) string {
@@ -1289,7 +1316,25 @@ func (m *ChatModel) handleCommand(input string) tea.Cmd {
 		filename := m.resolvePath(args[0])
 		return func() tea.Msg { return OpenEditorMsg{Filename: filename, Readonly: false} }
 
-	case "/open", "/view":
+	case "/view":
+		dir := m.workDir
+		if len(args) > 0 {
+			p := m.resolvePath(args[0])
+			fi, err := os.Stat(p)
+			if err != nil {
+				m.addError("Not found: " + args[0])
+				return nil
+			}
+			if fi.IsDir() {
+				dir = p
+			} else {
+				dir = filepath.Dir(p)
+			}
+		}
+		d := dir
+		return func() tea.Msg { return OpenFileTreeMsg{Dir: d} }
+
+	case "/open":
 		if len(args) == 0 {
 			m.addSystem("Usage: /open <filename>")
 			return nil
@@ -1452,6 +1497,76 @@ func (m *ChatModel) handleCommand(input string) tea.Cmd {
 			m.addSystem("Usage: /sandbox [on|off|status]")
 		}
 
+	case "/revert":
+		if len(args) == 0 {
+			m.addSystem("Usage: /revert <file> [n]  —  list snapshots or restore one")
+			return nil
+		}
+		absPath := m.resolvePath(args[0])
+		snaps := snapshots.List(m.marlinDir, m.workDir, absPath)
+		if len(snaps) == 0 {
+			m.addSystem(fmt.Sprintf("No snapshots for %s — Marlin snapshots files before every AI edit.", args[0]))
+			return nil
+		}
+		if len(args) < 2 {
+			var lines []string
+			for i, s := range snaps {
+				lines = append(lines, fmt.Sprintf("  %2d.  %s  [%s]  %s",
+					i+1,
+					s.Timestamp.Format("Jan 02 15:04:05"),
+					s.Tool,
+					snapshots.HumanSize(s.Size),
+				))
+			}
+			m.addSystem(fmt.Sprintf("Snapshots for %s (newest first):\n%s\n\nUse /revert %s <n> to restore.", args[0], strings.Join(lines, "\n"), args[0]))
+			return nil
+		}
+		n := 0
+		fmt.Sscan(args[1], &n)
+		if n < 1 || n > len(snaps) {
+			m.addError(fmt.Sprintf("Invalid snapshot number (1–%d).", len(snaps)))
+			return nil
+		}
+		snap := snaps[n-1]
+		if err := snapshots.Restore(m.marlinDir, m.workDir, absPath, snap.ID); err != nil {
+			m.addError("Restore failed: " + err.Error())
+			return nil
+		}
+		m.addSystem(fmt.Sprintf("Restored %s → snapshot from %s (%s, %s).",
+			args[0], snap.Timestamp.Format("Jan 02 15:04:05"), snap.Tool, snapshots.HumanSize(snap.Size)))
+
+	case "/resume":
+		sessions, err := history.ListSessions(m.marlinDir)
+		if err != nil || len(sessions) == 0 {
+			m.addSystem("No saved sessions to resume.")
+			return nil
+		}
+		s := sessions[0]
+		m.entries = nil
+		for _, e := range s.Entries {
+			m.entries = append(m.entries, chatEntry{
+				role: e.Role, content: e.Content, time: e.Time,
+				toolName: e.ToolName, isError: e.IsError,
+			})
+		}
+		m.history = nil
+		for _, msg := range s.Messages {
+			var tcs []providers.ToolCallMsg
+			for _, tc := range msg.ToolCalls {
+				tcs = append(tcs, providers.ToolCallMsg{ID: tc.ID, Name: tc.Name, Input: tc.Input})
+			}
+			m.history = append(m.history, providers.Message{
+				Role:       msg.Role,
+				Content:    msg.Content,
+				ToolCalls:  tcs,
+				ToolCallID: msg.ToolCallID,
+				ToolUseID:  msg.ToolUseID,
+				IsError:    msg.IsError,
+			})
+		}
+		m.addSystem(fmt.Sprintf("Resumed: %s", s.Summary()))
+		return nil
+
 	case "/history":
 		if len(args) > 0 && args[0] == "clear" {
 			if err := history.ClearSessions(m.marlinDir); err != nil {
@@ -1577,9 +1692,12 @@ func helpText() string {
 		{"/exec <cmd>", "run a shell command (must be /allow-ed first)"},
 		{"/allow <prefix>", "allow a shell command prefix (e.g. /allow npm)"},
 		{"/sandbox [on|off|status]", "toggle isolated sandbox mode (AI runs commands freely, safely)"},
+		{"/revert <file> [n]", "list file snapshots or restore one (AI snapshots before every edit)"},
+		{"/resume", "resume the most recent saved session"},
 		{"/history [n|clear]", "list saved sessions, load one by number, or clear all"},
 		{"/edit <file>", "open file in editor"},
-		{"/open <file>", "open file read-only"},
+		{"/view [dir]", "browse file tree — arrow keys navigate, Enter opens, ← goes back"},
+		{"/open <file>", "open file read-only in editor"},
 		{"/cat <file>", "print file contents"},
 		{"/ls [dir]", "list directory"},
 		{"/cd <dir>", "change working directory (syncs info.json)"},

@@ -92,7 +92,9 @@ func All() []Def {
 // isAllowed gates run_command in normal mode.
 // containerExec, when non-nil, routes run_command through a sandbox instead of
 // the host shell — the allow-list is bypassed when a container is active.
-func Execute(name, inputJSON, workDir string, isAllowed func(string) bool, containerExec func(cmd, workDir string) (string, error)) Result {
+// snapshotFn, when non-nil, is called before write_file and edit_file so the
+// caller can keep a reversible history of every AI-driven file modification.
+func Execute(name, inputJSON, workDir string, isAllowed func(string) bool, containerExec func(cmd, workDir string) (string, error), snapshotFn func(absPath, tool string)) Result {
 	var input map[string]string
 	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
 		// Try with interface{} and coerce
@@ -145,6 +147,9 @@ func Execute(name, inputJSON, workDir string, isAllowed func(string) bool, conta
 
 	case "write_file":
 		path := resolve(input["path"])
+		if snapshotFn != nil {
+			snapshotFn(path, "write_file")
+		}
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			return Result{Output: err.Error(), IsError: true}
 		}
@@ -156,6 +161,9 @@ func Execute(name, inputJSON, workDir string, isAllowed func(string) bool, conta
 
 	case "edit_file":
 		path := resolve(input["path"])
+		if snapshotFn != nil {
+			snapshotFn(path, "edit_file")
+		}
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			return Result{Output: err.Error(), IsError: true}
