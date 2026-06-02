@@ -203,7 +203,7 @@ When a provider returns a `429 Too Many Requests` response, Marlin pauses and au
   ```
   rate limited · resuming in 42s  [████████████░░░░░░░░]
   ```
-- The wait duration comes from the provider's `Retry-After` response header. If the header is absent, Marlin defaults to 60 seconds.
+- The wait duration is parsed from the provider's response headers. Marlin checks `Retry-After` first, then falls back to vendor-specific headers (`x-ratelimit-reset-requests`, `anthropic-ratelimit-requests-reset`, `x-ratelimit-reset`, etc.), taking the maximum so it waits until every limit has cleared. Headers can carry the wait as plain seconds, a Unix timestamp, an ISO 8601 datetime, an HTTP date, or a Go duration string — all are handled. If no header is present, Marlin defaults to 60 seconds.
 - When the timer reaches zero, the request is automatically re-sent and the agentic loop continues exactly where it left off.
 - Press `Ctrl+C` at any time to cancel the wait and abandon the current goal.
 
