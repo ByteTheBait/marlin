@@ -195,6 +195,22 @@ The AI runs in an **agentic loop**: it keeps calling tools until the goal is ful
 
 ---
 
+## Rate Limiting
+
+When a provider returns a `429 Too Many Requests` response, Marlin pauses and automatically resumes — no intervention needed.
+
+- The status hint turns red and shows a live countdown with a progress bar:
+  ```
+  rate limited · resuming in 42s  [████████████░░░░░░░░]
+  ```
+- The wait duration comes from the provider's `Retry-After` response header. If the header is absent, Marlin defaults to 60 seconds.
+- When the timer reaches zero, the request is automatically re-sent and the agentic loop continues exactly where it left off.
+- Press `Ctrl+C` at any time to cancel the wait and abandon the current goal.
+
+This means you can kick off a long autonomous task and walk away — if the provider rate-limits mid-way through, Marlin will sit patiently and then carry on without losing context.
+
+---
+
 ## Copy & Paste
 
 Marlin does not capture the mouse, so standard terminal text selection works normally — click and drag to select, then copy with your terminal's usual shortcut (`Cmd+C` on macOS, `Ctrl+Shift+C` on most Linux terminals).
