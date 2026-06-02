@@ -63,6 +63,7 @@ var indexedExts = map[string]bool{
 	".md": true, ".txt": true, ".json": true, ".yaml": true, ".yml": true,
 	".toml": true, ".sql": true, ".html": true, ".css": true, ".scss": true,
 	".vue": true, ".svelte": true, ".graphql": true, ".proto": true,
+	".gradle": true, ".kts": true, ".xml": true, ".properties": true,
 }
 
 var skipDirs = map[string]bool{
