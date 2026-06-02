@@ -35,10 +35,13 @@ const maxOutputBytes = 40_000
 func All() []Def {
 	return []Def{
 		{
-			Name:        "read_file",
-			Description: "Read the complete contents of a file.",
+			Name: "read_file",
+			Description: "Read a file. Supply 'function' to extract only that named function or method " +
+				"instead of the whole file — much more token-efficient for large files. " +
+				"Supports Go (via AST), Python, and all C-family languages.",
 			Properties: map[string]Prop{
-				"path": {Type: "string", Description: "File path, relative to working directory or absolute."},
+				"path":     {Type: "string", Description: "File path, relative to working directory or absolute."},
+				"function": {Type: "string", Description: "Optional: name of a function or method to extract instead of reading the whole file."},
 			},
 			Required: []string{"path"},
 		},
@@ -142,6 +145,16 @@ func Execute(name, inputJSON, workDir string, isAllowed func(string) bool, conta
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return Result{Output: err.Error(), IsError: true}
+		}
+		if sym := strings.TrimSpace(input["function"]); sym != "" {
+			ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
+			extracted, err := ExtractSymbol(data, sym, ext)
+			if err != nil {
+				return Result{Output: fmt.Sprintf("symbol %q not found — returning full file\n\n%s", sym, clamp(string(data)))}
+			}
+			header := fmt.Sprintf("// extracted: %s from %s (%d of %d bytes)\n",
+				sym, filepath.Base(path), len(extracted), len(data))
+			return Result{Output: header + extracted}
 		}
 		return Result{Output: clamp(string(data))}
 

@@ -888,7 +888,7 @@ func (m *ChatModel) effectiveSystemPrompt() string {
 
 	sb.WriteString("## Tools\n")
 	sb.WriteString("You have the following tools and MUST use them to act directly — never tell the user to do something manually that a tool can do:\n")
-	sb.WriteString("- read_file: read any file\n")
+	sb.WriteString("- read_file: read any file. Pass 'function' to extract just one named function or method — far cheaper than reading the whole file for large codebases\n")
 	sb.WriteString("- write_file: create or overwrite a file (use this to create READMEs, configs, source files, etc.)\n")
 	sb.WriteString("- edit_file: replace a specific string in a file (preferred for targeted edits)\n")
 	sb.WriteString("- run_command: run a shell command\n")
@@ -1064,27 +1064,77 @@ func tickRateLimit() tea.Cmd {
 	return tea.Tick(time.Second, func(_ time.Time) tea.Msg { return rateLimitTickMsg{} })
 }
 
-// maybePruneHistory drops the middle of m.history when the estimated payload
-// exceeds 75% of MaxTokens. Keeps the first 2 and last 8 messages so the AI
-// retains both initial context and recent tool results.
+// historyCharLen returns the total character count of m.history content.
+func (m *ChatModel) historyCharLen() int {
+	n := 0
+	for _, msg := range m.history {
+		n += len(msg.Content)
+		for _, tc := range msg.ToolCalls {
+			n += len(tc.Input)
+		}
+	}
+	return n
+}
+
+// maybePruneHistory compresses the conversation to stay under a character
+// budget before sending a request.  Strategy (from oldest to newest):
+//
+//  1. Do nothing if total chars ≤ threshold.
+//  2. Compress any middle message > 2 000 chars: replace with a one-line
+//     summary that keeps the last 500 chars for slight historical context.
+//  3. Recursive safety catch: if the history is STILL too large after
+//     compression, drop messages one at a time from the oldest end of the
+//     middle window until we are under budget.
 func (m *ChatModel) maybePruneHistory() {
-	if m.cfg.MaxTokens <= 0 || len(m.history) <= 10 {
+	// ~400 000 chars ≈ 100 000 tokens — safe ceiling for all major models.
+	const maxChars = 400_000
+	const compressThreshold = 320_000 // 80 % — start compressing before hard limit
+	const msgSizeLimit = 2_000        // individual messages larger than this get compressed
+	const tailKeep = 500              // chars to preserve at end of compressed message
+	const keepRecent = 6              // always keep this many recent messages intact
+
+	if m.historyCharLen() <= compressThreshold {
 		return
 	}
-	const ratio = 0.75
-	threshold := int(float64(m.cfg.MaxTokens) * ratio)
-	if m.estimateTokens() <= threshold {
+	if len(m.history) <= keepRecent {
 		return
 	}
-	const keepStart, keepEnd = 2, 8
-	if len(m.history) <= keepStart+keepEnd {
-		return
+
+	splitIdx := len(m.history) - keepRecent
+	compressed := 0
+
+	// Phase 1: compress large messages in the older section.
+	for i := 0; i < splitIdx; i++ {
+		msg := &m.history[i]
+		if len(msg.Content) > msgSizeLimit {
+			saved := len(msg.Content)
+			tail := msg.Content
+			if len(tail) > tailKeep {
+				tail = tail[len(tail)-tailKeep:]
+			}
+			msg.Content = fmt.Sprintf(
+				"[Marlin: truncated %d chars of older context to protect token budget]\n…%s",
+				saved-tailKeep, tail,
+			)
+			compressed++
+		}
 	}
-	pruned := len(m.history) - keepStart - keepEnd
-	m.history = append(m.history[:keepStart:keepStart], m.history[len(m.history)-keepEnd:]...)
-	m.addSystem(fmt.Sprintf(
-		"Context pruned: dropped %d messages from the middle to stay within token budget.", pruned,
-	))
+
+	// Phase 2: recursive safety catch — drop oldest middle messages until under budget.
+	dropped := 0
+	for m.historyCharLen() > maxChars && splitIdx > 1 {
+		// Remove index 1 (oldest non-anchor message) and shrink the split point.
+		m.history = append(m.history[:1:1], m.history[2:]...)
+		splitIdx--
+		dropped++
+	}
+
+	if compressed > 0 || dropped > 0 {
+		m.addSystem(fmt.Sprintf(
+			"Context window managed: compressed %d messages, dropped %d oldest turns.",
+			compressed, dropped,
+		))
+	}
 }
 
 // estimateTokens returns a rough token count for the current history + system prompt.
