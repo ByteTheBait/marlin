@@ -1,6 +1,9 @@
 package providers
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Message is a chat history entry. Role is one of: user, assistant, tool.
 // When Role=="assistant" and ToolCalls is non-empty, the assistant used tools.
@@ -28,15 +31,26 @@ type ToolCall struct {
 	Input string // complete JSON input object
 }
 
+// RateLimitState carries the budget info parsed from a successful response's
+// headers. Used for proactive pausing before the next request would exceed limits.
+type RateLimitState struct {
+	RemainingRequests int       // -1 = unknown
+	RemainingTokens   int       // -1 = unknown
+	ResetRequestsAt   time.Time // zero = unknown
+	ResetTokensAt     time.Time // zero = unknown
+}
+
 // StreamChunk is one unit of output from a streaming provider response.
 // When Done is true and ToolCalls is non-empty, the model made tool calls.
 // When RetryAfter > 0 the request was rate-limited; retry after that duration.
+// RateLimit is populated on the Done chunk when the provider returned budget headers.
 type StreamChunk struct {
 	Content    string
 	Done       bool
 	Error      error
 	ToolCalls  []ToolCall
-	RetryAfter int // seconds to wait before retrying (rate limit); 0 = not rate-limited
+	RetryAfter int            // seconds to wait before retrying (rate limit); 0 = not rate-limited
+	RateLimit  *RateLimitState // nil if provider sent no budget headers
 }
 
 // ToolDef is the provider-facing schema for a single tool.

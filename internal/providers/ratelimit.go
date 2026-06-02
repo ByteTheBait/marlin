@@ -6,6 +6,74 @@ import (
 	"time"
 )
 
+// ParseRateLimitState reads budget headers from a successful (non-429) response.
+// Returns nil if no relevant headers were found.
+func ParseRateLimitState(resp *http.Response) *RateLimitState {
+	s := &RateLimitState{RemainingRequests: -1, RemainingTokens: -1}
+	found := false
+
+	// Remaining requests
+	for _, h := range []string{
+		"x-ratelimit-remaining-requests",
+		"anthropic-ratelimit-requests-remaining",
+		"ratelimit-remaining-requests",
+	} {
+		if val := resp.Header.Get(h); val != "" {
+			if n, err := strconv.Atoi(val); err == nil {
+				s.RemainingRequests = n
+				found = true
+				break
+			}
+		}
+	}
+
+	// Remaining tokens
+	for _, h := range []string{
+		"x-ratelimit-remaining-tokens",
+		"anthropic-ratelimit-tokens-remaining",
+		"ratelimit-remaining-tokens",
+	} {
+		if val := resp.Header.Get(h); val != "" {
+			if n, err := strconv.Atoi(val); err == nil {
+				s.RemainingTokens = n
+				found = true
+				break
+			}
+		}
+	}
+
+	// Reset time for requests
+	for _, h := range []string{
+		"x-ratelimit-reset-requests",
+		"anthropic-ratelimit-requests-reset",
+	} {
+		if val := resp.Header.Get(h); val != "" {
+			if secs := parseWaitSeconds(val); secs > 0 {
+				s.ResetRequestsAt = time.Now().Add(time.Duration(secs) * time.Second)
+				break
+			}
+		}
+	}
+
+	// Reset time for tokens
+	for _, h := range []string{
+		"x-ratelimit-reset-tokens",
+		"anthropic-ratelimit-tokens-reset",
+	} {
+		if val := resp.Header.Get(h); val != "" {
+			if secs := parseWaitSeconds(val); secs > 0 {
+				s.ResetTokensAt = time.Now().Add(time.Duration(secs) * time.Second)
+				break
+			}
+		}
+	}
+
+	if !found {
+		return nil
+	}
+	return s
+}
+
 // retryAfterSeconds returns how many seconds to wait before retrying a 429.
 //
 // Resolution order:

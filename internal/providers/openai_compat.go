@@ -134,6 +134,8 @@ func (p *OpenAICompatProvider) Stream(ctx context.Context, model string, message
 			return
 		}
 
+		rl := ParseRateLimitState(resp)
+
 		// Accumulate tool calls by their index (OpenAI streams them in fragments).
 		type accToolCall struct {
 			id   string
@@ -209,9 +211,9 @@ func (p *OpenAICompatProvider) Stream(ctx context.Context, model string, message
 				}
 				calls = append(calls, ToolCall{ID: a.id, Name: a.name, Input: inp})
 			}
-			ch <- StreamChunk{Done: true, ToolCalls: calls}
+			ch <- StreamChunk{Done: true, ToolCalls: calls, RateLimit: rl}
 		} else {
-			ch <- StreamChunk{Done: true}
+			ch <- StreamChunk{Done: true, RateLimit: rl}
 		}
 	}()
 

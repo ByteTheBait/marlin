@@ -124,6 +124,8 @@ func (p *GeminiProvider) Stream(ctx context.Context, model string, messages []Me
 			return
 		}
 
+		rl := ParseRateLimitState(resp)
+
 		var collectedCalls []ToolCall
 
 		scanner := bufio.NewScanner(resp.Body)
@@ -168,9 +170,9 @@ func (p *GeminiProvider) Stream(ctx context.Context, model string, messages []Me
 		}
 
 		if len(collectedCalls) > 0 {
-			ch <- StreamChunk{Done: true, ToolCalls: collectedCalls}
+			ch <- StreamChunk{Done: true, ToolCalls: collectedCalls, RateLimit: rl}
 		} else {
-			ch <- StreamChunk{Done: true}
+			ch <- StreamChunk{Done: true, RateLimit: rl}
 		}
 	}()
 

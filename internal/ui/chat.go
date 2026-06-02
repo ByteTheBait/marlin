@@ -50,6 +50,7 @@ type streamChunkMsg struct {
 	err        error
 	toolCalls  []providers.ToolCall
 	retryAfter int // >0 means rate-limited
+	rateLimit  *providers.RateLimitState
 }
 
 type toolExecResult struct {
@@ -204,6 +205,9 @@ type ChatModel struct {
 
 	// viewport auto-scroll: true = follow new content; false = user has scrolled up
 	atBottom bool
+
+	// proactive rate-limit state from the most recent successful response
+	rlState *providers.RateLimitState
 
 	// sandbox / container mode
 	sandboxMode    bool
@@ -522,6 +526,9 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 		}
 		if msg.done {
 			m.streaming = false
+			if msg.rateLimit != nil {
+				m.rlState = msg.rateLimit
+			}
 
 			// Agentic tool-use loop — no hard iteration limit, goal drives termination.
 			// Safety cap at 100 to prevent runaway loops on bugs.
@@ -991,7 +998,14 @@ func (m *ChatModel) renderEntry(e chatEntry) string {
 func waitForChunk(ch <-chan providers.StreamChunk) tea.Cmd {
 	return func() tea.Msg {
 		c := <-ch
-		return streamChunkMsg{content: c.Content, done: c.Done, err: c.Error, toolCalls: c.ToolCalls, retryAfter: c.RetryAfter}
+		return streamChunkMsg{
+			content:    c.Content,
+			done:       c.Done,
+			err:        c.Error,
+			toolCalls:  c.ToolCalls,
+			retryAfter: c.RetryAfter,
+			rateLimit:  c.RateLimit,
+		}
 	}
 }
 
@@ -999,7 +1013,49 @@ func tickRateLimit() tea.Cmd {
 	return tea.Tick(time.Second, func(_ time.Time) tea.Msg { return rateLimitTickMsg{} })
 }
 
+// estimateTokens returns a rough token count for the current history + system prompt.
+// Uses the 4-chars-per-token heuristic — good enough for a conservative budget check.
+func (m *ChatModel) estimateTokens() int {
+	n := len(m.effectiveSystemPrompt()) / 4
+	for _, msg := range m.history {
+		n += len(msg.Content) / 4
+		for _, tc := range msg.ToolCalls {
+			n += len(tc.Input) / 4
+		}
+	}
+	return n
+}
+
 func (m *ChatModel) startStream() tea.Cmd {
+	// Proactive rate-limit check: if the provider told us how much budget remains,
+	// compare against our estimated payload size before making the round-trip.
+	if rl := m.rlState; rl != nil {
+		estimate := m.estimateTokens()
+		waitSecs := 0
+
+		if rl.RemainingTokens >= 0 && estimate > rl.RemainingTokens && !rl.ResetTokensAt.IsZero() {
+			waitSecs = int(time.Until(rl.ResetTokensAt).Seconds()) + 1
+		}
+		if rl.RemainingRequests == 0 && !rl.ResetRequestsAt.IsZero() {
+			if s := int(time.Until(rl.ResetRequestsAt).Seconds()) + 1; s > waitSecs {
+				waitSecs = s
+			}
+		}
+
+		if waitSecs > 0 {
+			m.rateLimited = true
+			m.rateLimitSecs = waitSecs
+			m.rateLimitTotal = waitSecs
+			m.rlState = nil // clear so we don't re-trigger on the next check
+			m.addSystem(fmt.Sprintf(
+				"Proactive pause: ~%d tokens estimated, %d remaining (window resets in %ds).",
+				estimate, rl.RemainingTokens, waitSecs,
+			))
+			m.refreshViewport()
+			return tickRateLimit()
+		}
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancelStream = cancel
 	m.streaming = true

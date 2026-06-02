@@ -116,6 +116,8 @@ func (p *ClaudeProvider) Stream(ctx context.Context, model string, messages []Me
 			return
 		}
 
+		rl := ParseRateLimitState(resp)
+
 		// Track in-progress tool calls being accumulated from the stream.
 		type pendingTool struct {
 			id    string
@@ -197,14 +199,14 @@ func (p *ClaudeProvider) Stream(ctx context.Context, model string, messages []Me
 						}
 						calls[i] = ToolCall{ID: pt.id, Name: pt.name, Input: inp}
 					}
-					ch <- StreamChunk{Done: true, ToolCalls: calls}
+					ch <- StreamChunk{Done: true, ToolCalls: calls, RateLimit: rl}
 				} else {
-					ch <- StreamChunk{Done: true}
+					ch <- StreamChunk{Done: true, RateLimit: rl}
 				}
 				return
 			}
 		}
-		ch <- StreamChunk{Done: true}
+		ch <- StreamChunk{Done: true, RateLimit: rl}
 	}()
 
 	return ch, nil
