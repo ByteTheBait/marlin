@@ -27,9 +27,15 @@ func (d *DockerBackend) Start(workDir string) error {
 	// Pull quietly; ignore errors (image may already be present locally).
 	exec.Command("docker", "pull", "-q", dockerImage).Run()
 
+	// Named volumes persist package-manager caches between container starts so
+	// npm install / go mod download / pip install don't re-download everything.
 	out, err := exec.Command("docker", "run", "-d", "--rm",
 		"--name", name,
 		"-v", workDir+":/workspace",
+		"-v", "marlin-npm-cache:/root/.npm",
+		"-v", "marlin-go-cache:/root/go/pkg/mod",
+		"-v", "marlin-pip-cache:/root/.cache/pip",
+		"-v", "marlin-cargo-cache:/root/.cargo/registry",
 		"--workdir", "/workspace",
 		"--memory", "512m",
 		"--cpus", "1",

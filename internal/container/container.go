@@ -1,6 +1,12 @@
 package container
 
-import "os/exec"
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
 
 // Backend executes commands in an isolated environment.
 type Backend interface {
@@ -33,8 +39,53 @@ func (m *Manager) Start(workDir string) error {
 }
 
 // Exec runs cmd inside the sandbox with workDir as the working directory.
+// After the command completes it diffs the directory state against the pre-run
+// snapshot and appends a notice if new files were generated (e.g. dist/, swagger.json).
 func (m *Manager) Exec(cmd, workDir string) (string, error) {
-	return m.backend.Exec(cmd, workDir)
+	before := snapshotDir(workDir)
+	output, err := m.backend.Exec(cmd, workDir)
+	after := snapshotDir(workDir)
+
+	var newFiles []string
+	for path := range after {
+		if !before[path] {
+			newFiles = append(newFiles, path)
+		}
+	}
+	if len(newFiles) > 0 {
+		const max = 8
+		shown := newFiles
+		suffix := ""
+		if len(shown) > max {
+			shown = shown[:max]
+			suffix = fmt.Sprintf(" (and %d more)", len(newFiles)-max)
+		}
+		notice := "\n[sandbox] new files: " + strings.Join(shown, ", ") + suffix
+		output += notice
+	}
+	return output, err
+}
+
+// snapshotDir returns a set of relative file paths in dir (non-recursive depth-2).
+func snapshotDir(dir string) map[string]bool {
+	result := map[string]bool{}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return result
+	}
+	for _, e := range entries {
+		rel := e.Name()
+		result[rel] = true
+		if e.IsDir() {
+			sub := filepath.Join(dir, e.Name())
+			if subEntries, err := os.ReadDir(sub); err == nil {
+				for _, se := range subEntries {
+					result[rel+"/"+se.Name()] = true
+				}
+			}
+		}
+	}
+	return result
 }
 
 // Stop tears down the sandbox and releases resources.

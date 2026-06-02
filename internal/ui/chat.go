@@ -151,6 +151,7 @@ var allCommandDefs = []cmdDef{
 	{"/exec", "<cmd>", "run shell command (must be /allow-ed)"},
 	{"/allow", "<prefix>", "allow a shell command prefix"},
 	{"/sandbox", "[on|off|status]", "toggle isolated sandbox mode"},
+	{"/diff-mode", "[on|off]", "review AI file writes before they're applied"},
 	{"/revert", "<file> [n]", "show or restore file snapshots"},
 	{"/resume", "", "resume the most recent session"},
 	{"/history", "[n|clear]", "list or load saved sessions"},
@@ -208,6 +209,13 @@ type ChatModel struct {
 
 	// proactive rate-limit state from the most recent successful response
 	rlState *providers.RateLimitState
+
+	// diff-mode: show diffs and ask for approval before applying AI file writes
+	diffMode bool
+	diffCtx  *pendingDiffContext
+
+	// inline tool display: name of the most recently dispatched tool
+	currentTool string
 
 	// sandbox / container mode
 	sandboxMode    bool
@@ -568,6 +576,13 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 				m.refreshViewport()
 
 				// Execute tools asynchronously
+				// Inline tool display — show what's being dispatched
+				if len(msg.toolCalls) == 1 {
+					m.currentTool = msg.toolCalls[0].Name
+				} else {
+					m.currentTool = fmt.Sprintf("%d tools", len(msg.toolCalls))
+				}
+
 				calls := msg.toolCalls
 				workDir := m.workDir
 				allowed := m.isAllowed
@@ -582,13 +597,27 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 						snapshots.Take(marlinDir, workDir, absPath, tool)
 					}
 				}
+				diffOn := m.diffMode
 				return m, func() tea.Msg {
-					results := make([]toolExecResult, len(calls))
-					for i, call := range calls {
+					var immediate []toolExecResult
+					var diffs []PendingDiff
+					for _, call := range calls {
+						if diffOn && (call.Name == "write_file" || call.Name == "edit_file") {
+							if pd := ComputeDiffForCall(call, workDir); pd != nil {
+								diffs = append(diffs, *pd)
+								continue
+							}
+						}
 						res := tools.Execute(call.Name, call.Input, workDir, allowed, cexec, snapFn)
-						results[i] = toolExecResult{call: call, output: res.Output, isError: res.IsError}
+						immediate = append(immediate, toolExecResult{call: call, output: res.Output, isError: res.IsError})
 					}
-					return toolsExecutedMsg{results: results}
+					if len(diffs) > 0 {
+						return diffApprovalNeededMsg{
+							diffs: diffs, immediate: immediate, allCalls: calls,
+							workDir: workDir, allowed: allowed, cexec: cexec, snapFn: snapFn,
+						}
+					}
+					return toolsExecutedMsg{results: immediate}
 				}
 			}
 
@@ -619,6 +648,7 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 		return m, waitForChunk(m.streamCh)
 
 	case toolsExecutedMsg:
+		m.currentTool = ""
 		for _, r := range msg.results {
 			// Show result in chat
 			m.entries = append(m.entries, chatEntry{
@@ -641,6 +671,23 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 		m.refreshViewport()
 		// Continue the agentic loop
 		return m, m.startStream()
+
+	case diffApprovalNeededMsg:
+		m.currentTool = ""
+		m.diffCtx = &pendingDiffContext{
+			diffs: msg.diffs, immediate: msg.immediate, allCalls: msg.allCalls,
+			workDir: msg.workDir, allowed: msg.allowed, cexec: msg.cexec, snapFn: msg.snapFn,
+		}
+		return m, func() tea.Msg { return OpenDiffMsg{Diffs: msg.diffs} }
+
+	case DiffReviewDoneMsg:
+		ctx := m.diffCtx
+		m.diffCtx = nil
+		if ctx == nil {
+			return m, nil
+		}
+		results := executeDiffApproved(ctx, msg.Accepted, msg.Rejected)
+		return m, func() tea.Msg { return toolsExecutedMsg{results: results} }
 
 	case sandboxReadyMsg:
 		if msg.err != nil {
@@ -916,7 +963,11 @@ func (m *ChatModel) refreshViewport() {
 		sb.WriteString(display + StyleCursor.Render(" ") + "\n\n")
 	}
 	if m.streaming && m.toolIterations > 0 {
-		sb.WriteString(StyleSystemMsg.Render(fmt.Sprintf("  ⚙ thinking (tool loop %d/10)…", m.toolIterations)) + "\n")
+		label := m.currentTool
+		if label == "" {
+			label = "thinking"
+		}
+		sb.WriteString(StyleSystemMsg.Render(fmt.Sprintf("  ⚙ %s  (turn %d)…", label, m.toolIterations)) + "\n")
 	}
 
 	m.viewport.SetContent(sb.String())
@@ -1013,6 +1064,29 @@ func tickRateLimit() tea.Cmd {
 	return tea.Tick(time.Second, func(_ time.Time) tea.Msg { return rateLimitTickMsg{} })
 }
 
+// maybePruneHistory drops the middle of m.history when the estimated payload
+// exceeds 75% of MaxTokens. Keeps the first 2 and last 8 messages so the AI
+// retains both initial context and recent tool results.
+func (m *ChatModel) maybePruneHistory() {
+	if m.cfg.MaxTokens <= 0 || len(m.history) <= 10 {
+		return
+	}
+	const ratio = 0.75
+	threshold := int(float64(m.cfg.MaxTokens) * ratio)
+	if m.estimateTokens() <= threshold {
+		return
+	}
+	const keepStart, keepEnd = 2, 8
+	if len(m.history) <= keepStart+keepEnd {
+		return
+	}
+	pruned := len(m.history) - keepStart - keepEnd
+	m.history = append(m.history[:keepStart:keepStart], m.history[len(m.history)-keepEnd:]...)
+	m.addSystem(fmt.Sprintf(
+		"Context pruned: dropped %d messages from the middle to stay within token budget.", pruned,
+	))
+}
+
 // estimateTokens returns a rough token count for the current history + system prompt.
 // Uses the 4-chars-per-token heuristic — good enough for a conservative budget check.
 func (m *ChatModel) estimateTokens() int {
@@ -1055,6 +1129,8 @@ func (m *ChatModel) startStream() tea.Cmd {
 			return tickRateLimit()
 		}
 	}
+
+	m.maybePruneHistory()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancelStream = cancel
@@ -1551,6 +1627,26 @@ func (m *ChatModel) handleCommand(input string) tea.Cmd {
 
 		default:
 			m.addSystem("Usage: /sandbox [on|off|status]")
+		}
+
+	case "/diff-mode":
+		sub := ""
+		if len(args) > 0 {
+			sub = strings.ToLower(args[0])
+		}
+		switch sub {
+		case "on":
+			m.diffMode = true
+			m.addSystem("Diff mode ON — Marlin will show diffs and ask for approval before writing files.")
+		case "off":
+			m.diffMode = false
+			m.addSystem("Diff mode OFF — file writes apply immediately (snapshots still taken).")
+		default:
+			if m.diffMode {
+				m.addSystem("Diff mode: ON  (use /diff-mode off to disable)")
+			} else {
+				m.addSystem("Diff mode: OFF  (use /diff-mode on to enable)")
+			}
 		}
 
 	case "/revert":

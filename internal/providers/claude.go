@@ -56,10 +56,20 @@ type claudeTool struct {
 type claudeRequest struct {
 	Model     string          `json:"model"`
 	Messages  []claudeMessage `json:"messages"`
-	System    string          `json:"system,omitempty"`
+	System    interface{}     `json:"system,omitempty"` // []claudeSystemBlock for caching
 	MaxTokens int             `json:"max_tokens"`
 	Stream    bool            `json:"stream"`
 	Tools     []claudeTool    `json:"tools,omitempty"`
+}
+
+type claudeSystemBlock struct {
+	Type         string              `json:"type"`
+	Text         string              `json:"text"`
+	CacheControl *claudeCacheControl `json:"cache_control,omitempty"`
+}
+
+type claudeCacheControl struct {
+	Type string `json:"type"` // "ephemeral"
 }
 
 func (p *ClaudeProvider) Stream(ctx context.Context, model string, messages []Message, systemPrompt string, maxTokens int, tools []ToolDef) (<-chan StreamChunk, error) {
@@ -70,10 +80,22 @@ func (p *ClaudeProvider) Stream(ctx context.Context, model string, messages []Me
 	claudeMessages := marshalClaudeMessages(messages)
 	claudeTools := marshalClaudeTools(tools)
 
+	// Wrap the system prompt in a cacheable block so Anthropic can cache it
+	// across every turn of the tool loop — cuts token cost significantly on
+	// long agentic runs where info.json + instructions are sent repeatedly.
+	var systemField interface{}
+	if systemPrompt != "" {
+		systemField = []claudeSystemBlock{{
+			Type: "text",
+			Text: systemPrompt,
+			CacheControl: &claudeCacheControl{Type: "ephemeral"},
+		}}
+	}
+
 	body, err := json.Marshal(claudeRequest{
 		Model:     model,
 		Messages:  claudeMessages,
-		System:    systemPrompt,
+		System:    systemField,
 		MaxTokens: maxTokens,
 		Stream:    true,
 		Tools:     claudeTools,
@@ -88,6 +110,7 @@ func (p *ClaudeProvider) Stream(ctx context.Context, model string, messages []Me
 	}
 	req.Header.Set("x-api-key", p.apiKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("anthropic-beta", "prompt-caching-2024-07-31")
 	req.Header.Set("content-type", "application/json")
 
 	ch := make(chan StreamChunk, 64)

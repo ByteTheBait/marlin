@@ -14,6 +14,7 @@ const (
 	viewChat
 	viewEditor
 	viewFileTree
+	viewDiff
 )
 
 type App struct {
@@ -24,6 +25,7 @@ type App struct {
 	chat      ChatModel
 	editor    EditorModel
 	fileTree  FileTreeModel
+	diffView  DiffModel
 	statusBar StatusBar
 	width     int
 	height    int
@@ -67,6 +69,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.editor.Resize(a.width, a.height-1)
 		case viewFileTree:
 			a.fileTree.Resize(a.width, a.height-1)
+		case viewDiff:
+			a.diffView.Resize(a.width, a.height-1)
 		}
 		return a, nil
 
@@ -95,6 +99,19 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.statusBar.SetInfo("")
 		a.statusBar.SetCursor(0, 0)
 		return a, nil
+
+	case OpenDiffMsg:
+		a.state = viewDiff
+		a.diffView = NewDiffModel(msg.Diffs, a.width, a.height-1)
+		a.statusBar.SetMode("diff")
+		return a, a.diffView.Init()
+
+	case DiffReviewDoneMsg:
+		a.state = viewChat
+		a.statusBar.SetMode("chat")
+		var cmd tea.Cmd
+		a.chat, cmd = a.chat.Update(msg)
+		return a, cmd
 
 	case OpenFileTreeMsg:
 		a.state = viewFileTree
@@ -147,6 +164,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		a.fileTree, cmd = a.fileTree.Update(msg)
 		return a, cmd
+
+	case viewDiff:
+		var cmd tea.Cmd
+		a.diffView, cmd = a.diffView.Update(msg)
+		return a, cmd
 	}
 
 	return a, nil
@@ -164,6 +186,8 @@ func (a App) View() string {
 		content = a.editor.View()
 	case viewFileTree:
 		content = a.fileTree.View()
+	case viewDiff:
+		content = a.diffView.View()
 	}
 
 	statusView := a.statusBar.View()
