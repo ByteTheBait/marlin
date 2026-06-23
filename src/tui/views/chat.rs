@@ -519,10 +519,13 @@ impl ChatView {
                     lines.push(Line::from(""));
                 }
                 EntryRole::System => {
-                    lines.push(Line::from(Span::styled(
-                        format!("  - {}", entry.content),
-                        style_system(),
-                    )));
+                    for (i, l) in entry.content.lines().enumerate() {
+                        let prefix = if i == 0 { "  - " } else { "    " };
+                        lines.push(Line::from(Span::styled(
+                            format!("{prefix}{l}"),
+                            style_system(),
+                        )));
+                    }
                 }
                 EntryRole::Error => {
                     lines.push(Line::from(Span::styled(

@@ -38,6 +38,11 @@ impl Registry {
             OpenAiCompatProvider::new_moonshot(&ms_cfg.api_key, &ms_cfg.endpoint)
         ));
 
+        let or_cfg = cfg.providers.get("openrouter").cloned().unwrap_or_default();
+        providers.insert("openrouter".into(), Arc::new(
+            OpenAiCompatProvider::new_openrouter(&or_cfg.api_key, &or_cfg.endpoint)
+        ));
+
         let custom_cfg = cfg.providers.get("custom").cloned().unwrap_or_default();
         providers.insert("custom".into(), Arc::new(
             OpenAiCompatProvider::new_custom(&custom_cfg.api_key, &custom_cfg.endpoint)

@@ -115,6 +115,11 @@ impl Config {
             endpoint: "https://api.groq.com/openai/v1".into(),
             model: "llama-3.3-70b-versatile".into(),
         });
+        providers.insert("openrouter".into(), ProviderConfig {
+            api_key: String::new(),
+            endpoint: "https://openrouter.ai/api/v1".into(),
+            model: "anthropic/claude-sonnet-4-5".into(),
+        });
         providers.insert("custom".into(), ProviderConfig {
             api_key: String::new(),
             endpoint: "http://localhost:8080/v1".into(),

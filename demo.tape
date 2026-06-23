@@ -35,7 +35,7 @@ Enter
 Sleep 2200ms
 
 #  
-Type "/permissions"
+Type "/permissions "
 Sleep 500ms
 
 Type "skip"
@@ -49,7 +49,7 @@ Sleep 750ms
 # ── ask something real (Groq / qwen3-32b will respond) ───────────────────────
 Type "list every .rs file in src/"
 Enter
-Sleep 9000ms
+Sleep 15s
 
 # ── graceful exit ─────────────────────────────────────────────────────────────
 Ctrl+Q

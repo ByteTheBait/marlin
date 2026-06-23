@@ -74,6 +74,24 @@ impl OpenAiCompatProvider {
         }
     }
 
+    pub fn new_openrouter(api_key: &str, endpoint: &str) -> Self {
+        Self {
+            provider_name: "openrouter".into(),
+            endpoint: if endpoint.is_empty() {
+                "https://openrouter.ai/api/v1"
+            } else { endpoint }.into(),
+            api_key: api_key.into(),
+            model_list: vec![
+                "anthropic/claude-sonnet-4-5".into(),
+                "openai/gpt-4o".into(),
+                "google/gemini-2.0-flash-001".into(),
+                "meta-llama/llama-4-maverick".into(),
+                "deepseek/deepseek-r1".into(),
+                "mistralai/mistral-large".into(),
+            ],
+        }
+    }
+
     pub fn new_custom(api_key: &str, endpoint: &str) -> Self {
         Self {
             provider_name: "custom".into(),

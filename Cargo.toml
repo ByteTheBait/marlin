@@ -3,6 +3,13 @@ name = "marlin"
 version = "0.1.0"
 edition = "2021"
 
+[profile.release]
+opt-level = "z"     # Optimize aggressively for size (or "s" for a speed/size balance)
+strip = true        # Automatically remove all debug symbols and annotations
+lto = true          # Enable Link-Time Optimization across all dependency crates
+codegen-units = 1   # Reduce parallel compilation blocks to maximize size optimizations
+panic = "abort"   
+ 
 [dependencies]
 ratatui          = ">=0.30"
 crossterm        = "0.28"
