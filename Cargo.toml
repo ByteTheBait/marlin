@@ -1,0 +1,21 @@
+[package]
+name = "marlin"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ratatui          = "0.29"
+crossterm        = "0.28"
+tui-textarea     = { version = "0.7", features = ["crossterm"] }
+tokio            = { version = "1", features = ["full"] }
+reqwest          = { version = "0.12", features = ["stream", "json"] }
+serde            = { version = "1", features = ["derive"] }
+serde_json       = "1"
+futures          = "0.3"
+async-trait      = "0.1"
+dirs             = "5"
+unicode-width    = "0.2"
+chrono           = { version = "0.4", features = ["serde"] }
+uuid             = { version = "1", features = ["v4"] }
+anyhow           = "1"
+tachyonfx = "0.25.0"
