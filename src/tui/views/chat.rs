@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use chrono::{DateTime, Local};
 use ratatui::{
     buffer::Buffer,
@@ -6,6 +8,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Widget},
 };
+use tachyonfx::{fx, Effect, EffectRenderer, EffectTimer, Interpolation, Duration as FxDuration};
 use tui_textarea::TextArea;
 
 use crate::engine::{Action, UiUpdate};
@@ -80,6 +83,8 @@ pub struct ChatView {
     pub provider: String,
     pub model: String,
     pub frame: u64,
+    last_frame_time: Instant,
+    bubble_effect: Effect,
 }
 
 impl ChatView {
@@ -112,6 +117,11 @@ impl ChatView {
             provider: String::new(),
             model: String::new(),
             frame: 0,
+            last_frame_time: Instant::now(),
+            bubble_effect: fx::repeating(fx::ping_pong(fx::hsl_shift_fg(
+                [28.0, 0.0, 0.0],
+                EffectTimer::from_ms(900, Interpolation::SineInOut),
+            ))),
         }
     }
 
@@ -362,6 +372,8 @@ impl ChatView {
 
     pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
         self.frame = self.frame.wrapping_add(1);
+        let tick_ms = self.last_frame_time.elapsed().as_millis().min(50) as u32;
+        self.last_frame_time = Instant::now();
 
         let sugg_h: u16 = if !self.suggestions.is_empty() {
             (self.suggestions.len() as u16 + 2).min(10) // +2 for border
@@ -395,6 +407,14 @@ impl ChatView {
 
         if sugg_h > 0 {
             self.render_suggestions(chunks[1], buf);
+            // Pulse the bubble box with a hue-cycling effect while streaming
+            if self.streaming && self.suggestions.is_empty() {
+                buf.render_effect(
+                    &mut self.bubble_effect,
+                    chunks[1],
+                    FxDuration::from_millis(tick_ms),
+                );
+            }
         }
 
         self.render_separator(chunks[2], buf);

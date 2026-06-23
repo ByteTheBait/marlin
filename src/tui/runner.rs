@@ -91,7 +91,7 @@ pub fn run(
             let area = f.area();
             let buf = f.buffer_mut();
 
-            match &view {
+            match &mut view {
                 View::Splash(splash) => {
                     splash.render(area, buf);
                 }

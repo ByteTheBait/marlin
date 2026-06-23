@@ -1,77 +1,76 @@
 use std::time::{Duration, Instant};
 
 use ratatui::{
+    buffer::Buffer,
     layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Paragraph, Widget},
-    buffer::Buffer,
+};
+use tachyonfx::{
+    fx, Effect, EffectRenderer, EffectTimer, Interpolation, Motion,
+    Duration as FxDuration,
 };
 
 use crate::tui::styles::*;
 
-const SPLASH_DURATION: Duration = Duration::from_millis(1800);
-
-fn fade(r: u8, g: u8, b: u8, t: f64) -> Color {
-    let t = t.clamp(0.0, 1.0);
-    Color::Rgb(
-        (r as f64 * t) as u8,
-        (g as f64 * t) as u8,
-        (b as f64 * t) as u8,
-    )
-}
-
-fn ease_in(t: f64) -> f64 { t * t }
+const VISIBLE_MS: u64 = 2400; // how long before auto-transition
 
 pub struct SplashView {
     start: Instant,
+    last_tick: Instant,
+    effect: Effect,
 }
 
 impl SplashView {
     pub fn new() -> Self {
-        Self { start: Instant::now() }
+        // sweep down from top, revealing content row by row
+        let effect = fx::sweep_in(
+            Motion::UpToDown,
+            8,            // gradient length (cols)
+            3,            // randomness
+            Color::Black,
+            EffectTimer::from_ms(1400, Interpolation::CubicOut),
+        );
+        Self {
+            start: Instant::now(),
+            last_tick: Instant::now(),
+            effect,
+        }
     }
 
     pub fn is_done(&self) -> bool {
-        self.start.elapsed() >= SPLASH_DURATION
+        self.start.elapsed() >= Duration::from_millis(VISIBLE_MS)
     }
 
-    pub fn render(&self, area: Rect, buf: &mut Buffer) {
-        let elapsed = self.start.elapsed().as_millis() as f64;
-        let total = SPLASH_DURATION.as_millis() as f64;
-        let p = (elapsed / total).clamp(0.0, 1.0);
-
-        // Staggered fade-in: fish → name → subtitle → version
-        let fish_t = ease_in(((p - 0.00) / 0.40).clamp(0.0, 1.0));
-        let name_t = ease_in(((p - 0.30) / 0.40).clamp(0.0, 1.0));
-        let sub_t  = ease_in(((p - 0.60) / 0.40).clamp(0.0, 1.0));
-        let ver_t  = ease_in(((p - 0.75) / 0.25).clamp(0.0, 1.0));
-
+    pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
+        // Static content — tachyonfx drives the reveal animation
         let lines: Vec<Line> = vec![
             Line::from(Span::styled(
                 "><(((o>",
-                Style::default().fg(fade(0, 200, 200, fish_t)),
+                Style::default().fg(COL_AQUA),
             )),
             Line::from(""),
             Line::from(Span::styled(
                 "m a r l i n",
-                Style::default().fg(fade(190, 210, 255, name_t)).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Rgb(190, 210, 255))
+                    .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
             Line::from(Span::styled(
                 "ai coding assistant",
-                Style::default().fg(fade(100, 125, 150, sub_t)),
+                Style::default().fg(COL_SYSTEM),
             )),
             Line::from(""),
             Line::from(Span::styled(
                 "v0.1.0  -  rust edition",
-                Style::default().fg(fade(55, 70, 90, ver_t)),
+                Style::default().fg(Color::Rgb(50, 65, 85)),
             )),
         ];
 
         let total_h = lines.len() as u16;
-        let vert_pad = area.height.saturating_sub(total_h).saturating_sub(2) / 2;
-
+        let vert_pad = area.height.saturating_sub(total_h + 4) / 2;
         let inner = Rect {
             y: area.y + vert_pad,
             height: area.height.saturating_sub(vert_pad),
@@ -82,19 +81,20 @@ impl SplashView {
             .alignment(Alignment::Center)
             .render(inner, buf);
 
-        // "press any key" hint fades in near the end
-        if ver_t > 0.4 {
-            let hint_alpha = ((ver_t - 0.4) / 0.6).clamp(0.0, 1.0);
-            let hint_y = area.bottom().saturating_sub(2);
-            if hint_y > area.y {
-                let hint_rect = Rect { y: hint_y, height: 1, ..area };
-                Paragraph::new(Line::from(Span::styled(
-                    "press any key",
-                    Style::default().fg(fade(45, 60, 80, hint_alpha)),
-                )))
-                .alignment(Alignment::Center)
-                .render(hint_rect, buf);
-            }
+        // "press any key" hint — faint, near bottom
+        let hint_y = area.bottom().saturating_sub(2);
+        if hint_y > area.y {
+            Paragraph::new(Line::from(Span::styled(
+                "press any key",
+                Style::default().fg(Color::Rgb(32, 46, 65)),
+            )))
+            .alignment(Alignment::Center)
+            .render(Rect { y: hint_y, height: 1, ..area }, buf);
         }
+
+        // Drive the tachyonfx effect — must happen after widget renders
+        let tick_ms = self.last_tick.elapsed().as_millis().min(100) as u32;
+        self.last_tick = Instant::now();
+        buf.render_effect(&mut self.effect, area, FxDuration::from_millis(tick_ms));
     }
 }
