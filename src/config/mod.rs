@@ -28,6 +28,12 @@ pub struct Config {
     pub max_tokens: usize,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub work_dir: String,
+    /// Allow all shell commands without explicit /allow (autonomous mode)
+    #[serde(default)]
+    pub sandbox: bool,
+    /// Skip per-operation permission checks for file writes/edits
+    #[serde(default)]
+    pub skip_permissions: bool,
 }
 
 fn default_max_tokens() -> usize {
@@ -123,6 +129,8 @@ impl Config {
             system_prompt: String::new(),
             max_tokens: 4096,
             work_dir: wd,
+            sandbox: false,
+            skip_permissions: false,
         }
     }
 }

@@ -383,6 +383,7 @@ impl Engine {
             let allowed = self.allowed_commands.clone();
             let marlin_dir = self.marlin_dir.clone();
             let wd2 = work_dir.clone();
+            let sandbox = self.cfg.sandbox || self.cfg.skip_permissions;
 
             let idx_clone = self.code_index.clone();
 
@@ -399,7 +400,7 @@ impl Engine {
                     &name,
                     &input,
                     &work_dir,
-                    &|cmd| allowed.iter().any(|p| p == "*" || cmd.starts_with(p.as_str())),
+                    &|cmd| sandbox || allowed.iter().any(|p| p == "*" || cmd.starts_with(p.as_str())),
                     search_fn.as_deref(),
                     Some(&|abs_path: &str, tool: &str| {
                         snapshots::take(&marlin_dir, &wd2, abs_path, tool);
@@ -673,9 +674,9 @@ impl Engine {
                     sys!("Usage: /exec <shell command>");
                     return;
                 }
-                if !self.is_allowed(rest) {
+                if !self.cfg.sandbox && !self.cfg.skip_permissions && !self.is_allowed(rest) {
                     let first = rest.split_whitespace().next().unwrap_or(rest);
-                    err!(format!("Command not allowed: {rest:?}\nUse /allow {first} to permit it."));
+                    err!(format!("Command not allowed: {rest:?}\nUse /allow {first} or /sandbox on to permit it."));
                     return;
                 }
                 sys!(format!("Running: {rest}"));
@@ -707,6 +708,44 @@ impl Engine {
                 self.cfg.allowed_commands = self.allowed_commands.clone();
                 let _ = self.cfg.save();
                 sys!(format!("Allowed: {pattern:?}"));
+            }
+
+            "/sandbox" => {
+                match args.first().copied() {
+                    Some("on") => {
+                        self.cfg.sandbox = true;
+                        let _ = self.cfg.save();
+                        sys!("Sandbox on — all shell commands allowed autonomously.");
+                    }
+                    Some("off") => {
+                        self.cfg.sandbox = false;
+                        let _ = self.cfg.save();
+                        sys!("Sandbox off — shell commands require /allow.");
+                    }
+                    _ => {
+                        let state = if self.cfg.sandbox { "on" } else { "off" };
+                        sys!(format!("Sandbox: {state}  (use /sandbox on|off)"));
+                    }
+                }
+            }
+
+            "/permissions" => {
+                match args.first().copied() {
+                    Some("skip") => {
+                        self.cfg.skip_permissions = true;
+                        let _ = self.cfg.save();
+                        sys!("Permissions skipped — all operations proceed without checks.");
+                    }
+                    Some("require") => {
+                        self.cfg.skip_permissions = false;
+                        let _ = self.cfg.save();
+                        sys!("Permissions required — file and command checks enabled.");
+                    }
+                    _ => {
+                        let state = if self.cfg.skip_permissions { "skip" } else { "require" };
+                        sys!(format!("Permissions: {state}  (use /permissions skip|require)"));
+                    }
+                }
             }
 
             "/index" => {
@@ -930,8 +969,10 @@ fn help_text() -> String {
         ("/tokens <n>", "set max output tokens"),
         ("/attach <file>", "attach a file to your next message"),
         ("/detach [file]", "remove attachment(s)"),
-        ("/exec <cmd>", "run a shell command (must be /allow-ed first)"),
+        ("/exec <cmd>", "run a shell command (must be /allow-ed first, or /sandbox on)"),
         ("/allow <prefix>", "allow a shell command prefix (e.g. /allow npm)"),
+        ("/sandbox [on|off]", "allow all shell commands autonomously (persists)"),
+        ("/permissions [skip|require]", "skip or require permission checks (persists)"),
         ("/index [status]", "build (or check) the TF-IDF codebase search index"),
         ("/search <query>", "search the index and show ranked results with snippets"),
         ("/revert <file> [n]", "list file snapshots or restore one"),

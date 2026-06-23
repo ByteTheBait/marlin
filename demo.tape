@@ -27,12 +27,24 @@ Sleep 600ms
 # ── chat view — show slash-command autocomplete ───────────────────────────────
 Type "/"
 Sleep 600ms
-Type "h"
+Type "help"
 Sleep 900ms
 Tab
 Sleep 250ms
 Enter
 Sleep 2200ms
+
+#  
+Type "/permissions"
+Sleep 500ms
+
+Type "skip"
+
+Sleep 500ms
+
+Enter
+
+Sleep 750ms
 
 # ── ask something real (Groq / qwen3-32b will respond) ───────────────────────
 Type "list every .rs file in src/"
