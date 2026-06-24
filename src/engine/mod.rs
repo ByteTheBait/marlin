@@ -1,6 +1,8 @@
 pub mod context;
 pub mod loop_guard;
+pub mod tasks;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -20,6 +22,7 @@ use crate::snapshots;
 use crate::tools::{all_tools, executor};
 use context::{estimate_tokens, maybe_prune_history};
 use loop_guard::LoopGuard;
+use tasks::{TaskStatus, TaskStep};
 
 // ── Channel types ────────────────────────────────────────────────────────────
 
@@ -34,6 +37,12 @@ pub enum UiUpdate {
     GoalComplete { tool_count: usize },
     StatusUpdate(StatusInfo),
     IndexBuilt { files: usize, terms: usize },
+    /// Engine is paused waiting for user approval of a destructive command
+    AwaitingApproval { cmd: String },
+    /// Updated task list for the sidebar
+    TaskUpdate(Vec<TaskStep>),
+    /// Token budget update for the sidebar meter
+    TokenUsage { used: usize, budget: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -42,11 +51,15 @@ pub struct StatusInfo {
     pub model: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Action {
     SendMessage(String),
     SlashCommand(String),
     CancelStream,
+    /// User approved a destructive command in the modal
+    Approve,
+    /// User denied a destructive command in the modal
+    Deny,
     Quit,
 }
 
@@ -71,6 +84,11 @@ pub struct Engine {
     rate_limit_state: Option<RateLimitState>,
     loop_guard: LoopGuard,
     cancel_flag: Arc<std::sync::atomic::AtomicBool>,
+
+    /// Live task list for the sidebar
+    task_steps: Vec<TaskStep>,
+    /// Approximate token budget ceiling (from config or 100k default)
+    token_budget: usize,
 }
 
 impl Engine {
@@ -103,6 +121,8 @@ impl Engine {
             rate_limit_state: None,
             loop_guard: LoopGuard::new(),
             cancel_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            task_steps: vec![],
+            token_budget: 100_000,
         })
     }
 
@@ -135,6 +155,9 @@ impl Engine {
                     let _ = ui_tx.send(UiUpdate::SystemMsg("Cancelled.".into())).await;
                 }
 
+                // Approval actions received outside an agentic loop are no-ops
+                Action::Approve | Action::Deny => {}
+
                 Action::SendMessage(text) => {
                     self.input_history.add(&text);
                     let content = self.build_message_content(&text);
@@ -149,9 +172,10 @@ impl Engine {
                     self.attachments.clear();
                     self.active_goal = text;
                     self.tool_iterations = 0;
+                    self.task_steps.clear();
                     self.loop_guard.reset();
                     self.cancel_flag.store(false, std::sync::atomic::Ordering::SeqCst);
-                    self.agentic_loop(&ui_tx).await;
+                    self.agentic_loop(&ui_tx, &mut action_rx).await;
                 }
 
                 Action::SlashCommand(cmd) => {
@@ -162,7 +186,7 @@ impl Engine {
         }
     }
 
-    async fn agentic_loop(&mut self, ui_tx: &mpsc::Sender<UiUpdate>) {
+    async fn agentic_loop(&mut self, ui_tx: &mpsc::Sender<UiUpdate>, action_rx: &mut mpsc::Receiver<Action>) {
         const SAFETY_CAP: usize = 100;
 
         loop {
@@ -199,12 +223,22 @@ impl Engine {
                 }
             }
 
+            // LLM-based compaction first, then mechanical truncation fallback
+            self.maybe_compact_history(ui_tx).await;
+
             let (compressed, dropped) = maybe_prune_history(&mut self.history);
             if compressed > 0 || dropped > 0 {
                 let _ = ui_tx.send(UiUpdate::SystemMsg(format!(
                     "Context managed: compressed {compressed} messages, dropped {dropped} oldest turns."
                 ))).await;
             }
+
+            // Broadcast token usage to sidebar
+            let tok_used = estimate_tokens(&self.history, &self.effective_system_prompt());
+            let _ = ui_tx.send(UiUpdate::TokenUsage {
+                used: tok_used,
+                budget: self.token_budget,
+            }).await;
 
             let provider = match self.registry.get(&self.cfg.active_provider) {
                 Ok(p) => p,
@@ -291,47 +325,76 @@ impl Engine {
                     is_error: false,
                 });
 
-                // Notify TUI of each tool call
+                // Notify TUI of each tool call and add to task list
                 for tc in &tool_calls {
                     let _ = ui_tx.send(UiUpdate::ToolCall {
                         name: tc.name.clone(),
                         input: tc.input.clone(),
                     }).await;
+                    let desc = tool_short_desc(&tc.name, &tc.input);
+                    self.task_steps.push(TaskStep::tool_pending(&tc.name, desc));
                 }
+                let _ = ui_tx.send(UiUpdate::TaskUpdate(self.task_steps.clone())).await;
+
+                // Check for destructive commands and await user approval
+                let denied = self.run_approval_checks(&tool_calls, ui_tx, action_rx).await;
+                if self.cancel_flag.load(std::sync::atomic::Ordering::SeqCst) { return; }
 
                 // Execute tools (run in blocking thread)
-                let results = self.execute_tools(&tool_calls).await;
+                let results = self.execute_tools(&tool_calls, &denied).await;
 
-                for (tc, res) in tool_calls.iter().zip(results.iter()) {
+                // Track which task step index corresponds to this batch
+                let batch_task_start = self.task_steps.len().saturating_sub(tool_calls.len());
+
+                for (i, (tc, res)) in tool_calls.iter().zip(results.iter()).enumerate() {
                     let _ = ui_tx.send(UiUpdate::ToolResult {
                         name: tc.name.clone(),
                         output: res.output.clone(),
                         is_error: res.is_error,
                     }).await;
 
-                    // Loop guard check
-                    if let Some(intercept) = self.loop_guard.check(&tc.name, res.is_error) {
-                        let _ = ui_tx.send(UiUpdate::SystemMsg(intercept.clone())).await;
-                        // Inject intercept as a tool result so the model sees it
+                    // Update task step status
+                    let step_idx = batch_task_start + i;
+                    if step_idx < self.task_steps.len() {
+                        self.task_steps[step_idx].status = if res.is_error {
+                            TaskStatus::Failed
+                        } else {
+                            TaskStatus::Completed
+                        };
+                    }
+
+                    // File-hash-aware loop guard for edits
+                    let intercept = if tc.name == "edit_file" || tc.name == "write_file" {
+                        if let Some(path) = extract_file_path(&tc.input, &self.work_dir) {
+                            let content = std::fs::read(&path).unwrap_or_default();
+                            self.loop_guard.check_file_edit(&path, &content, res.is_error)
+                        } else {
+                            self.loop_guard.check(&tc.name, res.is_error)
+                        }
+                    } else {
+                        self.loop_guard.check(&tc.name, res.is_error)
+                    };
+
+                    if let Some(msg) = intercept {
+                        let _ = ui_tx.send(UiUpdate::SystemMsg(msg.clone())).await;
                         self.history.push(Message {
                             role: "tool".into(),
-                            content: intercept,
+                            content: msg,
                             tool_calls: vec![],
                             tool_use_id: tc.id.clone(),
                             tool_call_id: tc.id.clone(),
                             is_error: true,
                         });
-                        continue;
+                    } else {
+                        self.history.push(Message {
+                            role: "tool".into(),
+                            content: res.output.clone(),
+                            tool_calls: vec![],
+                            tool_use_id: tc.id.clone(),
+                            tool_call_id: tc.id.clone(),
+                            is_error: res.is_error,
+                        });
                     }
-
-                    self.history.push(Message {
-                        role: "tool".into(),
-                        content: res.output.clone(),
-                        tool_calls: vec![],
-                        tool_use_id: tc.id.clone(),
-                        tool_call_id: tc.id.clone(),
-                        is_error: res.is_error,
-                    });
 
                     // Keep index fresh after writes
                     if (tc.name == "write_file" || tc.name == "edit_file") && !res.is_error {
@@ -340,6 +403,17 @@ impl Engine {
                                 index::update_file(idx, &path);
                             }
                         }
+                    }
+                }
+
+                let _ = ui_tx.send(UiUpdate::TaskUpdate(self.task_steps.clone())).await;
+
+                // Write-Test-Fix: run verify_command after any file edit
+                let had_file_edit = tool_calls.iter().zip(results.iter())
+                    .any(|(tc, r)| (tc.name == "edit_file" || tc.name == "write_file") && !r.is_error);
+                if had_file_edit {
+                    if let Some(verify_result) = self.run_verify_command(ui_tx).await {
+                        self.history.push(verify_result);
                     }
                 }
 
@@ -374,16 +448,26 @@ impl Engine {
         }
     }
 
-    async fn execute_tools(&self, calls: &[ToolCall]) -> Vec<executor::ToolResult> {
+    async fn execute_tools(&self, calls: &[ToolCall], denied: &HashSet<String>) -> Vec<executor::ToolResult> {
         let mut results = Vec::new();
         for call in calls {
+            if denied.contains(&call.id) {
+                results.push(executor::ToolResult {
+                    output: "Command denied by user.".to_string(),
+                    is_error: true,
+                });
+                continue;
+            }
+
             let name = call.name.clone();
             let input = call.input.clone();
             let work_dir = self.work_dir.clone();
             let allowed = self.allowed_commands.clone();
             let marlin_dir = self.marlin_dir.clone();
             let wd2 = work_dir.clone();
+            let logs_dir = marlin_dir.join("logs");
             let sandbox = self.cfg.sandbox || self.cfg.skip_permissions;
+            let clean_env = self.cfg.clean_env;
 
             let idx_clone = self.code_index.clone();
 
@@ -405,6 +489,8 @@ impl Engine {
                     Some(&|abs_path: &str, tool: &str| {
                         snapshots::take(&marlin_dir, &wd2, abs_path, tool);
                     }),
+                    Some(&logs_dir),
+                    clean_env,
                 )
             }).await.unwrap_or_else(|e| executor::ToolResult {
                 output: e.to_string(),
@@ -414,6 +500,172 @@ impl Engine {
             results.push(result);
         }
         results
+    }
+
+    /// Returns the set of tool call IDs the user denied.
+    async fn run_approval_checks(
+        &mut self,
+        calls: &[ToolCall],
+        ui_tx: &mpsc::Sender<UiUpdate>,
+        action_rx: &mut mpsc::Receiver<Action>,
+    ) -> HashSet<String> {
+        let mut denied = HashSet::new();
+        for tc in calls {
+            if tc.name != "run_command" { continue; }
+            let cmd = extract_cmd_str(&tc.input);
+            if !is_destructive_cmd(&cmd) { continue; }
+
+            let _ = ui_tx.send(UiUpdate::AwaitingApproval { cmd }).await;
+
+            // Wait for approval response, ignoring unrelated actions
+            let approved = loop {
+                match action_rx.recv().await {
+                    Some(Action::Approve) => break true,
+                    Some(Action::Deny)    => break false,
+                    Some(Action::CancelStream) => {
+                        self.cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        break false;
+                    }
+                    None => break false,
+                    _ => {} // ignore other actions while modal is open
+                }
+            };
+            if !approved {
+                denied.insert(tc.id.clone());
+            }
+        }
+        denied
+    }
+
+    /// Run the configured verify_command after a file edit. Returns a Message to inject if
+    /// the command fails (or None if passing / not configured).
+    async fn run_verify_command(&self, ui_tx: &mpsc::Sender<UiUpdate>) -> Option<Message> {
+        let cmd = self.cfg.verify_command.as_deref()?.to_string();
+        let work_dir = self.work_dir.clone();
+        let clean_env = self.cfg.clean_env;
+
+        let _ = ui_tx.send(UiUpdate::SystemMsg(format!("[Marlin Verify] Running: {cmd}"))).await;
+
+        let result = match tokio::task::spawn_blocking(move || {
+            let mut command = std::process::Command::new("sh");
+            command.arg("-c").arg(&cmd).current_dir(&work_dir);
+            if clean_env {
+                command.env_clear();
+                for var in &["PATH", "HOME", "USER", "LANG", "CARGO_HOME", "RUSTUP_HOME"] {
+                    if let Ok(val) = std::env::var(var) { command.env(var, val); }
+                }
+            }
+            command.output()
+        }).await {
+            Ok(Ok(out)) => out,
+            _ => return None,
+        };
+
+        let stdout = String::from_utf8_lossy(&result.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&result.stderr).to_string();
+        let combined = format!("{stdout}{stderr}").trim().to_string();
+
+        if result.status.success() {
+            let _ = ui_tx.send(UiUpdate::SystemMsg("[Marlin Verify] ✓ Tests passed.".into())).await;
+            None
+        } else {
+            let snippet: String = combined.lines().rev().take(60)
+                .collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+            let msg = format!(
+                "[Marlin Verify] Tests failed (exit {}). Fix the errors before continuing.\n\n{}",
+                result.status.code().unwrap_or(-1),
+                snippet
+            );
+            let _ = ui_tx.send(UiUpdate::SystemMsg(format!(
+                "[Marlin Verify] ✗ Tests failed — injecting error into context."
+            ))).await;
+            Some(Message {
+                role: "user".into(),
+                content: msg,
+                tool_calls: vec![],
+                tool_use_id: String::new(),
+                tool_call_id: String::new(),
+                is_error: false,
+            })
+        }
+    }
+
+    /// LLM-based context compaction: summarize old turns when approaching token budget.
+    async fn maybe_compact_history(&mut self, ui_tx: &mpsc::Sender<UiUpdate>) {
+        const COMPACT_ABOVE: usize = 70_000;
+        const KEEP_RECENT: usize = 8;
+
+        if estimate_tokens(&self.history, "") < COMPACT_ABOVE { return; }
+        if self.history.len() <= KEEP_RECENT { return; }
+
+        let split = self.history.len() - KEEP_RECENT;
+        let old: Vec<Message> = self.history[..split].to_vec();
+
+        let provider = match self.registry.get(&self.cfg.active_provider) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        // Build a compaction prompt from the old messages
+        let mut ctx = String::new();
+        for m in &old {
+            let role = &m.role;
+            let snip = if m.content.len() > 800 { &m.content[..800] } else { &m.content };
+            ctx.push_str(&format!("[{role}]: {snip}\n\n"));
+        }
+
+        let summary_req = StreamRequest {
+            model: self.cfg.active_model.clone(),
+            messages: vec![Message {
+                role: "user".into(),
+                content: format!(
+                    "Summarize the following conversation fragment concisely for an AI coding assistant. \
+                    Focus on: files changed, technical decisions made, errors encountered, and current state. \
+                    Be dense and precise — this replaces the original context.\n\n{ctx}"
+                ),
+                tool_calls: vec![],
+                tool_use_id: String::new(),
+                tool_call_id: String::new(),
+                is_error: false,
+            }],
+            system_prompt: String::new(),
+            max_tokens: 1024,
+            tools: vec![],
+        };
+
+        let _ = ui_tx.send(UiUpdate::SystemMsg(
+            "Context compacting — summarizing older turns via LLM…".into()
+        )).await;
+
+        let mut stream = match provider.stream(summary_req).await {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        let mut summary = String::new();
+        while let Some(chunk) = stream.recv().await {
+            summary.push_str(&chunk.content);
+            if chunk.done { break; }
+        }
+
+        if summary.trim().is_empty() { return; }
+
+        // Replace old turns with the summary block
+        let recent = self.history.split_off(split);
+        self.history.clear();
+        self.history.push(Message {
+            role: "user".into(),
+            content: format!("[Marlin Context Summary]\n{}", summary.trim()),
+            tool_calls: vec![],
+            tool_use_id: String::new(),
+            tool_call_id: String::new(),
+            is_error: false,
+        });
+        self.history.extend(recent);
+
+        let _ = ui_tx.send(UiUpdate::SystemMsg(
+            format!("Context compacted: {split} older turns → 1 summary block.")
+        )).await;
     }
 
     fn effective_system_prompt(&self) -> String {
@@ -748,6 +1000,62 @@ impl Engine {
                 }
             }
 
+            "/verify" => {
+                if rest.is_empty() {
+                    match &self.cfg.verify_command {
+                        Some(cmd) => sys!(format!("Verify command: {cmd}  (use /verify off to clear)")),
+                        None => sys!("No verify command set.  Usage: /verify <shell-command>"),
+                    }
+                } else if rest == "off" || rest == "none" {
+                    self.cfg.verify_command = None;
+                    let _ = self.cfg.save();
+                    sys!("Verify command cleared.");
+                } else {
+                    self.cfg.verify_command = Some(rest.to_string());
+                    let _ = self.cfg.save();
+                    sys!(format!("Verify command set: {rest}"));
+                }
+            }
+
+            "/clean-env" => {
+                match args.first().copied() {
+                    Some("on") => {
+                        self.cfg.clean_env = true;
+                        let _ = self.cfg.save();
+                        sys!("Clean-env sandboxing ON — subprocesses get a stripped environment.");
+                    }
+                    Some("off") => {
+                        self.cfg.clean_env = false;
+                        let _ = self.cfg.save();
+                        sys!("Clean-env sandboxing OFF.");
+                    }
+                    _ => {
+                        let state = if self.cfg.clean_env { "on" } else { "off" };
+                        sys!(format!("Clean-env: {state}  (use /clean-env on|off)"));
+                    }
+                }
+            }
+
+            "/theme" => {
+                match args.first().copied() {
+                    Some("light") => {
+                        self.cfg.theme = "light".into();
+                        crate::tui::styles::set_light_theme(true);
+                        let _ = self.cfg.save();
+                        sys!("Theme set to light.");
+                    }
+                    Some("dark") => {
+                        self.cfg.theme = "dark".into();
+                        crate::tui::styles::set_light_theme(false);
+                        let _ = self.cfg.save();
+                        sys!("Theme set to dark.");
+                    }
+                    _ => {
+                        sys!(format!("Theme: {}  (use /theme dark|light)", self.cfg.theme));
+                    }
+                }
+            }
+
             "/index" => {
                 if args.first().copied() == Some("status") {
                     if let Some(idx) = &self.code_index {
@@ -955,6 +1263,50 @@ fn extract_file_path(input_json: &str, work_dir: &str) -> Option<String> {
     }
 }
 
+fn extract_cmd_str(input_json: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(input_json)
+        .ok()
+        .and_then(|v| v["command"].as_str().map(String::from))
+        .unwrap_or_default()
+}
+
+fn is_destructive_cmd(cmd: &str) -> bool {
+    const PATTERNS: &[&str] = &[
+        "rm ", "rm -", "rmdir",
+        "git push", "git reset --hard", "git clean", "git push -f", "git push --force",
+        "kill ", "pkill", "killall",
+        "shutdown", "reboot", "halt", "poweroff",
+        "dd ", "mkfs", "fdisk",
+        "DROP TABLE", "DROP DATABASE", "truncate",
+        ":(){:|:&};:",  // fork bomb
+    ];
+    let lower = cmd.to_lowercase();
+    PATTERNS.iter().any(|p| lower.contains(&p.to_lowercase()))
+}
+
+fn tool_short_desc(name: &str, input_json: &str) -> String {
+    let v = serde_json::from_str::<serde_json::Value>(input_json).unwrap_or_default();
+    match name {
+        "read_file" | "write_file" | "edit_file" => {
+            let path = v["path"].as_str().unwrap_or("?");
+            let basename = Path::new(path).file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.to_string());
+            format!("{name}: {basename}")
+        }
+        "run_command" => {
+            let cmd = v["command"].as_str().unwrap_or("?");
+            let short = cmd.split_whitespace().take(3).collect::<Vec<_>>().join(" ");
+            format!("run: {short}")
+        }
+        "search_codebase" => {
+            let q = v["query"].as_str().unwrap_or("?");
+            format!("search: {q}")
+        }
+        _ => name.to_string(),
+    }
+}
+
 fn help_text() -> String {
     let cmds = [
         ("/help", "show this help"),
@@ -973,6 +1325,9 @@ fn help_text() -> String {
         ("/allow <prefix>", "allow a shell command prefix (e.g. /allow npm)"),
         ("/sandbox [on|off]", "allow all shell commands autonomously (persists)"),
         ("/permissions [skip|require]", "skip or require permission checks (persists)"),
+        ("/verify [cmd|off]", "set shell command to run after every file edit (Write-Test-Fix)"),
+        ("/clean-env [on|off]", "strip subprocess environment for isolation (persists)"),
+        ("/theme [dark|light]", "switch UI theme (persists)"),
         ("/index [status]", "build (or check) the TF-IDF codebase search index"),
         ("/search <query>", "search the index and show ranked results with snippets"),
         ("/revert <file> [n]", "list file snapshots or restore one"),

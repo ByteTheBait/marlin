@@ -39,7 +39,7 @@ Set your API key on first run:
 
 ```
 /key claude sk-ant-...
-/key groq gsk_...
+/key openrouter sk-or-...
 /provider claude
 ```
 
@@ -55,14 +55,15 @@ Then just talk to it:
 
 ## Providers
 
-| Provider   | Command                              | Notes                     |
-|------------|--------------------------------------|---------------------------|
-| Claude     | `/provider claude`                   | Anthropic, prompt caching |
-| Groq       | `/provider groq`                     | Very fast inference       |
-| Ollama     | `/provider ollama`                   | Local, no key needed      |
-| Fireworks  | `/provider fireworks`                |                           |
-| Moonshot   | `/provider moonshot`                 |                           |
-| Custom     | `/endpoint custom https://...`       | Any OpenAI-compat API     |
+| Provider     | Command                              | Notes                     |
+|--------------|--------------------------------------|---------------------------|
+| Claude       | `/provider claude`                   | Anthropic, prompt caching |
+| OpenRouter   | `/provider openrouter`               | 100+ models via one key   |
+| Groq         | `/provider groq`                     | Very fast inference       |
+| Ollama       | `/provider ollama`                   | Local, no key needed      |
+| Fireworks    | `/provider fireworks`                |                           |
+| Moonshot     | `/provider moonshot`                 |                           |
+| Custom       | `/endpoint custom https://...`       | Any OpenAI-compat API     |
 
 Switch model: `/model claude-opus-4-5` (or any model your provider supports).
 
@@ -89,36 +90,43 @@ Every file touched by an AI edit gets snapshotted first — use `/revert` to res
 ## Commands
 
 ```
-/help                  show all commands
-/clear                 clear chat history
-/provider <name>       switch provider
-/model <name>          switch model
-/providers             list providers and their models
-/models                list models for current provider
-/key <provider> <key>  set an API key
-/endpoint <p> <url>    set a custom endpoint
-/system <text>         add a system prompt
-/tokens <n>            set max output tokens
+/help                    show all commands
+/clear                   clear chat history
+/provider <name>         switch provider
+/model <name>            switch model
+/providers               list providers and their models
+/models                  list models for current provider
+/key <provider> <key>    set an API key
+/endpoint <p> <url>      set a custom endpoint
+/system <text>           add a system prompt
+/tokens <n>              set max output tokens
 
-/attach <file>         attach a file to your next message
-/detach [file]         remove attachment(s)
-/exec <cmd>            run a shell command (/allow-ed prefix required)
-/allow <prefix>        whitelist a command prefix (e.g. /allow cargo)
+/attach <file>           attach a file to your next message
+/detach [file]           remove attachment(s)
+/exec <cmd>              run a shell command (/allow-ed prefix required)
+/allow <prefix>          whitelist a command prefix (e.g. /allow cargo)
+/sandbox [on|off]        allow all commands autonomously (no allowlist needed)
+/permissions [skip|req]  skip or require permission checks
 
-/index                 build the TF-IDF search index for this project
-/index status          show index stats
-/search <query>        search the index manually
+/verify [cmd|off]        run a command after every file edit (Write-Test-Fix loop)
+/clean-env [on|off]      strip subprocess environment for isolation
 
-/revert <file>         list snapshots for a file
-/revert <file> <n>     restore snapshot n
-/history               list saved sessions
-/history <n>           restore session n
-/resume                restore the most recent session
+/index                   build the TF-IDF search index for this project
+/index status            show index stats
+/search <query>          search the index manually
 
-/cat <file>            print file contents
-/ls [dir]              list directory
-/cd <dir>              change working directory
-/pwd                   show working directory
+/revert <file>           list snapshots for a file
+/revert <file> <n>       restore snapshot n
+/history                 list saved sessions
+/history <n>             restore session n
+/resume                  restore the most recent session
+
+/theme [dark|light]      switch UI theme
+
+/cat <file>              print file contents
+/ls [dir]                list directory
+/cd <dir>                change working directory
+/pwd                     show working directory
 ```
 
 ---
@@ -134,6 +142,52 @@ Every file touched by an AI edit gets snapshotted first — use `/revert` to res
 | `↑` / `↓`  | Scroll history / chat       |
 | `PgUp/Dn`  | Scroll chat by page         |
 | `Tab`      | Autocomplete slash command  |
+
+---
+
+## Sidebar
+
+On terminals ≥ 100 columns wide, a sidebar appears on the right with two panels:
+
+**Context Budget** — a live token-usage bar. Turns yellow past 70%, red past 90%. When the bar fills, Marlin automatically compacts old turns into a summary via the LLM before falling back to mechanical truncation.
+
+**Tasks** — a live task list showing every tool call made in the current goal, with status markers:
+
+```
+[x] read_file: main.rs        ← completed
+[>] edit_file: auth.rs        ← in progress
+[ ] run_command: cargo test   ← pending
+[!] edit_file: lib.rs         ← failed
+```
+
+---
+
+## Destructive command guard
+
+Before running any shell command matching a destructive pattern (`rm`, `git push --force`, `kill`, `dd`, `DROP TABLE`, etc.), Marlin pauses and shows a modal:
+
+```
+╔══ ⚠  Destructive Command ══╗
+║  rm -rf ./dist              ║
+║                             ║
+║  Allow this command to run? ║
+║  [y] Yes    [n] No          ║
+╚═════════════════════════════╝
+```
+
+Press `y` to approve or `n` to deny. The engine resumes immediately either way.
+
+---
+
+## Write-Test-Fix loop
+
+Set a verify command and Marlin will run it after every file edit, automatically feeding failures back to the model:
+
+```
+/verify cargo test
+```
+
+If tests fail, the last 60 lines of output are injected into the LLM's context and the agentic loop continues until they pass. Clear it with `/verify off`.
 
 ---
 
@@ -170,22 +224,33 @@ Two threads, clean separation:
 
 ```
 main thread          Tokio thread
-──────────           ────────────────────────────────────
-Ratatui TUI    ←──  UiUpdate  (stream chunks, tool events)
-               ──→  Action    (send message, slash command)
+──────────           ──────────────────────────────────────────
+Ratatui TUI    ←──  UiUpdate  (chunks, tool events, tasks, tokens)
+               ──→  Action    (send, slash cmd, approve, deny)
                     Engine: agentic loop, provider SSE,
-                            tool execution, context pruning
+                            tool execution, context management
 ```
 
-- **Context pruning**: compresses messages over 320 k chars, drops oldest over 400 k — keeps the last 6 turns intact.
-- **Loop guard**: intercepts after 3 identical failing tool calls.
-- **Safety cap**: 100 tool calls per goal maximum.
+**Context management (token-based):**
+- At ~70k tokens: LLM compaction — old turns summarized into one block via the configured provider
+- At ~80k tokens: mechanical compression — long messages trimmed to a tail snippet
+- At ~100k tokens: oldest turns dropped, keeping the last 8 intact
+
+**Loop guard:**
+- Intercepts after 3 identical failing tool calls
+- Tracks SHA-256 file hashes — warns the model if `edit_file` makes no actual change to a file
+
+**Safety:**
+- 100 tool-call cap per goal
+- Destructive command approval modal
+- Optional `env_clear()` subprocess isolation (`/clean-env on`)
+- Large command outputs (> 6k chars) spilled to `~/.marlin/logs/` with a pointer returned to the LLM
 
 ---
 
 ## Config
 
-Stored at `~/.marlin/config.json`. Keys, endpoints, active provider/model, allowed shell prefixes, and working directory are all persisted there.
+Stored at `~/.marlin/config.json`. All settings (keys, endpoints, provider, model, allowed commands, verify command, theme, sandbox flags) persist there automatically via slash commands — no manual editing needed.
 
 ---
 

@@ -34,10 +34,23 @@ pub struct Config {
     /// Skip per-operation permission checks for file writes/edits
     #[serde(default)]
     pub skip_permissions: bool,
+    /// UI theme: "dark" or "light"
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// Shell command to run after every file edit (Write-Test-Fix loop)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_command: Option<String>,
+    /// Strip environment variables from subprocesses (sandboxed isolation)
+    #[serde(default)]
+    pub clean_env: bool,
 }
 
 fn default_max_tokens() -> usize {
     4096
+}
+
+fn default_theme() -> String {
+    "dark".into()
 }
 
 pub fn marlin_dir() -> Result<PathBuf> {
@@ -136,6 +149,9 @@ impl Config {
             work_dir: wd,
             sandbox: false,
             skip_permissions: false,
+            theme: "dark".into(),
+            verify_command: None,
+            clean_env: false,
         }
     }
 }

@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph, Widget},
 };
 
-use crate::tui::styles::*;
+use crate::tui::styles::{self, *};
 
 #[derive(Clone)]
 pub struct CmdDef {
@@ -37,6 +37,9 @@ pub fn all_commands() -> Vec<CmdDef> {
         ("/allow",       "<prefix>",          "allow a shell command prefix"),
         ("/sandbox",     "[on|off]",          "allow all commands autonomously (persists)"),
         ("/permissions", "[skip|require]",    "skip or require permission checks (persists)"),
+        ("/verify",      "[cmd|off]",         "run command after every file edit (Write-Test-Fix)"),
+        ("/clean-env",   "[on|off]",          "strip subprocess environment for isolation"),
+        ("/theme",       "[dark|light]",      "switch UI theme (persists)"),
         ("/index",     "[status]",          "build TF-IDF search index"),
         ("/search",    "<query>",           "search the codebase index"),
         ("/revert",    "<file> [n]",        "show or restore file snapshots"),
@@ -100,11 +103,10 @@ impl<'a> Widget for SuggestionPanel<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         if self.streaming && self.suggestions.is_empty() {
             // ── Typing bubble ─────────────────────────────────────────────────
-            let border_style = Style::default().fg(Color::Rgb(25, 45, 80));
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(border_style);
+                .border_style(style_bubble_border());
 
             let inner = block.inner(area);
             block.render(area, buf);
@@ -114,7 +116,7 @@ impl<'a> Widget for SuggestionPanel<'a> {
                 let y = inner.y + inner.height / 2;
                 let line = Line::from(vec![
                     Span::styled("  marlin  ", style_assistant_label()),
-                    Span::styled(dots, Style::default().fg(Color::Rgb(0, 155, 155))),
+                    Span::styled(dots, style_bubble_dots()),
                 ]);
                 Paragraph::new(line).render(
                     Rect { y, height: 1, ..inner },
@@ -126,7 +128,7 @@ impl<'a> Widget for SuggestionPanel<'a> {
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::Rgb(30, 55, 100)));
+                .border_style(style_suggestion_border());
 
             let inner = block.inner(area);
             block.render(area, buf);
@@ -134,9 +136,9 @@ impl<'a> Widget for SuggestionPanel<'a> {
             let lines: Vec<Line> = self.suggestions.iter().map(|s| {
                 let exact = s.cmd == self.typed;
                 let cmd_style = if exact {
-                    Style::default().fg(COL_AQUA).add_modifier(Modifier::BOLD)
+                    style_suggestion_cmd_exact()
                 } else {
-                    Style::default().fg(COL_COBALT)
+                    style_suggestion_cmd()
                 };
 
                 let raw_len = s.cmd.len()
@@ -149,16 +151,10 @@ impl<'a> Widget for SuggestionPanel<'a> {
                 ];
                 if !s.args.is_empty() {
                     spans.push(Span::raw("  "));
-                    spans.push(Span::styled(
-                        s.args.clone(),
-                        Style::default().fg(COL_STEEL),
-                    ));
+                    spans.push(Span::styled(s.args.clone(), style_suggestion_args()));
                 }
                 spans.push(Span::raw(" ".repeat(pad)));
-                spans.push(Span::styled(
-                    s.desc.clone(),
-                    Style::default().fg(Color::Rgb(65, 85, 105)),
-                ));
+                spans.push(Span::styled(s.desc.clone(), style_suggestion_desc()));
                 Line::from(spans)
             }).collect();
 

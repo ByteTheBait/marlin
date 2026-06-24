@@ -1,7 +1,7 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Paragraph, Widget},
 };
@@ -31,9 +31,8 @@ impl StatusBar {
 
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
         // Fill background
-        let bg = Style::default().bg(COL_BG_STATUS);
         for x in area.left()..area.right() {
-            buf[(x, area.top())].set_style(bg);
+            buf[(x, area.top())].set_style(style_status_bg());
             buf[(x, area.top())].set_symbol(" ");
         }
 
@@ -43,37 +42,22 @@ impl StatusBar {
         // Mode chip
         left.push(Span::styled(
             format!(" {} ", self.mode.to_uppercase()),
-            Style::default()
-                .fg(COL_DEEP_OCEAN)
-                .bg(COL_COBALT)
-                .add_modifier(Modifier::BOLD),
+            style_status_chip(),
         ));
 
         // Provider · model
         if !self.provider.is_empty() {
             left.push(Span::styled("  ", Style::default()));
-            left.push(Span::styled(
-                self.provider.clone(),
-                Style::default().fg(COL_AQUA),
-            ));
-            left.push(Span::styled(
-                "  ·  ",
-                Style::default().fg(COL_SYSTEM),
-            ));
-            left.push(Span::styled(
-                self.model.clone(),
-                Style::default().fg(COL_STEEL),
-            ));
+            left.push(Span::styled(self.provider.clone(), style_status_provider()));
+            left.push(Span::styled("  ·  ", style_system()));
+            left.push(Span::styled(self.model.clone(), style_status_model()));
         }
 
         // Active tool
         if !self.active_tool.is_empty() {
             left.push(Span::styled("    ", Style::default()));
-            left.push(Span::styled("@ ", Style::default().fg(COL_AMBER)));
-            left.push(Span::styled(
-                self.active_tool.clone(),
-                Style::default().fg(Color::Rgb(175, 130, 40)),
-            ));
+            left.push(Span::styled("@ ", style_status_tool()));
+            left.push(Span::styled(self.active_tool.clone(), style_status_tool_name()));
         }
 
         // Right side: streaming indicator
@@ -83,7 +67,7 @@ impl StatusBar {
             "             "
         };
         let right_style = if self.streaming {
-            Style::default().fg(COL_AQUA)
+            style_status_streaming()
         } else {
             Style::default()
         };

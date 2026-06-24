@@ -15,6 +15,8 @@ use tokio::sync::mpsc;
 fn main() -> Result<()> {
     let cfg = config::Config::load()?;
 
+    tui::styles::set_light_theme(cfg.theme == "light");
+
     let mut eng = engine::Engine::new(cfg)?;
 
     let (action_tx, action_rx) = mpsc::channel::<engine::Action>(64);

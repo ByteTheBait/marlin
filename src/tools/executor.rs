@@ -18,6 +18,9 @@ impl ToolResult {
     }
 }
 
+// ~1 500 tokens of output before we spill to a log file
+const LOG_THRESHOLD_BYTES: usize = 6_000;
+// Hard cap on what we ever put into a tool result
 const MAX_OUTPUT_BYTES: usize = 40_000;
 
 pub fn execute(
@@ -27,6 +30,8 @@ pub fn execute(
     is_allowed: &dyn Fn(&str) -> bool,
     search_fn: Option<&dyn Fn(&str, usize) -> String>,
     snapshot_fn: Option<&dyn Fn(&str, &str)>,
+    logs_dir: Option<&Path>,
+    clean_env: bool,
 ) -> ToolResult {
     let input: HashMap<String, String> = match parse_input(input_json) {
         Some(m) => m,
@@ -67,7 +72,6 @@ pub fn execute(
                     );
                     return ToolResult::ok(header + &extracted);
                 }
-                // Symbol not found — return full file with notice
                 return ToolResult::ok(clamp(format!(
                     "// symbol {:?} not found — returning full file\n\n{}",
                     sym.trim(), content
@@ -122,11 +126,20 @@ pub fn execute(
                     "not permitted: {cmd:?} — use /allow {first} or /sandbox on for autonomous mode"
                 ));
             }
-            let output = Command::new("sh")
-                .arg("-c")
-                .arg(cmd)
-                .current_dir(work_dir)
-                .output();
+            let mut command = Command::new("sh");
+            command.arg("-c").arg(cmd).current_dir(work_dir);
+            if clean_env {
+                // Stripped environment — pass only the minimum required vars
+                command.env_clear();
+                for var in &["PATH", "HOME", "USER", "LANG", "LC_ALL",
+                              "CARGO_HOME", "RUSTUP_HOME", "GOPATH",
+                              "NODE_PATH", "npm_config_prefix"] {
+                    if let Ok(val) = std::env::var(var) {
+                        command.env(var, val);
+                    }
+                }
+            }
+            let output = command.output();
             match output {
                 Err(e) => ToolResult::err(e.to_string()),
                 Ok(out) => {
@@ -135,12 +148,40 @@ pub fn execute(
                         String::from_utf8_lossy(&out.stdout),
                         String::from_utf8_lossy(&out.stderr)
                     );
-                    let trimmed = clamp(combined.trim().to_string());
+                    let trimmed = combined.trim().to_string();
                     let result = if trimmed.is_empty() { "(no output)".to_string() } else { trimmed };
-                    if out.status.success() {
-                        ToolResult::ok(result)
+
+                    let (display, is_err) = if out.status.success() {
+                        (result, false)
                     } else {
-                        ToolResult::err(result)
+                        (result, true)
+                    };
+
+                    // Spill large outputs to a log file
+                    let display = if display.len() > LOG_THRESHOLD_BYTES {
+                        match spill_to_log(&display, logs_dir) {
+                            Some(log_path) => {
+                                let total_lines = display.lines().count();
+                                let snippet: String = display.lines()
+                                    .rev().take(40).collect::<Vec<_>>()
+                                    .into_iter().rev()
+                                    .collect::<Vec<_>>().join("\n");
+                                format!(
+                                    "[Marlin: truncated {} lines of output. Full log saved to {}]\n\
+                                    --- last 40 lines ---\n{}",
+                                    total_lines, log_path, snippet
+                                )
+                            }
+                            None => clamp(display),
+                        }
+                    } else {
+                        clamp(display)
+                    };
+
+                    if is_err {
+                        ToolResult::err(display)
+                    } else {
+                        ToolResult::ok(display)
                     }
                 }
             }
@@ -204,11 +245,19 @@ pub fn execute(
     }
 }
 
+fn spill_to_log(content: &str, logs_dir: Option<&Path>) -> Option<String> {
+    let dir = logs_dir?;
+    std::fs::create_dir_all(dir).ok()?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let path = dir.join(format!("cmd_{id}.log"));
+    std::fs::write(&path, content.as_bytes()).ok()?;
+    Some(path.to_string_lossy().to_string())
+}
+
 fn parse_input(json: &str) -> Option<HashMap<String, String>> {
     if let Ok(m) = serde_json::from_str::<HashMap<String, String>>(json) {
         return Some(m);
     }
-    // Fallback: coerce values to strings
     if let Ok(raw) = serde_json::from_str::<HashMap<String, serde_json::Value>>(json) {
         let mut out = HashMap::new();
         for (k, v) in raw {

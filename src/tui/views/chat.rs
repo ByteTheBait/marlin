@@ -6,14 +6,14 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Widget},
+    widgets::{Block, BorderType, Borders, Paragraph, Widget},
 };
 use tachyonfx::{fx, Effect, EffectRenderer, EffectTimer, Interpolation, Duration as FxDuration};
 use tui_textarea::TextArea;
 
 use crate::engine::{Action, UiUpdate};
 use crate::tui::{
-    styles::*,
+    styles::{self, *},
     widgets::suggestions::{CmdDef, SuggestionPanel, all_commands, filter_suggestions, tab_complete},
 };
 
@@ -72,6 +72,9 @@ pub struct ChatView {
     pub rate_limit_secs: u32,
     pub rate_limit_total: u32,
 
+    // Approval modal
+    pub approval_pending: Option<String>,
+
     // Scroll
     pub scroll_offset: u16,
     pub content_height: u16,
@@ -108,6 +111,7 @@ impl ChatView {
             rate_limited: false,
             rate_limit_secs: 0,
             rate_limit_total: 0,
+            approval_pending: None,
             scroll_offset: 0,
             content_height: 0,
             viewport_height: 1,
@@ -202,6 +206,11 @@ impl ChatView {
                 self.provider = info.provider;
                 self.model = info.model;
             }
+            UiUpdate::AwaitingApproval { cmd } => {
+                self.approval_pending = Some(cmd);
+            }
+            // TaskUpdate and TokenUsage are consumed by the runner/sidebar
+            UiUpdate::TaskUpdate(_) | UiUpdate::TokenUsage { .. } => {}
             UiUpdate::IndexBuilt { .. } => {}
         }
     }
@@ -232,6 +241,23 @@ impl ChatView {
 
     pub fn on_key(&mut self, key: crossterm::event::KeyEvent) -> Option<Action> {
         use crossterm::event::{KeyCode, KeyModifiers};
+
+        // Approval modal intercepts all input
+        if self.approval_pending.is_some() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    self.approval_pending = None;
+                    self.add_system("Command approved.");
+                    return Some(Action::Approve);
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.approval_pending = None;
+                    self.add_system("Command denied.");
+                    return Some(Action::Deny);
+                }
+                _ => return None,
+            }
+        }
 
         // Ctrl+C
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -382,9 +408,9 @@ impl ChatView {
         } else {
             0
         };
-        // Dynamic input height: 1 line normally, grows up to 3 for multi-line
-        let input_lines = self.textarea.lines().len().max(1);
-        let input_h = (input_lines as u16).min(3);
+        // Dynamic input height: 2 lines by default, expands up to 5 for multi-line (+2 for bubble border)
+        let input_lines = self.textarea.lines().len().max(2);
+        let input_h = (input_lines as u16).min(5) + 2;
         let sep_h = 1u16;
         let hint_h = 1u16;
         let vp_h = area.height
@@ -423,7 +449,7 @@ impl ChatView {
     }
 
     fn render_separator(&self, area: Rect, buf: &mut Buffer) {
-        let style = Style::default().fg(Color::Rgb(28, 42, 68));
+        let style = style_separator();
         for x in area.left()..area.right() {
             buf[(x, area.top())].set_symbol("-");
             buf[(x, area.top())].set_style(style);
@@ -456,7 +482,7 @@ impl ChatView {
             }
             all_lines.push(Line::from(vec![
                 Span::raw("  "),
-                Span::styled("|", Style::default().fg(COL_AQUA)),
+                Span::styled("|", style_prompt_active()),
             ]));
         }
 
@@ -499,7 +525,7 @@ impl ChatView {
                     for l in entry.content.lines() {
                         lines.push(Line::from(Span::styled(
                             format!("  {l}"),
-                            Style::default().fg(COL_USER),
+                            style_user_text(),
                         )));
                     }
                     lines.push(Line::from(""));
@@ -608,21 +634,30 @@ impl ChatView {
     }
 
     fn render_input(&self, area: Rect, buf: &mut Buffer) {
+        // Draw bubble border
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(style_input_bubble());
+        let inner = block.inner(area);
+        block.render(area, buf);
+
         let lines_raw = self.textarea.lines();
         let is_empty = lines_raw.is_empty() || (lines_raw.len() == 1 && lines_raw[0].is_empty());
 
-        // Prompt glyph — left 2 cols
-        let prompt_col = if self.streaming {
-            COL_SYSTEM
+        // Prompt glyph — left 2 cols inside bubble
+        let prompt_style = if self.streaming {
+            style_system()
         } else if is_empty {
-            Color::Rgb(50, 70, 100)
+            style_prompt_empty()
         } else {
-            COL_AQUA
+            style_prompt_active()
         };
 
+        let area = inner;
         if area.width > 2 {
             buf[(area.x, area.y)].set_symbol(">");
-            buf[(area.x, area.y)].set_style(Style::default().fg(prompt_col));
+            buf[(area.x, area.y)].set_style(prompt_style);
             buf[(area.x + 1, area.y)].set_symbol(" ");
         }
 
@@ -636,7 +671,7 @@ impl ChatView {
                 let x = text_x + i as u16;
                 if x < area.right() {
                     buf[(x, area.y)].set_symbol(&ch.to_string());
-                    buf[(x, area.y)].set_style(Style::default().fg(Color::Rgb(48, 62, 82)));
+                    buf[(x, area.y)].set_style(style_placeholder());
                 }
             }
             return;
@@ -656,7 +691,7 @@ impl ChatView {
                 let x = x0 + i as u16;
                 if x < area.right() {
                     buf[(x, y)].set_symbol(&ch.to_string());
-                    buf[(x, y)].set_style(Style::default().fg(COL_USER));
+                    buf[(x, y)].set_style(style_user_text());
                 }
             }
         }
@@ -669,7 +704,7 @@ impl ChatView {
             let cx = text_x + col as u16;
             let cy = area.y + last_row as u16;
             if cx < area.right() && cy < area.bottom() {
-                buf[(cx, cy)].set_style(Style::default().fg(COL_DEEP_OCEAN).bg(COL_AQUA));
+                buf[(cx, cy)].set_style(style_cursor());
             }
         }
     }
@@ -734,8 +769,7 @@ fn render_markdown(text: &str, _width: usize) -> Vec<Line<'static>> {
             continue;
         }
         if in_code_block {
-            lines.push(Line::from(Span::styled(raw_line.to_string(),
-                Style::default().fg(Color::Rgb(200, 220, 160)))));
+            lines.push(Line::from(Span::styled(raw_line.to_string(), style_code_block())));
             continue;
         }
         if raw_line.starts_with("# ") {
@@ -769,33 +803,30 @@ fn render_markdown(text: &str, _width: usize) -> Vec<Line<'static>> {
 fn parse_inline(line: &str) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut rest = line;
-    let base = Style::default().fg(Color::Rgb(220, 230, 240));
 
     while !rest.is_empty() {
         if let Some(pos) = rest.find("**") {
-            spans.push(Span::styled(rest[..pos].to_string(), base));
+            spans.push(Span::styled(rest[..pos].to_string(), style_inline_text()));
             rest = &rest[pos + 2..];
             if let Some(end) = rest.find("**") {
-                spans.push(Span::styled(rest[..end].to_string(),
-                    Style::default().fg(COL_USER).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(rest[..end].to_string(), style_inline_bold()));
                 rest = &rest[end + 2..];
             }
         } else if let Some(pos) = rest.find('`') {
-            spans.push(Span::styled(rest[..pos].to_string(), base));
+            spans.push(Span::styled(rest[..pos].to_string(), style_inline_text()));
             rest = &rest[pos + 1..];
             if let Some(end) = rest.find('`') {
-                spans.push(Span::styled(rest[..end].to_string(),
-                    Style::default().fg(Color::Rgb(200, 220, 160))));
+                spans.push(Span::styled(rest[..end].to_string(), style_inline_code()));
                 rest = &rest[end + 1..];
             }
         } else {
-            spans.push(Span::styled(rest.to_string(), base));
+            spans.push(Span::styled(rest.to_string(), style_inline_text()));
             break;
         }
     }
 
     if spans.is_empty() {
-        Line::from(Span::styled(line.to_string(), base))
+        Line::from(Span::styled(line.to_string(), style_inline_text()))
     } else {
         Line::from(spans)
     }

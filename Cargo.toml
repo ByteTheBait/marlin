@@ -26,3 +26,4 @@ chrono           = { version = "0.4", features = ["serde"] }
 uuid             = { version = "1", features = ["v4"] }
 anyhow           = "1"
 tachyonfx = "0.25.0"
+sha2       = "0.10"
