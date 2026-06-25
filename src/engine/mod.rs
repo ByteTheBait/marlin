@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use crate::config::Config;
+use crate::config::{AstMode, Config, SandboxMode};
 use crate::history::{
     self, InputHistory, Session, SessionEntry, from_session_message, to_session_message,
 };
@@ -43,6 +43,8 @@ pub enum UiUpdate {
     TaskUpdate(Vec<TaskStep>),
     /// Token budget update for the sidebar meter
     TokenUsage { used: usize, budget: usize },
+    /// AST mode changed — drives the status bar badge
+    AstMode(AstMode),
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +91,8 @@ pub struct Engine {
     task_steps: Vec<TaskStep>,
     /// Approximate token budget ceiling (from config or 100k default)
     token_budget: usize,
+    /// AST-driven context mode
+    ast_mode: AstMode,
 }
 
 impl Engine {
@@ -105,6 +109,7 @@ impl Engine {
             .unwrap_or_default().to_string_lossy().to_string();
         let session = Some(Session::new(&project_name, &work_dir));
 
+        let ast_mode = cfg.ast_mode.clone();
         Ok(Self {
             cfg,
             registry,
@@ -123,6 +128,7 @@ impl Engine {
             cancel_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             task_steps: vec![],
             token_budget: 100_000,
+            ast_mode,
         })
     }
 
@@ -138,6 +144,9 @@ impl Engine {
         })).await;
 
         let _ = ui_tx.send(UiUpdate::SystemMsg("marlin ready  /help for commands".into())).await;
+        if self.ast_mode != AstMode::Off {
+            let _ = ui_tx.send(UiUpdate::AstMode(self.ast_mode.clone())).await;
+        }
         if let Some(idx) = &self.code_index {
             let _ = ui_tx.send(UiUpdate::SystemMsg(
                 format!("index: {} files, {} terms", idx.file_count, idx.term_count)
@@ -175,6 +184,12 @@ impl Engine {
                     self.task_steps.clear();
                     self.loop_guard.reset();
                     self.cancel_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                    // Broadcast token count immediately so the sidebar isn't stale while waiting
+                    let tok = estimate_tokens(&self.history, &self.effective_system_prompt());
+                    let _ = ui_tx.send(UiUpdate::TokenUsage {
+                        used: tok,
+                        budget: self.token_budget,
+                    }).await;
                     self.agentic_loop(&ui_tx, &mut action_rx).await;
                 }
 
@@ -253,7 +268,7 @@ impl Engine {
                 messages: self.history.clone(),
                 system_prompt: self.effective_system_prompt(),
                 max_tokens: self.cfg.max_tokens,
-                tools: all_tools(),
+                tools: all_tools(&self.ast_mode),
             };
 
             let mut stream = match provider.stream(req).await {
@@ -267,20 +282,30 @@ impl Engine {
             let mut text_buf = String::new();
             let mut done_chunk = None;
 
-            while let Some(chunk) = stream.recv().await {
-                if self.cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
-                    if !text_buf.is_empty() {
-                        let _ = ui_tx.send(UiUpdate::StreamChunk("\n\n*[cancelled]*".into())).await;
+            // Poll every 50 ms so Ctrl+C is felt within one frame rather than
+            // waiting for the next network chunk (which can take seconds).
+            'recv: loop {
+                let chunk = tokio::select! {
+                    maybe = stream.recv() => match maybe {
+                        Some(c) => c,
+                        None => break 'recv,
+                    },
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                        if self.cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                            if !text_buf.is_empty() {
+                                let _ = ui_tx.send(UiUpdate::StreamChunk("\n\n*[cancelled]*".into())).await;
+                            }
+                            return;
+                        }
+                        continue 'recv;
                     }
-                    return;
-                }
+                };
 
                 if chunk.retry_after > 0 {
                     let _ = ui_tx.send(UiUpdate::RateLimited { secs: chunk.retry_after }).await;
                     tokio::time::sleep(Duration::from_secs(chunk.retry_after as u64)).await;
                     let _ = ui_tx.send(UiUpdate::SystemMsg("Rate limit cleared — resuming...".into())).await;
-                    // Retry from outer loop
-                    break;
+                    break 'recv;
                 }
 
                 if let Some(e) = chunk.error {
@@ -298,7 +323,7 @@ impl Engine {
                         self.rate_limit_state = Some(rl);
                     }
                     done_chunk = Some(chunk.tool_calls);
-                    break;
+                    break 'recv;
                 }
             }
 
@@ -466,8 +491,10 @@ impl Engine {
             let marlin_dir = self.marlin_dir.clone();
             let wd2 = work_dir.clone();
             let logs_dir = marlin_dir.join("logs");
-            let sandbox = self.cfg.sandbox || self.cfg.skip_permissions;
+            let sandbox = self.cfg.sandbox_mode.allows_all() || self.cfg.skip_permissions;
             let clean_env = self.cfg.clean_env;
+            let ast_mode = self.ast_mode.clone();
+            let sandbox_mode = self.cfg.sandbox_mode.clone();
 
             let idx_clone = self.code_index.clone();
 
@@ -491,6 +518,8 @@ impl Engine {
                     }),
                     Some(&logs_dir),
                     clean_env,
+                    ast_mode,
+                    &sandbox_mode,
                 )
             }).await.unwrap_or_else(|e| executor::ToolResult {
                 output: e.to_string(),
@@ -706,6 +735,28 @@ impl Engine {
         if !self.cfg.system_prompt.is_empty() {
             s.push_str("\nAdditional instructions:\n");
             s.push_str(&self.cfg.system_prompt);
+        }
+
+        match &self.ast_mode {
+            AstMode::Off => {}
+            AstMode::SExpr => {
+                s.push_str("\n## AST Context Mode: SEXPR\n");
+                s.push_str("File reads are delivered as compact S-expression AST representations produced by `ast-compiler decompile --format sexpr`, not raw source text.\n");
+                s.push_str("The root token is `(meta ...)` followed by the recursive node tree.\n");
+                s.push_str("Parse the tree structurally when reasoning about code. When you need to write changes, use write_file or edit_file with reconstructed source text.\n");
+            }
+            AstMode::Harness => {
+                s.push_str("\n## AST Context Mode: HARNESS\n");
+                s.push_str("You have three specialized AST tools available. Prefer them over read_file/edit_file for all code understanding and mutation:\n");
+                s.push_str("  ast_skeleton  <file>                  — API surface map (signatures, no bodies). Always start here.\n");
+                s.push_str("  ast_get_node  <file> <node_id>        — Full JSON for one node. Use after skeleton to inspect a target.\n");
+                s.push_str("  ast_mutate    <file> <node_id> <op>   — Structural edit + automatic recompile + optimize.\n\n");
+                s.push_str("CRITICAL RULES:\n");
+                s.push_str("  1. Do NOT use edit_file for code mutations — use ast_mutate instead.\n");
+                s.push_str("  2. ast_mutate operations are: str-replace (old_json/new_json), append-stmt (statement_json), insert-before (index/statement_json).\n");
+                s.push_str("  3. Always supply lang and source_file to ast_mutate so the source is regenerated deterministically.\n");
+                s.push_str("  4. JSON values in node directives must be valid JSON, not source-code strings.\n");
+            }
         }
 
         s
@@ -926,9 +977,9 @@ impl Engine {
                     sys!("Usage: /exec <shell command>");
                     return;
                 }
-                if !self.cfg.sandbox && !self.cfg.skip_permissions && !self.is_allowed(rest) {
+                if self.cfg.sandbox_mode == SandboxMode::Off && !self.cfg.skip_permissions && !self.is_allowed(rest) {
                     let first = rest.split_whitespace().next().unwrap_or(rest);
-                    err!(format!("Command not allowed: {rest:?}\nUse /allow {first} or /sandbox on to permit it."));
+                    err!(format!("Command not allowed: {rest:?}\nUse /allow {first} or /sandbox [permissive|docker|gvisor]."));
                     return;
                 }
                 sys!(format!("Running: {rest}"));
@@ -964,19 +1015,44 @@ impl Engine {
 
             "/sandbox" => {
                 match args.first().copied() {
-                    Some("on") => {
-                        self.cfg.sandbox = true;
-                        let _ = self.cfg.save();
-                        sys!("Sandbox on — all shell commands allowed autonomously.");
-                    }
                     Some("off") => {
-                        self.cfg.sandbox = false;
+                        self.cfg.sandbox_mode = SandboxMode::Off;
                         let _ = self.cfg.save();
                         sys!("Sandbox off — shell commands require /allow.");
                     }
+                    Some("on") | Some("permissive") => {
+                        self.cfg.sandbox_mode = SandboxMode::Permissive;
+                        let _ = self.cfg.save();
+                        sys!("Sandbox permissive — all commands allowed, running directly on host.");
+                    }
+                    Some("mxc") => {
+                        if !executor::detect_mxc() {
+                            err!(format!(
+                                "MXC binary ({}) not found in PATH. \
+                                Install from https://github.com/microsoft/mxc and retry.",
+                                executor::mxc_binary_name()
+                            ));
+                        } else {
+                            self.cfg.sandbox_mode = SandboxMode::Mxc;
+                            let _ = self.cfg.save();
+                            sys!(format!(
+                                "Sandbox mxc — AI commands run via Microsoft eXecution Containers \
+                                ({}, network blocked, only workdir mounted rw).",
+                                executor::mxc_binary_name()
+                            ));
+                        }
+                    }
                     _ => {
-                        let state = if self.cfg.sandbox { "on" } else { "off" };
-                        sys!(format!("Sandbox: {state}  (use /sandbox on|off)"));
+                        let mode = self.cfg.sandbox_mode.label();
+                        let mxc = if executor::detect_mxc() {
+                            format!("available ({})", executor::mxc_binary_name())
+                        } else {
+                            format!("not found ({})", executor::mxc_binary_name())
+                        };
+                        sys!(format!(
+                            "Sandbox: {mode}  |  mxc: {mxc}\n\
+                             /sandbox [off|permissive|mxc]"
+                        ));
                     }
                 }
             }
@@ -1014,6 +1090,34 @@ impl Engine {
                     self.cfg.verify_command = Some(rest.to_string());
                     let _ = self.cfg.save();
                     sys!(format!("Verify command set: {rest}"));
+                }
+            }
+
+            "/ast" => {
+                let new_mode = match args.first().copied() {
+                    Some("off")     => Some(AstMode::Off),
+                    Some("sexpr")   => Some(AstMode::SExpr),
+                    Some("harness") => Some(AstMode::Harness),
+                    Some(other) => {
+                        err!(format!("Unknown AST mode {other:?} — use: off, sexpr, harness"));
+                        return;
+                    }
+                    None => None,
+                };
+                if let Some(mode) = new_mode {
+                    let label = mode.label();
+                    self.ast_mode = mode.clone();
+                    self.cfg.ast_mode = mode.clone();
+                    let _ = self.cfg.save();
+                    let _ = ui_tx.send(UiUpdate::AstMode(mode)).await;
+                    match label {
+                        "off"     => sys!("AST mode off — file reads use raw text."),
+                        "sexpr"   => sys!("AST mode: SEXPR — file reads deliver compact S-expression ASTs via ast-compiler."),
+                        "harness" => sys!("AST mode: HARNESS — ast_skeleton / ast_get_node / ast_mutate tools now active."),
+                        _         => {}
+                    }
+                } else {
+                    sys!(format!("AST mode: {}  (use /ast off|sexpr|harness)", self.ast_mode.label()));
                 }
             }
 
@@ -1303,6 +1407,19 @@ fn tool_short_desc(name: &str, input_json: &str) -> String {
             let q = v["query"].as_str().unwrap_or("?");
             format!("search: {q}")
         }
+        "ast_skeleton" => {
+            let f = v["file"].as_str().unwrap_or("?");
+            format!("ast_skeleton: {}", Path::new(f).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| f.into()))
+        }
+        "ast_get_node" => {
+            let id = v["node_id"].as_str().unwrap_or("?");
+            format!("ast_get_node: {id}")
+        }
+        "ast_mutate" => {
+            let op = v["operation"].as_str().unwrap_or("?");
+            let id = v["node_id"].as_str().unwrap_or("?");
+            format!("ast_mutate: {op} @ {id}")
+        }
         _ => name.to_string(),
     }
 }
@@ -1323,9 +1440,10 @@ fn help_text() -> String {
         ("/detach [file]", "remove attachment(s)"),
         ("/exec <cmd>", "run a shell command (must be /allow-ed first, or /sandbox on)"),
         ("/allow <prefix>", "allow a shell command prefix (e.g. /allow npm)"),
-        ("/sandbox [on|off]", "allow all shell commands autonomously (persists)"),
+        ("/sandbox [off|permissive|mxc]", "command isolation: off=require /allow, permissive=allow all, mxc=MS eXecution Containers"),
         ("/permissions [skip|require]", "skip or require permission checks (persists)"),
         ("/verify [cmd|off]", "set shell command to run after every file edit (Write-Test-Fix)"),
+        ("/ast [off|sexpr|harness]", "AST context mode: off=raw, sexpr=S-expr reads, harness=JSON surgery (persists)"),
         ("/clean-env [on|off]", "strip subprocess environment for isolation (persists)"),
         ("/theme [dark|light]", "switch UI theme (persists)"),
         ("/index [status]", "build (or check) the TF-IDF codebase search index"),

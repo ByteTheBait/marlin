@@ -6,6 +6,7 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
+use crate::config::AstMode;
 use crate::tui::styles::*;
 
 pub struct StatusBar {
@@ -15,6 +16,7 @@ pub struct StatusBar {
     pub active_tool: String,
     pub streaming: bool,
     pub width: u16,
+    pub ast_mode: AstMode,
 }
 
 impl StatusBar {
@@ -26,73 +28,58 @@ impl StatusBar {
             active_tool: String::new(),
             streaming: false,
             width,
+            ast_mode: AstMode::Off,
         }
     }
 
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
-        // Fill background
-        for x in area.left()..area.right() {
-            buf[(x, area.top())].set_style(style_status_bg());
-            buf[(x, area.top())].set_symbol(" ");
-        }
-
-        // Left side spans
         let mut left: Vec<Span> = Vec::new();
 
-        // Mode chip
-        left.push(Span::styled(
-            format!(" {} ", self.mode.to_uppercase()),
-            style_status_chip(),
-        ));
+        left.push(Span::styled(format!(" {} ", self.mode.to_uppercase()), style_status_chip()));
 
-        // Provider · model
         if !self.provider.is_empty() {
-            left.push(Span::styled("  ", Style::default()));
+            left.push(Span::raw("  "));
             left.push(Span::styled(self.provider.clone(), style_status_provider()));
             left.push(Span::styled("  ·  ", style_system()));
             left.push(Span::styled(self.model.clone(), style_status_model()));
         }
 
-        // Active tool
         if !self.active_tool.is_empty() {
-            left.push(Span::styled("    ", Style::default()));
+            left.push(Span::raw("    "));
             left.push(Span::styled("@ ", style_status_tool()));
             left.push(Span::styled(self.active_tool.clone(), style_status_tool_name()));
         }
 
-        // Right side: streaming indicator
-        let right_text = if self.streaming {
-            "  streaming  "
+        match &self.ast_mode {
+            AstMode::Off => {}
+            AstMode::SExpr => {
+                left.push(Span::raw("    "));
+                left.push(Span::styled(" SEXPR ", style_status_ast_sexpr()));
+            }
+            AstMode::Harness => {
+                left.push(Span::raw("    "));
+                left.push(Span::styled(" HARNESS ", style_status_ast_harness()));
+            }
+        }
+
+        let (right_text, right_style) = if self.streaming {
+            ("  streaming  ", style_status_streaming())
         } else {
-            "             "
-        };
-        let right_style = if self.streaming {
-            style_status_streaming()
-        } else {
-            Style::default()
+            ("             ", Style::default())
         };
 
-        // Compute padding between left and right
         let left_len: usize = left.iter().map(|s| s.content.chars().count()).sum();
         let right_len = right_text.chars().count();
-        let pad = (self.width as usize).saturating_sub(left_len + right_len);
+        let pad = (area.width as usize).saturating_sub(left_len + right_len);
 
-        let mut all: Vec<Span> = left;
+        let mut all = left;
         all.push(Span::raw(" ".repeat(pad)));
         all.push(Span::styled(right_text, right_style));
 
-        // Write spans into buffer
-        let y = area.top();
-        let mut x = area.left();
-        for span in &all {
-            let available = area.right().saturating_sub(x) as usize;
-            if available == 0 { break; }
-            for ch in span.content.chars().take(available) {
-                if x >= area.right() { break; }
-                buf[(x, y)].set_symbol(&ch.to_string());
-                buf[(x, y)].set_style(span.style);
-                x += 1;
-            }
-        }
+        // Paragraph fills the entire row with the base bg before drawing spans,
+        // so no cell escapes without the correct background color.
+        Paragraph::new(Line::from(all))
+            .style(style_status_bg())
+            .render(area, buf);
     }
 }

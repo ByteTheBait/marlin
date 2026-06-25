@@ -1,15 +1,24 @@
 pub mod executor;
 pub mod extract;
 
+use crate::config::AstMode;
 use crate::providers::{ToolDef, ToolProp};
 
-pub fn all_tools() -> Vec<ToolDef> {
-    vec![
+pub fn all_tools(ast_mode: &AstMode) -> Vec<ToolDef> {
+    let mut tools = vec![
         ToolDef {
             name: "read_file".into(),
-            description: "Read a file. Supply 'function' to extract only that named function \
-                or method instead of the whole file — much more token-efficient for large files. \
-                Supports Rust, Go, Python, and C-family languages.".into(),
+            description: {
+                let base = "Read a file. Supply 'function' to extract only that named function \
+                    or method instead of the whole file — much more token-efficient for large files. \
+                    Supports Rust, Go, Python, and C-family languages.";
+                match ast_mode {
+                    AstMode::SExpr => format!(
+                        "{base} [AST/SEXPR active: output is a compact S-expression AST, not raw source.]"
+                    ),
+                    _ => base.into(),
+                }
+            },
             properties: vec![
                 ToolProp { name: "path".into(), ty: "string".into(), description: "File path, relative to working directory or absolute.".into() },
                 ToolProp { name: "function".into(), ty: "string".into(), description: "Optional: name of a function or method to extract instead of reading the whole file.".into() },
@@ -70,5 +79,90 @@ pub fn all_tools() -> Vec<ToolDef> {
             ],
             required: vec!["query".into()],
         },
-    ]
+    ];
+
+    // Inject AST harness tools only when harness mode is active
+    if *ast_mode == AstMode::Harness {
+        tools.push(ToolDef {
+            name: "ast_skeleton".into(),
+            description: "Fetch the structural skeleton of an AST JSON file — signatures and type \
+                surfaces only, no function bodies. Use this first to orient yourself cheaply before \
+                diving into individual nodes.".into(),
+            properties: vec![
+                ToolProp {
+                    name: "file".into(), ty: "string".into(),
+                    description: "Path to the .ast.json file.".into(),
+                },
+            ],
+            required: vec!["file".into()],
+        });
+
+        tools.push(ToolDef {
+            name: "ast_get_node".into(),
+            description: "Fetch the full JSON structure of a single AST node by its node_id. Use \
+                after ast_skeleton to inspect the body of a specific function, type, or statement.".into(),
+            properties: vec![
+                ToolProp {
+                    name: "file".into(), ty: "string".into(),
+                    description: "Path to the .ast.json file.".into(),
+                },
+                ToolProp {
+                    name: "node_id".into(), ty: "string".into(),
+                    description: "The node identifier from the skeleton output.".into(),
+                },
+            ],
+            required: vec!["file".into(), "node_id".into()],
+        });
+
+        tools.push(ToolDef {
+            name: "ast_mutate".into(),
+            description: "Mutate an AST node using a structural JSON directive, then automatically \
+                recompile and optimize the source file. Supported operations: \
+                'str-replace' (requires old_json, new_json), \
+                'append-stmt' (requires statement_json), \
+                'insert-before' (requires index, statement_json). \
+                Always provide 'lang' and 'source_file' so the source can be regenerated.".into(),
+            properties: vec![
+                ToolProp {
+                    name: "file".into(), ty: "string".into(),
+                    description: "Path to the .ast.json file.".into(),
+                },
+                ToolProp {
+                    name: "node_id".into(), ty: "string".into(),
+                    description: "Target node identifier.".into(),
+                },
+                ToolProp {
+                    name: "operation".into(), ty: "string".into(),
+                    description: "One of: str-replace, append-stmt, insert-before.".into(),
+                },
+                ToolProp {
+                    name: "old_json".into(), ty: "string".into(),
+                    description: "JSON value to replace (str-replace only).".into(),
+                },
+                ToolProp {
+                    name: "new_json".into(), ty: "string".into(),
+                    description: "Replacement JSON value (str-replace only).".into(),
+                },
+                ToolProp {
+                    name: "statement_json".into(), ty: "string".into(),
+                    description: "Statement JSON to append or insert (append-stmt / insert-before).".into(),
+                },
+                ToolProp {
+                    name: "index".into(), ty: "string".into(),
+                    description: "Insertion index (insert-before only).".into(),
+                },
+                ToolProp {
+                    name: "lang".into(), ty: "string".into(),
+                    description: "Target language for recompilation (e.g. rust, go, python).".into(),
+                },
+                ToolProp {
+                    name: "source_file".into(), ty: "string".into(),
+                    description: "Output source file path to regenerate after mutation.".into(),
+                },
+            ],
+            required: vec!["file".into(), "node_id".into(), "operation".into()],
+        });
+    }
+
+    tools
 }

@@ -26,6 +26,10 @@ ln -sf $PWD/target/release/marlin /usr/local/bin/marlin
 
 **Requirements:** Rust 1.75+, a terminal that supports 24-bit color.
 
+**Optional external tools** (required for AST mode):
+- `ast-compiler` — for `/ast sexpr` (S-expression file reads)
+- `ast-harness` — for `/ast harness` (structural JSON surgery)
+
 ---
 
 ## Quick start
@@ -55,15 +59,15 @@ Then just talk to it:
 
 ## Providers
 
-| Provider     | Command                              | Notes                     |
-|--------------|--------------------------------------|---------------------------|
-| Claude       | `/provider claude`                   | Anthropic, prompt caching |
-| OpenRouter   | `/provider openrouter`               | 100+ models via one key   |
-| Groq         | `/provider groq`                     | Very fast inference       |
-| Ollama       | `/provider ollama`                   | Local, no key needed      |
-| Fireworks    | `/provider fireworks`                |                           |
-| Moonshot     | `/provider moonshot`                 |                           |
-| Custom       | `/endpoint custom https://...`       | Any OpenAI-compat API     |
+| Provider     | Command                              | Default model                              | Notes                     |
+|--------------|--------------------------------------|--------------------------------------------|---------------------------|
+| Claude       | `/provider claude`                   | claude-sonnet-4-5                          | Anthropic, prompt caching |
+| OpenRouter   | `/provider openrouter`               | anthropic/claude-sonnet-4-5                | 100+ models via one key   |
+| Groq         | `/provider groq`                     | llama-3.3-70b-versatile                    | Very fast inference       |
+| Ollama       | `/provider ollama`                   | llama3                                     | Local, no key needed      |
+| Fireworks    | `/provider fireworks`                | accounts/fireworks/models/llama-v3-70b-instruct |                      |
+| Moonshot     | `/provider moonshot`                 | moonshot-v1-8k                             |                           |
+| Custom       | `/endpoint custom https://...`       | default                                    | Any OpenAI-compat API     |
 
 Switch model: `/model claude-opus-4-5` (or any model your provider supports).
 
@@ -87,46 +91,86 @@ Every file touched by an AI edit gets snapshotted first — use `/revert` to res
 
 ---
 
+## AST Mode
+
+AST mode changes how the LLM perceives and edits source files. Toggle it with `/ast`:
+
+### `/ast off` (default)
+
+Raw text mode. `read_file` returns the file's source as-is.
+
+### `/ast sexpr`
+
+Token-efficient exploration. `read_file` calls `ast-compiler decompile --format sexpr` instead of returning raw source, delivering a compact S-expression AST. Useful for navigating large files without burning through the context budget.
+
+### `/ast harness`
+
+Full structural surgery mode. Three additional LLM tools become active:
+
+| Tool           | What it does                                                                 |
+|----------------|------------------------------------------------------------------------------|
+| `ast_skeleton` | Returns the API surface of a file (signatures only, no bodies) — start here  |
+| `ast_get_node` | Returns full JSON for a single AST node by ID                                |
+| `ast_mutate`   | Applies a structural edit to an AST node and auto-recompiles the source file |
+
+`ast_mutate` supports three operations:
+
+- **`str-replace`** — replace an AST node's JSON representation (`old_json` → `new_json`)
+- **`append-stmt`** — append a statement JSON inside a node
+- **`insert-before`** — insert a statement JSON before an index inside a node
+
+After a mutation, Marlin automatically runs `ast-compiler compile` to regenerate the source file, then attempts an `optimize` pass. The LLM is instructed not to use `edit_file` while harness mode is active.
+
+AST mode persists across sessions (stored in `~/.marlin/config.json`).
+
+---
+
 ## Commands
 
 ```
-/help                    show all commands
-/clear                   clear chat history
-/provider <name>         switch provider
-/model <name>            switch model
-/providers               list providers and their models
-/models                  list models for current provider
-/key <provider> <key>    set an API key
-/endpoint <p> <url>      set a custom endpoint
-/system <text>           add a system prompt
-/tokens <n>              set max output tokens
+/help                         show all commands
+/clear                        clear chat history and attachments
+/provider <name>              switch provider (claude/ollama/groq/fireworks/moonshot/openrouter/custom)
+/p <name>                     switch provider (short form)
+/model <name>                 switch model
+/m <name>                     switch model (short form)
+/providers                    list all providers and their models
+/models                       list models for current provider
+/key <provider> <key>         set an API key
+/endpoint <provider> <url>    set a custom API endpoint
+/system <prompt>              set additional system prompt
+/sys <prompt>                 set system prompt (short form)
+/tokens [n]                   get or set max output tokens
 
-/attach <file>           attach a file to your next message
-/detach [file]           remove attachment(s)
-/exec <cmd>              run a shell command (/allow-ed prefix required)
-/allow <prefix>          whitelist a command prefix (e.g. /allow cargo)
-/sandbox [on|off]        allow all commands autonomously (no allowlist needed)
-/permissions [skip|req]  skip or require permission checks
+/attach <file>                attach a file to your next message
+/a <file>                     attach file (short form)
+/detach [file]                remove attachment(s)
+/exec <cmd>                   run a shell command (/allow-ed prefix required, or /sandbox on)
+/allow <prefix>               whitelist a command prefix (e.g. /allow cargo)
+/sandbox [on|off]             allow all shell commands autonomously (persists)
+/permissions [skip|require]   skip or require permission checks (persists)
 
-/verify [cmd|off]        run a command after every file edit (Write-Test-Fix loop)
-/clean-env [on|off]      strip subprocess environment for isolation
+/verify [cmd|off]             run a command after every file edit (Write-Test-Fix loop)
+/ast [off|sexpr|harness]      AST context mode (persists)
+/clean-env [on|off]           strip subprocess environment for isolation (persists)
 
-/index                   build the TF-IDF search index for this project
-/index status            show index stats
-/search <query>          search the index manually
+/index                        build the TF-IDF search index for this project
+/index status                 show index stats
+/search <query>               search the index manually
 
-/revert <file>           list snapshots for a file
-/revert <file> <n>       restore snapshot n
-/history                 list saved sessions
-/history <n>             restore session n
-/resume                  restore the most recent session
+/revert <file>                list snapshots for a file
+/revert <file> <n>            restore snapshot n
+/history                      list saved sessions
+/history <n>                  restore session n
+/history clear                delete all saved sessions
+/resume                       restore the most recent session
 
-/theme [dark|light]      switch UI theme
+/theme [dark|light]           switch UI theme (persists)
 
-/cat <file>              print file contents
-/ls [dir]                list directory
-/cd <dir>                change working directory
-/pwd                     show working directory
+/cat <file>                   print file contents
+/ls [dir]                     list directory
+/cd <dir>                     change working directory
+/pwd                          show working directory
 ```
 
 ---
@@ -147,7 +191,7 @@ Every file touched by an AI edit gets snapshotted first — use `/revert` to res
 
 ## Sidebar
 
-On terminals ≥ 100 columns wide, a sidebar appears on the right with two panels:
+On terminals 100+ columns wide, a sidebar appears on the right with two panels:
 
 **Context Budget** — a live token-usage bar. Turns yellow past 70%, red past 90%. When the bar fills, Marlin automatically compacts old turns into a summary via the LLM before falling back to mechanical truncation.
 
@@ -250,7 +294,7 @@ Ratatui TUI    ←──  UiUpdate  (chunks, tool events, tasks, tokens)
 
 ## Config
 
-Stored at `~/.marlin/config.json`. All settings (keys, endpoints, provider, model, allowed commands, verify command, theme, sandbox flags) persist there automatically via slash commands — no manual editing needed.
+Stored at `~/.marlin/config.json`. All settings (keys, endpoints, provider, model, allowed commands, verify command, theme, AST mode, sandbox flags) persist there automatically via slash commands — no manual editing needed.
 
 ---
 

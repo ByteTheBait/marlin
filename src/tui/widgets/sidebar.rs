@@ -78,11 +78,15 @@ impl Widget for Sidebar {
             y += 1;
         }
 
-        // Token count label
+        // Token count label — show raw count below 1 000 so it never displays as "0k"
         if y < inner.bottom() {
-            let used_k = self.token_used / 1000;
-            let budget_k = self.token_budget / 1000;
-            let label = format!("~{used_k}k / {budget_k}k tokens");
+            let used_str = if self.token_used >= 1_000 {
+                format!("{}k", self.token_used / 1_000)
+            } else {
+                self.token_used.to_string()
+            };
+            let budget_k = self.token_budget / 1_000;
+            let label = format!("~{used_str} / {budget_k}k tokens");
             let span = Span::styled(label, style_system());
             buf.set_span(inner.x, y, &span, inner.width);
             y += 1;

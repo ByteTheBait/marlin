@@ -6,9 +6,11 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph, Widget},
+    layout::Size,
+    widgets::{Block, BorderType, Borders, Paragraph, StatefulWidget, Widget},
 };
 use tachyonfx::{fx, Effect, EffectRenderer, EffectTimer, Interpolation, Duration as FxDuration};
+use tui_scrollview::{ScrollView, ScrollViewState};
 use tui_textarea::TextArea;
 
 use crate::engine::{Action, UiUpdate};
@@ -76,7 +78,7 @@ pub struct ChatView {
     pub approval_pending: Option<String>,
 
     // Scroll
-    pub scroll_offset: u16,
+    pub scroll_state: ScrollViewState,
     pub content_height: u16,
     pub viewport_height: u16,
     pub at_bottom: bool,
@@ -112,7 +114,7 @@ impl ChatView {
             rate_limit_secs: 0,
             rate_limit_total: 0,
             approval_pending: None,
-            scroll_offset: 0,
+            scroll_state: ScrollViewState::default(),
             content_height: 0,
             viewport_height: 1,
             at_bottom: true,
@@ -209,8 +211,8 @@ impl ChatView {
             UiUpdate::AwaitingApproval { cmd } => {
                 self.approval_pending = Some(cmd);
             }
-            // TaskUpdate and TokenUsage are consumed by the runner/sidebar
-            UiUpdate::TaskUpdate(_) | UiUpdate::TokenUsage { .. } => {}
+            // TaskUpdate, TokenUsage, and AstMode are consumed by the runner/sidebar
+            UiUpdate::TaskUpdate(_) | UiUpdate::TokenUsage { .. } | UiUpdate::AstMode(_) => {}
             UiUpdate::IndexBuilt { .. } => {}
         }
     }
@@ -225,9 +227,8 @@ impl ChatView {
     }
 
     fn maybe_scroll_to_bottom(&mut self) {
-        if self.at_bottom {
-            self.scroll_offset = self.content_height.saturating_sub(self.viewport_height);
-        }
+        // The scroll_state is driven to the bottom inside render_viewport when at_bottom is true.
+        // Calling this just keeps the at_bottom flag set; the position is applied at render time.
     }
 
     fn update_suggestions(&mut self) {
@@ -320,34 +321,41 @@ impl ChatView {
         // Viewport scroll
         if key.code == KeyCode::Up {
             self.at_bottom = false;
-            self.scroll_offset = self.scroll_offset.saturating_sub(3);
+            self.scroll_state.scroll_up();
+            self.scroll_state.scroll_up();
+            self.scroll_state.scroll_up();
             return None;
         }
         if key.code == KeyCode::Down {
+            self.scroll_state.scroll_down();
+            self.scroll_state.scroll_down();
+            self.scroll_state.scroll_down();
             let max = self.content_height.saturating_sub(self.viewport_height);
-            self.scroll_offset = (self.scroll_offset + 3).min(max);
-            self.at_bottom = self.scroll_offset >= max;
+            self.at_bottom = self.scroll_state.offset().y >= max;
             return None;
         }
         if key.code == KeyCode::PageUp {
             self.at_bottom = false;
-            self.scroll_offset = self.scroll_offset.saturating_sub(self.viewport_height);
+            for _ in 0..self.viewport_height {
+                self.scroll_state.scroll_up();
+            }
             return None;
         }
         if key.code == KeyCode::PageDown {
+            for _ in 0..self.viewport_height {
+                self.scroll_state.scroll_down();
+            }
             let max = self.content_height.saturating_sub(self.viewport_height);
-            self.scroll_offset = (self.scroll_offset + self.viewport_height).min(max);
-            self.at_bottom = self.scroll_offset >= max;
+            self.at_bottom = self.scroll_state.offset().y >= max;
             return None;
         }
         if key.code == KeyCode::End {
             self.at_bottom = true;
-            self.scroll_offset = self.content_height.saturating_sub(self.viewport_height);
-            return None;
+            return None; // render_viewport will pin to bottom
         }
         if key.code == KeyCode::Home {
             self.at_bottom = false;
-            self.scroll_offset = 0;
+            self.scroll_state = ScrollViewState::default();
             return None;
         }
 
@@ -457,17 +465,9 @@ impl ChatView {
     }
 
     fn render_viewport(&mut self, area: Rect, buf: &mut Buffer) {
-        let lines = self.build_lines(area.width as usize);
-        self.content_height = lines.len() as u16;
+        self.viewport_height = area.height;
 
-        let max_scroll = self.content_height.saturating_sub(area.height);
-        if self.at_bottom {
-            self.scroll_offset = max_scroll;
-        } else {
-            self.scroll_offset = self.scroll_offset.min(max_scroll);
-        }
-
-        let mut all_lines = lines;
+        let mut all_lines = self.build_lines(area.width as usize);
 
         // Live streaming buffer
         if self.streaming && !self.stream_buf.is_empty() {
@@ -499,14 +499,29 @@ impl ChatView {
             ]));
         }
 
-        self.content_height = all_lines.len() as u16;
-        let max_scroll = self.content_height.saturating_sub(area.height);
-        if self.at_bottom { self.scroll_offset = max_scroll; }
-        self.scroll_offset = self.scroll_offset.min(max_scroll);
+        let content_height = all_lines.len() as u16;
+        self.content_height = content_height;
 
-        Paragraph::new(all_lines)
-            .scroll((self.scroll_offset, 0))
-            .render(area, buf);
+        // Pin to bottom: manually set the y offset so the last line is always visible
+        // when at_bottom is true (must be done before ScrollView clamps the offset).
+        if self.at_bottom {
+            let max_y = content_height.saturating_sub(area.height);
+            self.scroll_state = ScrollViewState::default();
+            for _ in 0..max_y {
+                self.scroll_state.scroll_down();
+            }
+        }
+
+        // Build the virtual scroll canvas and render lines into it
+        let virtual_size = Size { width: area.width, height: content_height.max(1) };
+        let mut scroll_view = ScrollView::new(virtual_size);
+        scroll_view.render_widget(
+            Paragraph::new(all_lines).style(style_app_bg()),
+            Rect { x: 0, y: 0, width: area.width, height: content_height.max(1) },
+        );
+
+        // Render the scroll view (clips to the viewport and draws the scrollbar)
+        scroll_view.render(area, buf, &mut self.scroll_state);
     }
 
     fn build_lines(&self, width: usize) -> Vec<Line<'static>> {

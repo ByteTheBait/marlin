@@ -17,6 +17,7 @@ use ratatui::{
 };
 use tokio::sync::mpsc;
 
+use crate::config::AstMode;
 use crate::engine::{Action, UiUpdate};
 use crate::engine::tasks::TaskStep;
 use crate::tui::{
@@ -60,6 +61,9 @@ pub fn run(
                         UiUpdate::StatusUpdate(info) => {
                             status_bar.provider = info.provider.clone();
                             status_bar.model = info.model.clone();
+                        }
+                        UiUpdate::AstMode(mode) => {
+                            status_bar.ast_mode = mode.clone();
                         }
                         UiUpdate::ToolCall { name, .. } => {
                             status_bar.active_tool = name.clone();

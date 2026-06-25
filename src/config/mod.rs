@@ -4,6 +4,60 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AstMode {
+    Off,
+    SExpr,
+    Harness,
+}
+
+impl Default for AstMode {
+    fn default() -> Self { Self::Off }
+}
+
+impl AstMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::SExpr => "sexpr",
+            Self::Harness => "harness",
+        }
+    }
+}
+
+/// How shell commands from the AI are executed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxMode {
+    /// Commands require explicit /allow approval (default).
+    Off,
+    /// All commands allowed; run directly on the host (old "sandbox: true" behaviour).
+    Permissive,
+    /// Commands run via Microsoft eXecution Containers (MXC) — no outbound network,
+    /// only the workdir mounted read-write.
+    Mxc,
+}
+
+impl Default for SandboxMode {
+    fn default() -> Self { Self::Off }
+}
+
+impl SandboxMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Permissive => "permissive",
+            Self::Mxc => "mxc",
+        }
+    }
+
+    /// True if all commands are implicitly allowed (no per-command /allow needed).
+    pub fn allows_all(&self) -> bool {
+        !matches!(self, Self::Off)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -28,10 +82,13 @@ pub struct Config {
     pub max_tokens: usize,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub work_dir: String,
-    /// Allow all shell commands without explicit /allow (autonomous mode)
-    #[serde(default)]
+    /// Legacy field — migrated to sandbox_mode on first load.
+    #[serde(default, skip_serializing)]
     pub sandbox: bool,
-    /// Skip per-operation permission checks for file writes/edits
+    /// How AI-issued shell commands are sandboxed.
+    #[serde(default)]
+    pub sandbox_mode: SandboxMode,
+    /// Skip per-operation permission checks for file writes/edits.
     #[serde(default)]
     pub skip_permissions: bool,
     /// UI theme: "dark" or "light"
@@ -40,9 +97,12 @@ pub struct Config {
     /// Shell command to run after every file edit (Write-Test-Fix loop)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_command: Option<String>,
-    /// Strip environment variables from subprocesses (sandboxed isolation)
+    /// Strip environment variables from subprocesses (clean-env isolation)
     #[serde(default)]
     pub clean_env: bool,
+    /// AST-driven context mode (off / sexpr / harness)
+    #[serde(default)]
+    pub ast_mode: AstMode,
 }
 
 fn default_max_tokens() -> usize {
@@ -67,10 +127,13 @@ impl Config {
         if path.exists() {
             let data = std::fs::read_to_string(&path)?;
             let loaded: Self = serde_json::from_str(&data)?;
-            // Merge: loaded values override defaults, but fill missing providers
             let mut merged = loaded;
             for (k, v) in Self::defaults().providers {
                 merged.providers.entry(k).or_insert(v);
+            }
+            // Migrate legacy sandbox=true → Permissive
+            if merged.sandbox && merged.sandbox_mode == SandboxMode::Off {
+                merged.sandbox_mode = SandboxMode::Permissive;
             }
             cfg = merged;
         } else {
@@ -148,10 +211,12 @@ impl Config {
             max_tokens: 4096,
             work_dir: wd,
             sandbox: false,
+            sandbox_mode: SandboxMode::Off,
             skip_permissions: false,
             theme: "dark".into(),
             verify_command: None,
             clean_env: false,
+            ast_mode: AstMode::Off,
         }
     }
 }

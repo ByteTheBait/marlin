@@ -39,7 +39,7 @@ fn col_amber() -> Color {
     if is_light() { Color::Rgb(150, 90, 15) } else { Color::Rgb(215, 155, 45) }
 }
 fn col_bg_status() -> Color {
-    if is_light() { Color::Rgb(215, 230, 248) } else { Color::Rgb(14, 20, 38) }
+    if is_light() { Color::Rgb(215, 230, 248) } else { Color::Rgb(20, 30, 68) }
 }
 fn col_deep_ocean() -> Color {
     // Used as foreground on coloured chips — white in both themes
@@ -57,7 +57,7 @@ pub const COL_SYSTEM: Color      = Color::Rgb(100, 125, 150);
 pub const COL_USER: Color        = Color::Rgb(200, 215, 245);
 pub const COL_ASSISTANT: Color   = Color::Rgb(0, 200, 200);
 pub const COL_AMBER: Color       = Color::Rgb(215, 155, 45);
-pub const COL_BG_STATUS: Color   = Color::Rgb(14, 20, 38);
+pub const COL_BG_STATUS: Color   = Color::Rgb(20, 30, 68);
 
 // ── Named style functions (theme-aware) ──────────────────────────────────────
 
@@ -244,6 +244,22 @@ pub fn style_status_tool_name() -> Style {
 
 pub fn style_status_streaming() -> Style {
     Style::default().fg(col_aqua())
+}
+
+/// SEXPR badge — blue background
+pub fn style_status_ast_sexpr() -> Style {
+    Style::default()
+        .fg(col_deep_ocean())
+        .bg(col_cobalt())
+        .add_modifier(Modifier::BOLD)
+}
+
+/// HARNESS badge — magenta background
+pub fn style_status_ast_harness() -> Style {
+    Style::default()
+        .fg(Color::Rgb(255, 255, 255))
+        .bg(if is_light() { Color::Rgb(130, 30, 140) } else { Color::Rgb(190, 60, 210) })
+        .add_modifier(Modifier::BOLD)
 }
 
 pub fn style_user_text() -> Style {
