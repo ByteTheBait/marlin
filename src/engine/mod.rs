@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use crate::config::{AstMode, Config, SandboxMode};
+use crate::config::{AstMode, Config, ModelTier, SandboxMode};
 use crate::history::{
     self, InputHistory, Session, SessionEntry, from_session_message, to_session_message,
 };
@@ -18,6 +18,7 @@ use crate::index::{self, Index};
 use crate::providers::{
     Message, Provider, RateLimitState, StreamRequest, ToolCall, ToolCallMsg, registry::Registry,
 };
+use crate::skills::{self, Skill, SkillDef};
 use crate::snapshots;
 use crate::tools::{all_tools, executor};
 use context::{estimate_tokens, maybe_prune_history};
@@ -45,6 +46,12 @@ pub enum UiUpdate {
     TokenUsage { used: usize, budget: usize },
     /// AST mode changed — drives the status bar badge
     AstMode(AstMode),
+    /// Skills loaded on startup — TUI uses these for typing suggestions.
+    SkillsLoaded(Vec<SkillDef>),
+    /// Skill keyword matches for the most recent user message.
+    SkillMatches(Vec<(String, String)>),
+    /// Difficulty score and selected tier for the current request.
+    TierSelected { score: u8, tier: String },
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +100,15 @@ pub struct Engine {
     token_budget: usize,
     /// AST-driven context mode
     ast_mode: AstMode,
+
+    /// Loaded skill definitions
+    skills: Vec<Skill>,
+    /// Provider/model selected for the current agentic request (may be tier-routed)
+    req_provider: String,
+    req_model: String,
+    /// Backup provider/model to use if req_provider is rate-limited
+    req_backup_provider: String,
+    req_backup_model: String,
 }
 
 impl Engine {
@@ -110,6 +126,13 @@ impl Engine {
         let session = Some(Session::new(&project_name, &work_dir));
 
         let ast_mode = cfg.ast_mode.clone();
+        let req_provider = cfg.active_provider.clone();
+        let req_model = cfg.active_model.clone();
+
+        // Install built-in skills if not present, then load all.
+        skills::install_defaults(&marlin_dir);
+        let loaded_skills = skills::load_all(&marlin_dir);
+
         Ok(Self {
             cfg,
             registry,
@@ -129,6 +152,11 @@ impl Engine {
             task_steps: vec![],
             token_budget: 100_000,
             ast_mode,
+            skills: loaded_skills,
+            req_provider,
+            req_model,
+            req_backup_provider: String::new(),
+            req_backup_model: String::new(),
         })
     }
 
@@ -153,6 +181,13 @@ impl Engine {
             )).await;
         }
 
+        // Send skills to TUI for suggestion panel.
+        let skill_defs: Vec<SkillDef> = self.skills.iter().map(SkillDef::from).collect();
+        let _ = ui_tx.send(UiUpdate::SkillsLoaded(skill_defs)).await;
+
+        // Spawn nightly skill-suggestion daemon.
+        self.maybe_spawn_daemon(ui_tx.clone());
+
         while let Some(action) = action_rx.recv().await {
             match action {
                 Action::Quit => break,
@@ -169,6 +204,17 @@ impl Engine {
 
                 Action::SendMessage(text) => {
                     self.input_history.add(&text);
+
+                    // Emit skill matches so TUI can show relevant skills.
+                    let skill_defs: Vec<SkillDef> = self.skills.iter().map(SkillDef::from).collect();
+                    let matches: Vec<(String, String)> = skills::suggest::match_skills(&text, &skill_defs)
+                        .into_iter()
+                        .map(|m| (m.name, m.description))
+                        .collect();
+                    if !matches.is_empty() {
+                        let _ = ui_tx.send(UiUpdate::SkillMatches(matches)).await;
+                    }
+
                     let content = self.build_message_content(&text);
                     self.history.push(Message {
                         role: "user".into(),
@@ -179,11 +225,15 @@ impl Engine {
                         is_error: false,
                     });
                     self.attachments.clear();
-                    self.active_goal = text;
+                    self.active_goal = text.clone();
                     self.tool_iterations = 0;
                     self.task_steps.clear();
                     self.loop_guard.reset();
                     self.cancel_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+
+                    // Select model tier based on difficulty score (if tiers enabled).
+                    self.rate_and_route(&text, &ui_tx).await;
+
                     // Broadcast token count immediately so the sidebar isn't stale while waiting
                     let tok = estimate_tokens(&self.history, &self.effective_system_prompt());
                     let _ = ui_tx.send(UiUpdate::TokenUsage {
@@ -255,7 +305,7 @@ impl Engine {
                 budget: self.token_budget,
             }).await;
 
-            let provider = match self.registry.get(&self.cfg.active_provider) {
+            let provider = match self.registry.get(&self.req_provider) {
                 Ok(p) => p,
                 Err(e) => {
                     let _ = ui_tx.send(UiUpdate::ErrorMsg(e.to_string())).await;
@@ -264,7 +314,7 @@ impl Engine {
             };
 
             let req = StreamRequest {
-                model: self.cfg.active_model.clone(),
+                model: self.req_model.clone(),
                 messages: self.history.clone(),
                 system_prompt: self.effective_system_prompt(),
                 max_tokens: self.cfg.max_tokens,
@@ -302,9 +352,20 @@ impl Engine {
                 };
 
                 if chunk.retry_after > 0 {
-                    let _ = ui_tx.send(UiUpdate::RateLimited { secs: chunk.retry_after }).await;
-                    tokio::time::sleep(Duration::from_secs(chunk.retry_after as u64)).await;
-                    let _ = ui_tx.send(UiUpdate::SystemMsg("Rate limit cleared — resuming...".into())).await;
+                    // Switch to backup provider/model if configured.
+                    if !self.req_backup_provider.is_empty() {
+                        let bp = std::mem::take(&mut self.req_backup_provider);
+                        let bm = std::mem::take(&mut self.req_backup_model);
+                        let _ = ui_tx.send(UiUpdate::SystemMsg(format!(
+                            "Rate limited — switching to backup: {bp} / {bm}"
+                        ))).await;
+                        self.req_provider = bp;
+                        self.req_model = bm;
+                    } else {
+                        let _ = ui_tx.send(UiUpdate::RateLimited { secs: chunk.retry_after }).await;
+                        tokio::time::sleep(Duration::from_secs(chunk.retry_after as u64)).await;
+                        let _ = ui_tx.send(UiUpdate::SystemMsg("Rate limit cleared — resuming...".into())).await;
+                    }
                     break 'recv;
                 }
 
@@ -695,6 +756,82 @@ impl Engine {
         let _ = ui_tx.send(UiUpdate::SystemMsg(
             format!("Context compacted: {split} older turns → 1 summary block.")
         )).await;
+    }
+
+    // ── Model tier routing ────────────────────────────────────────────────────
+
+    /// Select provider/model for this request based on difficulty score.
+    async fn rate_and_route(&mut self, message: &str, ui_tx: &mpsc::Sender<UiUpdate>) {
+        let Some(tiers) = self.cfg.model_tiers.clone() else {
+            self.req_provider = self.cfg.active_provider.clone();
+            self.req_model = self.cfg.active_model.clone();
+            self.req_backup_provider.clear();
+            self.req_backup_model.clear();
+            return;
+        };
+        if !tiers.enabled {
+            self.req_provider = self.cfg.active_provider.clone();
+            self.req_model = self.cfg.active_model.clone();
+            self.req_backup_provider.clear();
+            self.req_backup_model.clear();
+            return;
+        }
+
+        let score = self.rate_difficulty(message, &tiers).await;
+        let tier_label = if score <= tiers.default_max_difficulty { "default" } else { "complex" };
+        let _ = ui_tx.send(UiUpdate::TierSelected { score, tier: tier_label.into() }).await;
+
+        let selected: &ModelTier = if score <= tiers.default_max_difficulty {
+            &tiers.default
+        } else {
+            &tiers.complex
+        };
+
+        self.req_provider = selected.provider.clone();
+        self.req_model = selected.model.clone();
+        self.req_backup_provider = selected.backup_provider.clone();
+        self.req_backup_model = selected.backup_model.clone();
+    }
+
+    /// Ask the rater model to score a task 1–100.
+    async fn rate_difficulty(&self, message: &str, tiers: &crate::config::ModelTiers) -> u8 {
+        let Ok(rater) = self.registry.get(&tiers.rater.provider) else {
+            return 50;
+        };
+        let req = StreamRequest {
+            model: tiers.rater.model.clone(),
+            messages: vec![Message {
+                role: "user".into(),
+                content: format!(
+                    "Rate the difficulty of this coding task from 1 to 100 where 1 is trivial \
+                    and 100 is extremely complex architecture work. Reply with ONLY the number.\n\nTask: {message}"
+                ),
+                tool_calls: vec![],
+                tool_use_id: String::new(),
+                tool_call_id: String::new(),
+                is_error: false,
+            }],
+            system_prompt: String::new(),
+            max_tokens: 8,
+            tools: vec![],
+        };
+        let mut text = String::new();
+        if let Ok(mut stream) = rater.stream(req).await {
+            while let Some(chunk) = stream.recv().await {
+                text.push_str(&chunk.content);
+                if chunk.done { break; }
+            }
+        }
+        text.trim().parse::<u8>().unwrap_or(50).clamp(1, 100)
+    }
+
+    // ── Nightly daemon ────────────────────────────────────────────────────────
+
+    fn maybe_spawn_daemon(&self, ui_tx: mpsc::Sender<UiUpdate>) {
+        let Some(tiers) = &self.cfg.model_tiers else { return };
+        let Ok(provider) = self.registry.get(&tiers.rater.provider) else { return };
+        let model = tiers.rater.model.clone();
+        skills::daemon::spawn(self.marlin_dir.clone(), provider, model, ui_tx);
     }
 
     fn effective_system_prompt(&self) -> String {
@@ -1332,6 +1469,158 @@ impl Engine {
                 sys!(format!("Directory: {}", self.work_dir));
             }
 
+            "/skill" | "/skills" => {
+                let subcmd = args.first().copied().unwrap_or("list");
+                let subrest = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
+                let subargs: Vec<&str> = args.get(1..).map(|a| a.to_vec()).unwrap_or_default();
+
+                match subcmd {
+                    "list" | "ls" => {
+                        if self.skills.is_empty() {
+                            sys!("No skills installed. Add TOML files to ~/.marlin/skills/");
+                        } else {
+                            let lines: Vec<String> = self.skills.iter().map(|s| {
+                                format!("  {:20} — {}", s.name, s.description)
+                            }).collect();
+                            sys!(format!("Skills ({}):\n{}", self.skills.len(), lines.join("\n")));
+                        }
+                    }
+
+                    "run" | "r" => {
+                        if subargs.is_empty() {
+                            sys!("Usage: /skill run <name> [query]");
+                            return;
+                        }
+                        let skill_name = subargs[0];
+                        let query = if subargs.len() > 1 {
+                            subargs[1..].join(" ")
+                        } else {
+                            self.active_goal.clone()
+                        };
+                        if let Some(skill) = self.skills.iter().find(|s| s.name == skill_name).cloned() {
+                            match skill.run.kind {
+                                skills::SkillKind::Shell => {
+                                    sys!(format!("Running skill '{}' with query: {query}", skill.name));
+                                    let wd = self.work_dir.clone();
+                                    let s = skill.clone();
+                                    let q = query.clone();
+                                    let result = tokio::task::spawn_blocking(move || {
+                                        skills::executor::execute_shell(&s, &q, &wd)
+                                    }).await;
+                                    match result {
+                                        Ok(Ok(r))  => sys!(format!("[skill: {}]\n{}", skill_name, r.output)),
+                                        Ok(Err(e)) => err!(format!("Skill error: {e}")),
+                                        Err(e)     => err!(format!("Skill task panic: {e}")),
+                                    }
+                                }
+                                skills::SkillKind::Prompt => {
+                                    match skills::executor::expand_prompt(&skill, &query) {
+                                        Ok(prompt) => {
+                                            sys!(format!("[skill: {}] Expanded prompt — copy and send to run:\n\n{prompt}", skill.name));
+                                        }
+                                        Err(e) => err!(format!("Skill error: {e}")),
+                                    }
+                                }
+                            }
+                        } else {
+                            err!(format!("Unknown skill '{skill_name}'.  Use /skill list."));
+                        }
+                    }
+
+                    "new" | "create" => {
+                        let name = if subargs.is_empty() { "my_skill" } else { subargs[0] };
+                        let skill = skills::Skill {
+                            name: name.to_string(),
+                            description: "Describe what this skill does".into(),
+                            triggers: vec!["keyword1".into(), "keyword2".into()],
+                            run: skills::SkillRun {
+                                kind: skills::SkillKind::Shell,
+                                command: "echo {query}".into(),
+                                template: String::new(),
+                            },
+                        };
+                        match skills::save_skill(&self.marlin_dir, &skill) {
+                            Ok(path) => {
+                                sys!(format!("Skill template created:\n  {}\n\nEdit the file to customise it, then /skill reload.", path.display()));
+                                self.skills = skills::load_all(&self.marlin_dir);
+                            }
+                            Err(e) => err!(format!("Failed to create skill: {e}")),
+                        }
+                    }
+
+                    "suggest" => {
+                        let suggestions_path = self.marlin_dir.join("skill_suggestions.md");
+                        if suggestions_path.exists() {
+                            match std::fs::read_to_string(&suggestions_path) {
+                                Ok(content) => sys!(content),
+                                Err(e) => err!(format!("Error reading suggestions: {e}")),
+                            }
+                        } else {
+                            let context = self.history.iter().rev()
+                                .find(|m| m.role == "user")
+                                .map(|m| m.content.as_str())
+                                .unwrap_or("");
+                            let skill_defs: Vec<SkillDef> = self.skills.iter().map(SkillDef::from).collect();
+                            let hits = skills::suggest::match_skills(context, &skill_defs);
+                            if hits.is_empty() {
+                                sys!("No skill suggestions yet. Nightly analysis runs after 20h of activity (requires model_tiers config).");
+                            } else {
+                                let lines: Vec<String> = hits.iter()
+                                    .map(|m| format!("  {:20} — {}", m.name, m.description))
+                                    .collect();
+                                sys!(format!("Suggested skills:\n{}", lines.join("\n")));
+                            }
+                        }
+                    }
+
+                    "reload" => {
+                        self.skills = skills::load_all(&self.marlin_dir);
+                        let skill_defs: Vec<SkillDef> = self.skills.iter().map(SkillDef::from).collect();
+                        let _ = ui_tx.send(UiUpdate::SkillsLoaded(skill_defs)).await;
+                        sys!(format!("Reloaded {} skill(s).", self.skills.len()));
+                    }
+
+                    _ => {
+                        sys!("Usage: /skill [list|run <name> [query]|new <name>|suggest|reload]");
+                    }
+                }
+            }
+
+            "/tiers" => {
+                match args.first().copied() {
+                    Some("on") => {
+                        if self.cfg.model_tiers.is_none() {
+                            self.cfg.model_tiers = Some(crate::config::ModelTiers::default());
+                        }
+                        self.cfg.model_tiers.as_mut().unwrap().enabled = true;
+                        let _ = self.cfg.save();
+                        sys!("Model tier routing enabled. Edit ~/.marlin/config.json (model_tiers) to configure.");
+                    }
+                    Some("off") => {
+                        if let Some(t) = self.cfg.model_tiers.as_mut() { t.enabled = false; }
+                        let _ = self.cfg.save();
+                        sys!("Model tier routing disabled — using active_provider/active_model.");
+                    }
+                    _ => {
+                        let state = self.cfg.model_tiers.as_ref()
+                            .map(|t| if t.enabled {
+                                format!(
+                                    "enabled\n  default (≤{}): {} / {}\n  complex (>{}): {} / {}\n  rater: {} / {}",
+                                    t.default_max_difficulty,
+                                    t.default.provider, t.default.model,
+                                    t.default_max_difficulty,
+                                    t.complex.provider, t.complex.model,
+                                    t.rater.provider, t.rater.model,
+                                )
+                            } else {
+                                "disabled".into()
+                            })
+                            .unwrap_or_else(|| "not configured (use /tiers on to enable)".into());
+                        sys!(format!("Model tiers: {state}\n\nUse /tiers on|off"));
+                    }
+                }
+            }
+
             _ => {
                 err!(format!("Unknown command: {cmd}  (type /help for list)"));
             }
@@ -1455,6 +1744,12 @@ fn help_text() -> String {
         ("/ls [dir]", "list directory"),
         ("/cd <dir>", "change working directory"),
         ("/pwd", "show working directory"),
+        ("/skill list", "list installed skills"),
+        ("/skill run <name> [query]", "run a skill"),
+        ("/skill new <name>", "create a new skill template"),
+        ("/skill suggest", "show skill suggestions from nightly analysis"),
+        ("/skill reload", "reload skills from disk"),
+        ("/tiers [on|off]", "model tier routing (easy→default, hard→complex with backups)"),
     ];
 
     let mut s = "Commands:\n".to_string();

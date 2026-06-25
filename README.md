@@ -91,6 +91,106 @@ Every file touched by an AI edit gets snapshotted first — use `/revert` to res
 
 ---
 
+## Skills
+
+Skills are reusable operations stored as TOML files in `~/.marlin/skills/`. Three come built in:
+
+| Skill        | Triggers                             | What it does                        |
+|--------------|--------------------------------------|-------------------------------------|
+| `web_search` | search, look up, google, find online | DuckDuckGo via curl                 |
+| `ripgrep`    | grep, rg, search code                | `rg` across the working directory   |
+| `make_skill` | create skill, new skill              | Prompts the AI to write a new skill |
+
+### Using skills
+
+```
+/skill list                   list all installed skills
+/skill run web_search rust async traits
+/skill run ripgrep "fn main"
+/skill new my_skill           create a template file to edit
+/skill suggest                show AI-generated suggestions from nightly analysis
+/skill reload                 reload skills from disk after editing
+```
+
+As you type, Marlin matches your message against skill trigger keywords and shows relevant skills in the suggestion panel — before you even send.
+
+### Writing a skill
+
+Drop a `.toml` file in `~/.marlin/skills/`:
+
+```toml
+name = "gh_issues"
+description = "List open GitHub issues for this repo"
+triggers = ["issues", "github", "gh", "open bugs"]
+
+[run]
+type = "shell"
+command = "gh issue list --limit 20"
+```
+
+Or a prompt-type skill:
+
+```toml
+name = "explain_diff"
+description = "Explain the current git diff"
+triggers = ["explain diff", "what changed", "review changes"]
+
+[run]
+type = "prompt"
+template = "Please explain this git diff clearly:\n\n{input}"
+```
+
+Use `{query}` (shell) or `{input}` (prompt) as the placeholder for user-supplied text.
+
+### Nightly skill suggestions
+
+When model tiers are configured, a background daemon runs once every 20 hours. It reads your recent sessions, asks the AI to suggest three new skills based on your workflow patterns, and saves them to `~/.marlin/skill_suggestions.md`. View them with `/skill suggest`.
+
+---
+
+## Model tiers
+
+Marlin can automatically route requests to different models based on task difficulty. Enable it:
+
+```
+/tiers on
+```
+
+Then edit `~/.marlin/config.json` to configure the tiers:
+
+```json
+"model_tiers": {
+  "enabled": true,
+  "default_max_difficulty": 40,
+  "default": {
+    "provider": "claude",
+    "model": "claude-haiku-4-5",
+    "backup_provider": "groq",
+    "backup_model": "llama-3.3-70b-versatile"
+  },
+  "complex": {
+    "provider": "claude",
+    "model": "claude-sonnet-4-6",
+    "backup_provider": "openrouter",
+    "backup_model": "anthropic/claude-sonnet-4-6"
+  },
+  "rater": {
+    "provider": "claude",
+    "model": "claude-haiku-4-5"
+  }
+}
+```
+
+**How it works:**
+1. Before each request, Marlin asks the rater model to score the task 1–100
+2. Tasks scored ≤ `default_max_difficulty` go to the **default** tier (cheap, fast)
+3. Tasks scored above the threshold go to the **complex** tier (powerful)
+4. If the primary model is rate-limited and a backup is configured, Marlin switches immediately — no waiting
+
+The current difficulty score and selected tier appear as a status message in chat.
+
+---
+
 ## AST Mode
 
 AST mode changes how the LLM perceives and edits source files. Toggle it with `/ast`:
@@ -128,49 +228,52 @@ AST mode persists across sessions (stored in `~/.marlin/config.json`).
 ## Commands
 
 ```
-/help                         show all commands
-/clear                        clear chat history and attachments
-/provider <name>              switch provider (claude/ollama/groq/fireworks/moonshot/openrouter/custom)
-/p <name>                     switch provider (short form)
-/model <name>                 switch model
-/m <name>                     switch model (short form)
-/providers                    list all providers and their models
-/models                       list models for current provider
-/key <provider> <key>         set an API key
-/endpoint <provider> <url>    set a custom API endpoint
-/system <prompt>              set additional system prompt
-/sys <prompt>                 set system prompt (short form)
-/tokens [n]                   get or set max output tokens
+/help                              show all commands
+/clear                             clear chat history and attachments
+/provider <name>                   switch provider
+/model <name>                      switch model
+/providers                         list all providers and their models
+/models                            list models for current provider
+/key <provider> <key>              set an API key
+/endpoint <provider> <url>         set a custom API endpoint
+/system <prompt>                   set additional system prompt
+/tokens [n]                        get or set max output tokens
 
-/attach <file>                attach a file to your next message
-/a <file>                     attach file (short form)
-/detach [file]                remove attachment(s)
-/exec <cmd>                   run a shell command (/allow-ed prefix required, or /sandbox on)
-/allow <prefix>               whitelist a command prefix (e.g. /allow cargo)
-/sandbox [on|off]             allow all shell commands autonomously (persists)
-/permissions [skip|require]   skip or require permission checks (persists)
+/attach <file>                     attach a file to your next message
+/detach [file]                     remove attachment(s)
+/exec <cmd>                        run a shell command (/allow-ed prefix required)
+/allow <prefix>                    whitelist a command prefix (e.g. /allow cargo)
+/sandbox [off|permissive|mxc]      command isolation mode
+/permissions [skip|require]        skip or require permission checks (persists)
 
-/verify [cmd|off]             run a command after every file edit (Write-Test-Fix loop)
-/ast [off|sexpr|harness]      AST context mode (persists)
-/clean-env [on|off]           strip subprocess environment for isolation (persists)
+/verify [cmd|off]                  run a command after every file edit (Write-Test-Fix)
+/ast [off|sexpr|harness]           AST context mode (persists)
+/clean-env [on|off]                strip subprocess environment for isolation (persists)
 
-/index                        build the TF-IDF search index for this project
-/index status                 show index stats
-/search <query>               search the index manually
+/skill list                        list installed skills
+/skill run <name> [query]          run a skill
+/skill new <name>                  create a skill template
+/skill suggest                     show nightly AI skill suggestions
+/skill reload                      reload skills from disk
 
-/revert <file>                list snapshots for a file
-/revert <file> <n>            restore snapshot n
-/history                      list saved sessions
-/history <n>                  restore session n
-/history clear                delete all saved sessions
-/resume                       restore the most recent session
+/tiers [on|off]                    model tier routing (easy→default, hard→complex)
 
-/theme [dark|light]           switch UI theme (persists)
+/index                             build the TF-IDF search index for this project
+/index status                      show index stats
+/search <query>                    search the index manually
 
-/cat <file>                   print file contents
-/ls [dir]                     list directory
-/cd <dir>                     change working directory
-/pwd                          show working directory
+/revert <file>                     list snapshots for a file
+/revert <file> <n>                 restore snapshot n
+/history                           list saved sessions
+/history <n>                       restore session n
+/history clear                     delete all saved sessions
+/resume                            restore the most recent session
+
+/theme [dark|light]                switch UI theme (persists)
+/cat <file>                        print file contents
+/ls [dir]                          list directory
+/cd <dir>                          change working directory
+/pwd                               show working directory
 ```
 
 ---
@@ -269,10 +372,11 @@ Two threads, clean separation:
 ```
 main thread          Tokio thread
 ──────────           ──────────────────────────────────────────
-Ratatui TUI    ←──  UiUpdate  (chunks, tool events, tasks, tokens)
+Ratatui TUI    ←──  UiUpdate  (chunks, tool events, tasks, tokens, skills)
                ──→  Action    (send, slash cmd, approve, deny)
                     Engine: agentic loop, provider SSE,
-                            tool execution, context management
+                            tool execution, context management,
+                            skill runner, tier routing, nightly daemon
 ```
 
 **Context management (token-based):**
@@ -294,7 +398,20 @@ Ratatui TUI    ←──  UiUpdate  (chunks, tool events, tasks, tokens)
 
 ## Config
 
-Stored at `~/.marlin/config.json`. All settings (keys, endpoints, provider, model, allowed commands, verify command, theme, AST mode, sandbox flags) persist there automatically via slash commands — no manual editing needed.
+Stored at `~/.marlin/config.json`. All settings persist there automatically via slash commands.
+
+Key directories:
+
+```
+~/.marlin/
+  config.json          main config
+  skills/              skill TOML files (web_search, ripgrep, make_skill built in)
+  skill_suggestions.md nightly AI skill recommendations
+  sessions/            saved conversation history
+  index/               TF-IDF search index
+  logs/                large command output spill files
+  snapshots/           per-file edit snapshots
+```
 
 ---
 

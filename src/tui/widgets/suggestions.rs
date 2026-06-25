@@ -50,6 +50,8 @@ pub fn all_commands() -> Vec<CmdDef> {
         ("/ls",        "[dir]",             "list directory"),
         ("/cd",        "<dir>",             "change working directory"),
         ("/pwd",       "",                  "show working directory"),
+        ("/skill",     "[list|run|new|suggest|reload]", "manage and run skills"),
+        ("/tiers",     "[on|off]",          "model tier routing with backup fallback"),
     ];
     raw.iter().map(|(c, a, d)| CmdDef {
         cmd: c.to_string(),
@@ -79,12 +81,21 @@ pub fn tab_complete(typed: &str, suggestions: &[&CmdDef]) -> Option<String> {
     if prefix.len() > typed.len() { Some(prefix) } else { None }
 }
 
+/// A lightweight skill hint shown in the suggestion panel.
+#[derive(Clone, Debug)]
+pub struct SkillHint {
+    pub name: String,
+    pub description: String,
+}
+
 pub struct SuggestionPanel<'a> {
     pub suggestions: &'a [&'a CmdDef],
     pub typed: &'a str,
     pub width: u16,
     pub frame: u64,
     pub streaming: bool,
+    /// Skill matches to show when the user is typing a non-slash message.
+    pub skill_hints: &'a [SkillHint],
 }
 
 // Bubble animation: dots wave in and out over a 4-phase cycle (~200 ms/phase at 60 fps)
@@ -102,7 +113,7 @@ fn bubble_dots(frame: u64) -> &'static str {
 
 impl<'a> Widget for SuggestionPanel<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        if self.streaming && self.suggestions.is_empty() {
+        if self.streaming && self.suggestions.is_empty() && self.skill_hints.is_empty() {
             // ── Typing bubble ─────────────────────────────────────────────────
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -157,6 +168,28 @@ impl<'a> Widget for SuggestionPanel<'a> {
                 spans.push(Span::raw(" ".repeat(pad)));
                 spans.push(Span::styled(s.desc.clone(), style_suggestion_desc()));
                 Line::from(spans)
+            }).collect();
+
+            Paragraph::new(lines).render(inner, buf);
+        } else if !self.skill_hints.is_empty() {
+            // ── Skill hints ────────────────────────────────────────────────────
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(style_suggestion_border())
+                .title(Span::styled(" skills ", style_suggestion_desc()));
+
+            let inner = block.inner(area);
+            block.render(area, buf);
+
+            let lines: Vec<Line> = self.skill_hints.iter().map(|h| {
+                let pad = 20usize.saturating_sub(h.name.len()).max(2);
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(h.name.clone(), style_suggestion_cmd()),
+                    Span::raw(" ".repeat(pad)),
+                    Span::styled(h.description.clone(), style_suggestion_desc()),
+                ])
             }).collect();
 
             Paragraph::new(lines).render(inner, buf);

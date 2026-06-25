@@ -5,6 +5,7 @@ mod engine;
 mod history;
 mod index;
 mod providers;
+mod skills;
 mod snapshots;
 mod tools;
 mod tui;

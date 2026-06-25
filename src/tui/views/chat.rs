@@ -90,6 +90,12 @@ pub struct ChatView {
     pub frame: u64,
     last_frame_time: Instant,
     bubble_effect: Effect,
+
+    // Skill suggestions
+    pub skills: Vec<crate::skills::SkillDef>,
+    pub skill_hints: Vec<crate::tui::widgets::suggestions::SkillHint>,
+    /// Skill matches sent by the engine for the last message.
+    pub last_skill_matches: Vec<(String, String)>,
 }
 
 impl ChatView {
@@ -128,6 +134,9 @@ impl ChatView {
                 [28.0, 0.0, 0.0],
                 EffectTimer::from_ms(900, Interpolation::SineInOut),
             ))),
+            skills: vec![],
+            skill_hints: vec![],
+            last_skill_matches: vec![],
         }
     }
 
@@ -211,6 +220,15 @@ impl ChatView {
             UiUpdate::AwaitingApproval { cmd } => {
                 self.approval_pending = Some(cmd);
             }
+            UiUpdate::SkillsLoaded(defs) => {
+                self.skills = defs;
+            }
+            UiUpdate::SkillMatches(matches) => {
+                self.last_skill_matches = matches;
+            }
+            UiUpdate::TierSelected { score, tier } => {
+                self.add_system(&format!("difficulty {score}/100 → {tier} tier"));
+            }
             // TaskUpdate, TokenUsage, and AstMode are consumed by the runner/sidebar
             UiUpdate::TaskUpdate(_) | UiUpdate::TokenUsage { .. } | UiUpdate::AstMode(_) => {}
             UiUpdate::IndexBuilt { .. } => {}
@@ -238,6 +256,19 @@ impl ChatView {
         self.suggestions = suggs.iter().map(|s| {
             defs.iter().position(|d| std::ptr::eq(d, *s)).unwrap_or(0)
         }).collect();
+
+        // Compute live skill hints if user is typing a non-slash message.
+        if !val.starts_with('/') && !val.is_empty() && val.len() >= 3 {
+            let matches = crate::skills::suggest::match_skills(&val, &self.skills);
+            self.skill_hints = matches.into_iter().map(|m| {
+                crate::tui::widgets::suggestions::SkillHint {
+                    name: m.name,
+                    description: m.description,
+                }
+            }).collect();
+        } else if val.starts_with('/') || val.is_empty() {
+            self.skill_hints.clear();
+        }
     }
 
     pub fn on_key(&mut self, key: crossterm::event::KeyEvent) -> Option<Action> {
@@ -411,6 +442,8 @@ impl ChatView {
 
         let sugg_h: u16 = if !self.suggestions.is_empty() {
             (self.suggestions.len() as u16 + 2).min(10) // +2 for border
+        } else if !self.skill_hints.is_empty() {
+            (self.skill_hints.len() as u16 + 2).min(7)
         } else if self.streaming {
             3 // bordered bubble: top + 1 content + bottom
         } else {
@@ -442,7 +475,7 @@ impl ChatView {
         if sugg_h > 0 {
             self.render_suggestions(chunks[1], buf);
             // Pulse the bubble box with a hue-cycling effect while streaming
-            if self.streaming && self.suggestions.is_empty() {
+            if self.streaming && self.suggestions.is_empty() && self.skill_hints.is_empty() {
                 buf.render_effect(
                     &mut self.bubble_effect,
                     chunks[1],
@@ -644,6 +677,7 @@ impl ChatView {
             width: area.width,
             frame: self.frame,
             streaming: self.streaming,
+            skill_hints: &self.skill_hints,
         };
         panel.render(area, buf);
     }

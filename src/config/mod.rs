@@ -4,6 +4,72 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+// ── Model tier config ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelTier {
+    pub provider: String,
+    pub model: String,
+    /// Fallback provider to use if the primary is rate-limited.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub backup_provider: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub backup_model: String,
+}
+
+impl ModelTier {
+    pub fn has_backup(&self) -> bool {
+        !self.backup_provider.is_empty() && !self.backup_model.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelTiers {
+    /// Enable automatic difficulty-based tier routing.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Used for tasks scored ≤ default_max_difficulty (easy work).
+    pub default: ModelTier,
+    /// Used for tasks scored > default_max_difficulty (hard work).
+    pub complex: ModelTier,
+    /// Lightweight model used only for difficulty scoring (cheap fast calls).
+    pub rater: ModelTier,
+    /// Difficulty threshold 1–100; tasks at or below this use the default tier.
+    #[serde(default = "default_difficulty_threshold")]
+    pub default_max_difficulty: u8,
+}
+
+fn default_difficulty_threshold() -> u8 {
+    40
+}
+
+impl Default for ModelTiers {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default: ModelTier {
+                provider: "claude".into(),
+                model: "claude-haiku-4-5".into(),
+                backup_provider: String::new(),
+                backup_model: String::new(),
+            },
+            complex: ModelTier {
+                provider: "claude".into(),
+                model: "claude-sonnet-4-6".into(),
+                backup_provider: String::new(),
+                backup_model: String::new(),
+            },
+            rater: ModelTier {
+                provider: "claude".into(),
+                model: "claude-haiku-4-5".into(),
+                backup_provider: String::new(),
+                backup_model: String::new(),
+            },
+            default_max_difficulty: 40,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AstMode {
@@ -103,6 +169,9 @@ pub struct Config {
     /// AST-driven context mode (off / sexpr / harness)
     #[serde(default)]
     pub ast_mode: AstMode,
+    /// Multi-model tier routing (default/complex/rater with per-tier backups).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_tiers: Option<ModelTiers>,
 }
 
 fn default_max_tokens() -> usize {
@@ -217,6 +286,7 @@ impl Config {
             verify_command: None,
             clean_env: false,
             ast_mode: AstMode::Off,
+            model_tiers: None,
         }
     }
 }
