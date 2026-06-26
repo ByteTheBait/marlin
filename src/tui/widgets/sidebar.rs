@@ -2,22 +2,38 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
+    symbols::Marker,
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph, Widget},
+    widgets::{Axis, Block, BorderType, Borders, Chart, Dataset, GraphType, Paragraph, Widget},
 };
 
 use crate::engine::tasks::{TaskStatus, TaskStep};
 use crate::tui::styles::*;
 
+const TOKEN_HISTORY_LEN: usize = 60;
+
 pub struct Sidebar {
     pub token_used: usize,
     pub token_budget: usize,
+    pub token_history: Vec<usize>,
     pub tasks: Vec<TaskStep>,
 }
 
 impl Sidebar {
     pub fn new() -> Self {
-        Self { token_used: 0, token_budget: 100_000, tasks: vec![] }
+        Self {
+            token_used: 0,
+            token_budget: 100_000,
+            token_history: Vec::new(),
+            tasks: vec![],
+        }
+    }
+
+    pub fn push_token_sample(&mut self, used: usize) {
+        self.token_history.push(used);
+        if self.token_history.len() > TOKEN_HISTORY_LEN {
+            self.token_history.remove(0);
+        }
     }
 }
 
@@ -90,6 +106,32 @@ impl Widget for Sidebar {
             let span = Span::styled(label, style_system());
             buf.set_span(inner.x, y, &span, inner.width);
             y += 1;
+        }
+
+        // Token history line graph
+        let chart_h = 6u16;
+        if self.token_history.len() >= 2 && inner.bottom().saturating_sub(y) > chart_h + 2 {
+            let data: Vec<(f64, f64)> = self.token_history.iter().enumerate()
+                .map(|(i, &v)| (i as f64, v as f64))
+                .collect();
+            let x_max = (TOKEN_HISTORY_LEN - 1) as f64;
+            let y_max = self.token_budget as f64;
+
+            let dataset = Dataset::default()
+                .graph_type(GraphType::Line)
+                .marker(Marker::Braille)
+                .style(Style::default().fg(col_aqua()))
+                .data(&data);
+
+            let chart = Chart::new(vec![dataset])
+                .x_axis(Axis::default().bounds([0.0, x_max]))
+                .y_axis(Axis::default().bounds([0.0, y_max]));
+
+            chart.render(
+                Rect { x: inner.x, y, width: inner.width, height: chart_h },
+                buf,
+            );
+            y += chart_h;
         }
 
         // Divider

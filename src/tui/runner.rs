@@ -82,6 +82,7 @@ pub fn run(
                         UiUpdate::TokenUsage { used, budget } => {
                             sidebar.token_used = *used;
                             sidebar.token_budget = *budget;
+                            sidebar.push_token_sample(*used);
                         }
                         _ => {}
                     }
@@ -112,6 +113,7 @@ pub fn run(
         let sidebar_snap = Sidebar {
             token_used: sidebar.token_used,
             token_budget: sidebar.token_budget,
+            token_history: sidebar.token_history.clone(),
             tasks: sidebar.tasks.clone(),
         };
         let approval_cmd = chat.approval_pending.clone();
