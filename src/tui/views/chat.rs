@@ -257,18 +257,7 @@ impl ChatView {
             defs.iter().position(|d| std::ptr::eq(d, *s)).unwrap_or(0)
         }).collect();
 
-        // Compute live skill hints if user is typing a non-slash message.
-        if !val.starts_with('/') && !val.is_empty() && val.len() >= 3 {
-            let matches = crate::skills::suggest::match_skills(&val, &self.skills);
-            self.skill_hints = matches.into_iter().map(|m| {
-                crate::tui::widgets::suggestions::SkillHint {
-                    name: m.name,
-                    description: m.description,
-                }
-            }).collect();
-        } else if val.starts_with('/') || val.is_empty() {
-            self.skill_hints.clear();
-        }
+        self.skill_hints.clear();
     }
 
     pub fn on_key(&mut self, key: crossterm::event::KeyEvent) -> Option<Action> {
@@ -570,8 +559,11 @@ impl ChatView {
     fn build_lines(&self, width: usize) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
         let md_width = width.saturating_sub(2);
+        let entries = &self.entries;
+        let mut i = 0;
 
-        for entry in &self.entries {
+        while i < entries.len() {
+            let entry = &entries[i];
             match &entry.role {
                 EntryRole::User => {
                     let ts = entry.time.format("%H:%M").to_string();
@@ -587,6 +579,7 @@ impl ChatView {
                         )));
                     }
                     lines.push(Line::from(""));
+                    i += 1;
                 }
                 EntryRole::Assistant => {
                     let ts = entry.time.format("%H:%M").to_string();
@@ -601,21 +594,24 @@ impl ChatView {
                         lines.push(Line::from(spans));
                     }
                     lines.push(Line::from(""));
+                    i += 1;
                 }
                 EntryRole::System => {
-                    for (i, l) in entry.content.lines().enumerate() {
-                        let prefix = if i == 0 { "  - " } else { "    " };
+                    for (k, l) in entry.content.lines().enumerate() {
+                        let prefix = if k == 0 { "  - " } else { "    " };
                         lines.push(Line::from(Span::styled(
                             format!("{prefix}{l}"),
                             style_system(),
                         )));
                     }
+                    i += 1;
                 }
                 EntryRole::Error => {
                     lines.push(Line::from(Span::styled(
                         format!("  ! {}", entry.content),
                         style_error(),
                     )));
+                    i += 1;
                 }
                 EntryRole::Output => {
                     let content_lines: Vec<&str> = entry.content.lines().collect();
@@ -629,54 +625,88 @@ impl ChatView {
                             style_system(),
                         )));
                     }
+                    i += 1;
                 }
                 EntryRole::ToolCall => {
-                    let raw = &entry.content;
-                    let input: String = if raw.chars().count() > 100 {
-                        format!("{}...", raw.chars().take(97).collect::<String>())
-                    } else {
-                        raw.clone()
-                    };
-                    let display = tool_display_name(&entry.tool_name);
-                    lines.push(Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled("╭", style_tool_badge_bracket()),
-                        Span::styled(format!(" {display} "), style_tool_badge()),
-                        Span::styled("╮", style_tool_badge_bracket()),
-                        Span::raw("  "),
-                        Span::styled(input, style_system()),
-                    ]));
+                    // Collect all consecutive ToolCall entries in this batch.
+                    let batch_start = i;
+                    let mut batch_end = i;
+                    while batch_end + 1 < entries.len()
+                        && matches!(entries[batch_end + 1].role, EntryRole::ToolCall)
+                    {
+                        batch_end += 1;
+                    }
+                    let batch_size = batch_end - batch_start + 1;
+
+                    // Collect the subsequent run of ToolResult entries (up to batch_size).
+                    let result_start = batch_end + 1;
+                    let mut result_count = 0;
+                    while result_count < batch_size
+                        && result_start + result_count < entries.len()
+                        && matches!(
+                            entries[result_start + result_count].role,
+                            EntryRole::ToolResult { .. }
+                        )
+                    {
+                        result_count += 1;
+                    }
+
+                    // Render each call merged with its result (if available).
+                    for j in 0..batch_size {
+                        let call_entry = &entries[batch_start + j];
+                        let maybe_result = if j < result_count {
+                            Some(&entries[result_start + j])
+                        } else {
+                            None
+                        };
+
+                        let display = tool_display_name(&call_entry.tool_name);
+                        let mut content: Vec<(String, Style)> = Vec::new();
+
+                        // Input args
+                        let input_lines: Vec<&str> = call_entry.content.lines().collect();
+                        for l in input_lines.iter().take(3) {
+                            content.push((l.to_string(), style_system()));
+                        }
+                        if input_lines.len() > 3 {
+                            content.push((
+                                format!("... {} more", input_lines.len() - 3),
+                                style_system(),
+                            ));
+                        }
+                        if content.is_empty() {
+                            content.push(("(empty)".to_string(), style_system()));
+                        }
+
+                        // Result (if already received)
+                        if let Some(result) = maybe_result {
+                            let is_err =
+                                matches!(result.role, EntryRole::ToolResult { is_error: true });
+                            let (icon, icon_style) =
+                                if is_err { ("✗", style_error()) } else { ("✓", style_success()) };
+                            content.push((icon.to_string(), icon_style));
+
+                            let out: Vec<&str> =
+                                result.content.trim_end_matches('\n').lines().collect();
+                            for l in out.iter().take(6) {
+                                content.push((l.to_string(), style_system()));
+                            }
+                            if out.len() > 6 {
+                                content.push((
+                                    format!("... {} more lines", out.len() - 6),
+                                    style_system(),
+                                ));
+                            }
+                        }
+
+                        lines.extend(build_tool_bubble(display, &content, width));
+                    }
+
+                    i = result_start + result_count;
                 }
-                EntryRole::ToolResult { is_error } => {
-                    let display = tool_display_name(&entry.tool_name);
-                    let (icon, st) = if *is_error {
-                        ("✗", style_error())
-                    } else {
-                        ("✓", style_success())
-                    };
-                    lines.push(Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled("╭", style_tool_badge_bracket()),
-                        Span::styled(format!(" {display} "), style_tool_badge()),
-                        Span::styled("╮", style_tool_badge_bracket()),
-                        Span::raw("  "),
-                        Span::styled(icon, st),
-                    ]));
-                    let content_lines: Vec<&str> =
-                        entry.content.trim_end_matches('\n').lines().collect();
-                    const MAX_LINES: usize = 6;
-                    for l in content_lines.iter().take(MAX_LINES) {
-                        lines.push(Line::from(Span::styled(
-                            format!("     {l}"),
-                            style_system(),
-                        )));
-                    }
-                    if content_lines.len() > MAX_LINES {
-                        lines.push(Line::from(Span::styled(
-                            format!("     ... {} more lines", content_lines.len() - MAX_LINES),
-                            style_system(),
-                        )));
-                    }
+                EntryRole::ToolResult { .. } => {
+                    // Orphaned result with no preceding ToolCall — skip.
+                    i += 1;
                 }
             }
         }
@@ -902,6 +932,58 @@ fn rate_bar(pct: f64, width: usize) -> String {
     let filled = (pct * width as f64) as usize;
     let empty = width.saturating_sub(filled);
     format!("[{}{}]", "█".repeat(filled), "░".repeat(empty))
+}
+
+fn build_tool_bubble(
+    display: &str,
+    content_lines: &[(String, Style)],
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut result: Vec<Line<'static>> = Vec::new();
+    let margin = 2usize;
+    if width <= margin + 4 {
+        return result;
+    }
+
+    let box_width = width - margin;
+    let inner_width = box_width.saturating_sub(2);
+
+    // Top border: ╭─ Name ──...──╮
+    let badge_section = display.len() + 4; // "─ {name} ─"
+    let fill_dashes = inner_width.saturating_sub(badge_section);
+    result.push(Line::from(vec![
+        Span::raw(" ".repeat(margin)),
+        Span::styled("╭─ ".to_string(), style_tool_badge_bracket()),
+        Span::styled(display.to_string(), style_tool_badge()),
+        Span::styled(" ─".to_string(), style_tool_badge_bracket()),
+        Span::styled("─".repeat(fill_dashes), style_tool_badge_bracket()),
+        Span::styled("╮".to_string(), style_tool_badge_bracket()),
+    ]));
+
+    // Content lines: │ text padded │
+    let text_area = inner_width.saturating_sub(1);
+    for (text, style) in content_lines {
+        let chars: String = text.chars().take(text_area).collect();
+        let pad_len = text_area.saturating_sub(chars.chars().count());
+        result.push(Line::from(vec![
+            Span::raw(" ".repeat(margin)),
+            Span::styled("│".to_string(), style_tool_badge_bracket()),
+            Span::raw(" "),
+            Span::styled(chars, *style),
+            Span::raw(" ".repeat(pad_len)),
+            Span::styled("│".to_string(), style_tool_badge_bracket()),
+        ]));
+    }
+
+    // Bottom border: ╰──...──╯
+    result.push(Line::from(vec![
+        Span::raw(" ".repeat(margin)),
+        Span::styled("╰".to_string(), style_tool_badge_bracket()),
+        Span::styled("─".repeat(inner_width), style_tool_badge_bracket()),
+        Span::styled("╯".to_string(), style_tool_badge_bracket()),
+    ]));
+
+    result
 }
 
 fn tool_display_name(raw: &str) -> &'static str {

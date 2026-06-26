@@ -101,12 +101,10 @@ pub fn run(
             }
         }
 
-        // Rate-limit countdown
+        // Rate-limit countdown (drives the progress bar display only)
         if chat.rate_limited && rate_tick.elapsed() >= Duration::from_secs(1) {
             rate_tick = std::time::Instant::now();
-            if chat.tick_rate_limit() && !chat.rate_limited {
-                chat.add_system("Rate limit cleared — resuming...");
-            }
+            chat.tick_rate_limit();
         }
 
         // Snapshot sidebar state for rendering
