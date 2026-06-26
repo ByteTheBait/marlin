@@ -23,6 +23,16 @@ cargo build --release
 # optionally link to PATH
 ln -sf $PWD/target/release/marlin /usr/local/bin/marlin
 ```
+Alternatively, run the install.sh script that bundles marlin, ast-compiler, and mxc:
+
+```sh
+# Cautious install
+curl -fsSL https://raw.githubusercontent.com/pkill-mydaemons/marlin/main/install.sh -o install.sh # Pulls the file and stores it in a local one
+vim install.sh # If you would like to see what content the file contains
+./install.sh # Run it
+# Or you can run it directly
+curl -fsSL https://raw.githubusercontent.com/pkill-mydaemons/marlin/main/install.sh | bash
+```
 
 **Requirements:** Rust 1.75+, a terminal that supports 24-bit color.
 
