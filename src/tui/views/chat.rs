@@ -10,7 +10,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph, StatefulWidget, Widget},
 };
 use tachyonfx::{fx, Effect, EffectRenderer, EffectTimer, Interpolation, Duration as FxDuration};
-use tui_scrollview::{ScrollView, ScrollViewState};
+use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 use tui_textarea::TextArea;
 
 use crate::engine::{Action, UiUpdate};
@@ -547,7 +547,8 @@ impl ChatView {
 
         // Build the virtual scroll canvas and render lines into it
         let virtual_size = Size { width: area.width, height: content_height.max(1) };
-        let mut scroll_view = ScrollView::new(virtual_size);
+        let mut scroll_view = ScrollView::new(virtual_size)
+            .horizontal_scrollbar_visibility(ScrollbarVisibility::Never);
         scroll_view.render_widget(
             Paragraph::new(all_lines).style(style_app_bg()),
             Rect { x: 0, y: 0, width: area.width, height: content_height.max(1) },

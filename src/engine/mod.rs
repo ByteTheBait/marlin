@@ -318,7 +318,7 @@ impl Engine {
                 messages: self.history.clone(),
                 system_prompt: self.effective_system_prompt(),
                 max_tokens: self.cfg.max_tokens,
-                tools: all_tools(&self.ast_mode),
+                tools: all_tools(&self.ast_mode, &self.skills.iter().map(|s| (s.name.clone(), s.description.clone())).collect::<Vec<_>>()),
             };
 
             let mut stream = match provider.stream(req).await {
@@ -542,6 +542,35 @@ impl Engine {
                     output: "Command denied by user.".to_string(),
                     is_error: true,
                 });
+                continue;
+            }
+
+            // Handle skill invocations directly — needs access to self.skills
+            if call.name == "run_skill" {
+                let input_map: std::collections::HashMap<String, String> =
+                    serde_json::from_str(&call.input).unwrap_or_default();
+                let skill_name = input_map.get("name").cloned().unwrap_or_default();
+                let query = input_map.get("query").cloned().unwrap_or_default();
+
+                let result = if let Some(skill) = self.skills.iter().find(|s| s.name == skill_name) {
+                    match skill.run.kind {
+                        skills::SkillKind::Shell => {
+                            match skills::executor::execute_shell(skill, &query, &self.work_dir) {
+                                Ok(r) => executor::ToolResult { output: r.output, is_error: false },
+                                Err(e) => executor::ToolResult { output: e.to_string(), is_error: true },
+                            }
+                        }
+                        skills::SkillKind::Prompt => {
+                            match skills::executor::expand_prompt(skill, &query) {
+                                Ok(expanded) => executor::ToolResult { output: expanded, is_error: false },
+                                Err(e) => executor::ToolResult { output: e.to_string(), is_error: true },
+                            }
+                        }
+                    }
+                } else {
+                    executor::ToolResult { output: format!("skill '{skill_name}' not found"), is_error: true }
+                };
+                results.push(result);
                 continue;
             }
 

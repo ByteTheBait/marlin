@@ -4,7 +4,7 @@ pub mod extract;
 use crate::config::AstMode;
 use crate::providers::{ToolDef, ToolProp};
 
-pub fn all_tools(ast_mode: &AstMode) -> Vec<ToolDef> {
+pub fn all_tools(ast_mode: &AstMode, skills: &[(String, String)]) -> Vec<ToolDef> {
     let mut tools = vec![
         ToolDef {
             name: "read_file".into(),
@@ -80,6 +80,33 @@ pub fn all_tools(ast_mode: &AstMode) -> Vec<ToolDef> {
             required: vec!["query".into()],
         },
     ];
+
+    // Inject skill tools when skills are loaded
+    if !skills.is_empty() {
+        let skill_list = skills.iter()
+            .map(|(name, desc)| format!("  - {name}: {desc}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        tools.push(ToolDef {
+            name: "run_skill".into(),
+            description: format!(
+                "Run a pre-built Marlin skill by name. Use this when a skill matches \
+                the user's request — it's faster and more reliable than writing a \
+                shell command from scratch. Available skills:\n{skill_list}"
+            ),
+            properties: vec![
+                ToolProp {
+                    name: "name".into(), ty: "string".into(),
+                    description: "Skill name (exactly as listed above).".into(),
+                },
+                ToolProp {
+                    name: "query".into(), ty: "string".into(),
+                    description: "Input text or search query to pass to the skill.".into(),
+                },
+            ],
+            required: vec!["name".into()],
+        });
+    }
 
     // Inject AST harness tools only when harness mode is active
     if *ast_mode == AstMode::Harness {
