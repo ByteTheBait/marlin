@@ -278,6 +278,10 @@ pub fn col_app_bg() -> Color {
     if is_light() { Color::Rgb(252, 253, 255) } else { Color::Rgb(8, 12, 24) }
 }
 
+pub fn col_veil() -> Color {
+    if is_light() { Color::Rgb(8, 12, 24) } else { Color::Rgb(252, 253, 255) }
+}
+
 pub fn style_input_bubble() -> Style {
     if is_light() {
         Style::default().fg(Color::Rgb(180, 205, 235))

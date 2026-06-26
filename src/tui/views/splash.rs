@@ -24,7 +24,7 @@ pub struct SplashView {
 
 impl SplashView {
     pub fn new() -> Self {
-        let bg = col_app_bg();
+        let bg = col_veil();
 
         // Radial reveal: outer edge first, converging to center
         let effect = fx::effect_fn(
