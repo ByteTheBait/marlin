@@ -95,11 +95,12 @@ Every file touched by an AI edit gets snapshotted first — use `/revert` to res
 
 Skills are reusable operations stored as TOML files in `~/.marlin/skills/`. Three come built in:
 
-| Skill        | Triggers                             | What it does                        |
-|--------------|--------------------------------------|-------------------------------------|
-| `web_search` | search, look up, google, find online | DuckDuckGo via curl                 |
-| `ripgrep`    | grep, rg, search code                | `rg` across the working directory   |
-| `make_skill` | create skill, new skill              | Prompts the AI to write a new skill |
+| Skill        | Triggers                                  | What it does                            |
+|--------------|-------------------------------------------|-----------------------------------------|
+| `explore`    | explore, structure, list files, tree      | Directory tree (excludes build/hidden)  |
+| `web_search` | search, look up, google, find online      | DuckDuckGo via curl                     |
+| `ripgrep`    | grep, rg, search code                     | `rg` across the working directory       |
+| `make_skill` | create skill, new skill                   | Prompts the AI to write a new skill     |
 
 ### Using skills
 
@@ -405,7 +406,7 @@ Key directories:
 ```
 ~/.marlin/
   config.json          main config
-  skills/              skill TOML files (web_search, ripgrep, make_skill built in)
+  skills/              skill TOML files (explore, web_search, ripgrep, make_skill built in)
   skill_suggestions.md nightly AI skill recommendations
   sessions/            saved conversation history
   index/               TF-IDF search index

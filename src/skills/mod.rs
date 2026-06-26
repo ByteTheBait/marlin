@@ -141,6 +141,28 @@ fn default_skills() -> Vec<Skill> {
             },
         },
         Skill {
+            name: "explore".into(),
+            description: "Show project file structure (excludes .git, node_modules, target)".into(),
+            triggers: vec![
+                "explore".into(), "structure".into(), "overview".into(),
+                "list files".into(), "find files".into(), "what files".into(),
+                "directory".into(), "tree".into(), "navigate".into(),
+            ],
+            run: SkillRun {
+                kind: SkillKind::Shell,
+                command: concat!(
+                    r#"D="{query}"; find "${D:-.}" "#,
+                    r#"-not -path '*/.git/*' "#,
+                    r#"-not -path '*/node_modules/*' "#,
+                    r#"-not -path '*/target/*' "#,
+                    r#"-not -path '*/__pycache__/*' "#,
+                    r#"-not -name '*.pyc' "#,
+                    r#"| sort | head -80"#,
+                ).into(),
+                template: String::new(),
+            },
+        },
+        Skill {
             name: "make_skill".into(),
             description: "Create a new Marlin skill file".into(),
             triggers: vec![
