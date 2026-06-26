@@ -1,0 +1,135 @@
+{
+  "source_language": "rust",
+  "source_file": "main.rs",
+  "nodes": [
+    {
+      "id": "import:0:anyhow::Result",
+      "kind": "import",
+      "module": "anyhow::Result"
+    },
+    {
+      "id": "import:1:tokio::sync::mpsc",
+      "kind": "import",
+      "module": "tokio::sync::mpsc"
+    },
+    {
+      "id": "fn:main",
+      "kind": "function",
+      "name": "main",
+      "body": {
+        "stmts": [
+          {
+            "kind": "var_decl",
+            "name": "cfg",
+            "value": {
+              "kind": "raw_expr",
+              "text": "config::Config::load()?"
+            },
+            "is_mutable": false
+          },
+          {
+            "kind": "expr_stmt",
+            "expr": {
+              "kind": "call",
+              "func": {
+                "kind": "raw_expr",
+                "text": "tui::styles::set_light_theme"
+              },
+              "args": [
+                {
+                  "kind": "binary_op",
+                  "left": {
+                    "kind": "field_access",
+                    "object": {
+                      "name": "cfg"
+                    },
+                    "field": "theme"
+                  },
+                  "op": "==",
+                  "right": {
+                    "kind": "literal",
+                    "value": "light",
+                    "lit_kind": "string"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "kind": "var_decl",
+            "name": "eng",
+            "value": {
+              "kind": "raw_expr",
+              "text": "engine::Engine::new(cfg)?"
+            }
+          },
+          {
+            "kind": "var_decl",
+            "name": "let (action_tx, action_rx) = mpsc::channel::<engine::Action>(64);",
+            "is_mutable": false
+          },
+          {
+            "kind": "var_decl",
+            "name": "let (ui_tx, ui_rx) = mpsc::channel::<engine::UiUpdate>(256);",
+            "is_mutable": false
+          },
+          {
+            "kind": "var_decl",
+            "name": "rt",
+            "value": {
+              "kind": "raw_expr",
+              "text": "tokio::runtime::Builder::new_multi_thread()\n        .enable_all()\n        .build()?"
+            },
+            "is_mutable": false
+          },
+          {
+            "kind": "expr_stmt",
+            "expr": {
+              "kind": "call",
+              "func": {
+                "kind": "field_access",
+                "object": {
+                  "name": "rt"
+                },
+                "field": "spawn"
+              },
+              "args": [
+                {
+                  "kind": "raw_expr",
+                  "text": "async move {\n        eng.run(action_rx, ui_tx).await;\n    }"
+                }
+              ]
+            }
+          },
+          {
+            "kind": "expr_stmt",
+            "expr": {
+              "kind": "raw_expr",
+              "text": "tui::runner::run(action_tx, ui_rx)?"
+            }
+          },
+          {
+            "kind": "expr_stmt",
+            "expr": {
+              "kind": "call",
+              "func": {
+                "name": "Ok"
+              },
+              "args": [
+                {
+                  "kind": "raw_expr",
+                  "text": "()"
+                }
+              ]
+            },
+            "is_implicit_return": true
+          }
+        ]
+      },
+      "visibility": "private",
+      "return_type": {
+        "kind": "void"
+      }
+    }
+  ]
+}

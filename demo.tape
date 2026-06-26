@@ -13,9 +13,9 @@ Set CursorBlink false
 Sleep 400ms
 
 # Launch marlin from the project root
-Type "cd /Users/henry/Developer/marlin && ./target/release/marlin"
-Enter
+Type "marlin""
 Sleep 300ms
+Enter
 
 # ── splash — tachyonfx sweep_in plays automatically ──────────────────────────
 Sleep 2500ms
@@ -35,8 +35,11 @@ Enter
 Sleep 2200ms
 
 #  
-Type "/permissions "
+Type "/permissi"
 Sleep 500ms
+Tab
+Sleep 100ms
+Type " "
 
 Type "skip"
 
@@ -47,9 +50,9 @@ Enter
 Sleep 750ms
 
 # ── ask something real (Groq / qwen3-32b will respond) ───────────────────────
-Type "list every .rs file in src/"
+Type "explore this directory and list files"
 Enter
-Sleep 15s
+Sleep 20s
 
 # ── graceful exit ─────────────────────────────────────────────────────────────
 Ctrl+Q
