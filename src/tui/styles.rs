@@ -93,6 +93,30 @@ pub fn style_tool_name() -> Style {
     Style::default().fg(col_cobalt()).add_modifier(Modifier::BOLD)
 }
 
+/// Background fill of the tool-call badge chip.
+pub fn style_tool_badge() -> Style {
+    if is_light() {
+        Style::default()
+            .fg(Color::Rgb(25, 60, 120))
+            .bg(Color::Rgb(200, 220, 250))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::Rgb(160, 205, 255))
+            .bg(Color::Rgb(18, 38, 80))
+            .add_modifier(Modifier::BOLD)
+    }
+}
+
+/// Color of the badge bracket glyphs (╭ and ╮).
+pub fn style_tool_badge_bracket() -> Style {
+    if is_light() {
+        Style::default().fg(Color::Rgb(140, 175, 220))
+    } else {
+        Style::default().fg(Color::Rgb(35, 65, 120))
+    }
+}
+
 pub fn style_input_border_active() -> Style {
     Style::default().fg(col_aqua())
 }

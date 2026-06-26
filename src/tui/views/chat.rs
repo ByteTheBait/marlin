@@ -521,12 +521,21 @@ impl ChatView {
 
         // Agentic turn indicator
         if self.streaming && self.tool_iterations > 0 && self.stream_buf.is_empty() {
-            let label = if self.current_tool.is_empty() { "thinking" } else { &self.current_tool };
+            let raw = if self.current_tool.is_empty() { "thinking" } else { &self.current_tool };
+            let label = if self.current_tool.is_empty() {
+                "Thinking"
+            } else {
+                tool_display_name(&self.current_tool)
+            };
+            let _ = raw;
             all_lines.push(Line::from(vec![
                 Span::raw("  "),
-                Span::styled("@ ", style_tool_icon()),
+                Span::styled("╭", style_tool_badge_bracket()),
+                Span::styled(format!(" {label} "), style_tool_badge()),
+                Span::styled("╮", style_tool_badge_bracket()),
+                Span::raw("  "),
                 Span::styled(
-                    format!("{label}  (turn {})", self.tool_iterations),
+                    format!("turn {}", self.tool_iterations),
                     style_system(),
                 ),
             ]));
@@ -628,23 +637,30 @@ impl ChatView {
                     } else {
                         raw.clone()
                     };
+                    let display = tool_display_name(&entry.tool_name);
                     lines.push(Line::from(vec![
                         Span::raw("  "),
-                        Span::styled("@ ", style_tool_icon()),
-                        Span::styled(entry.tool_name.clone(), style_tool_name()),
+                        Span::styled("╭", style_tool_badge_bracket()),
+                        Span::styled(format!(" {display} "), style_tool_badge()),
+                        Span::styled("╮", style_tool_badge_bracket()),
                         Span::raw("  "),
                         Span::styled(input, style_system()),
                     ]));
                 }
                 EntryRole::ToolResult { is_error } => {
+                    let display = tool_display_name(&entry.tool_name);
                     let (icon, st) = if *is_error {
-                        ("x ", style_error())
+                        ("✗", style_error())
                     } else {
-                        ("+ ", style_success())
+                        ("✓", style_success())
                     };
                     lines.push(Line::from(vec![
                         Span::raw("  "),
-                        Span::styled(format!("{icon}{}", entry.tool_name), st),
+                        Span::styled("╭", style_tool_badge_bracket()),
+                        Span::styled(format!(" {display} "), style_tool_badge()),
+                        Span::styled("╮", style_tool_badge_bracket()),
+                        Span::raw("  "),
+                        Span::styled(icon, st),
                     ]));
                     let content_lines: Vec<&str> =
                         entry.content.trim_end_matches('\n').lines().collect();
@@ -886,4 +902,21 @@ fn rate_bar(pct: f64, width: usize) -> String {
     let filled = (pct * width as f64) as usize;
     let empty = width.saturating_sub(filled);
     format!("[{}{}]", "█".repeat(filled), "░".repeat(empty))
+}
+
+fn tool_display_name(raw: &str) -> &'static str {
+    match raw {
+        "read_file"        => "Read",
+        "write_file"       => "Write",
+        "edit_file"        => "Update",
+        "run_command"      => "Run",
+        "list_directory"   => "List",
+        "create_directory" => "Mkdir",
+        "search_codebase"  => "Search",
+        "run_skill"        => "Skill",
+        "ast_skeleton"     => "Skeleton",
+        "ast_get_node"     => "Node",
+        "ast_mutate"       => "Mutate",
+        _                  => "Tool",
+    }
 }
