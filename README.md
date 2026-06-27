@@ -108,7 +108,9 @@ Every file touched by an AI edit gets snapshotted first — use `/revert` to res
 
 ## Skills
 
-Skills are reusable operations stored as TOML files in `~/.marlin/skills/`. Three come built in:
+Skills are reusable operations stored as TOML files in `~/.marlin/skills/`. Three come built in.
+
+Shell skills run **outside the sandbox** and bypass the command allow-list — this is intentional so they can reach the web, external APIs, and system tools. Only install skills you trust.
 
 | Skill        | Triggers                                  | What it does                            |
 |--------------|-------------------------------------------|-----------------------------------------|
@@ -258,8 +260,8 @@ AST mode persists across sessions (stored in `~/.marlin/config.json`).
 /attach <file>                     attach a file to your next message
 /detach [file]                     remove attachment(s)
 /exec <cmd>                        run a shell command (/allow-ed prefix required)
-/allow <prefix>                    whitelist a command prefix (e.g. /allow cargo)
-/sandbox [off|permissive|mxc]      command isolation mode
+/allow <prefix>                    permit an executable or command prefix (e.g. /allow cargo test)
+/sandbox [off|permissive|mxc]      command isolation mode (permissive allows all commands)
 /permissions [skip|require]        skip or require permission checks (persists)
 
 /verify [cmd|off]                  run a command after every file edit (Write-Test-Fix)
@@ -312,7 +314,7 @@ AST mode persists across sessions (stored in `~/.marlin/config.json`).
 
 On terminals 100+ columns wide, a sidebar appears on the right with two panels:
 
-**Context Budget** — a live token-usage bar. Turns yellow past 70%, red past 90%. When the bar fills, Marlin automatically compacts old turns into a summary via the LLM before falling back to mechanical truncation.
+**Context Budget** — a live token-usage bar (exact counts when using Claude, heuristic otherwise). Turns yellow past 70%, red past 90%. At ~70k tokens Marlin automatically compacts old turns into an LLM summary; mechanical truncation kicks in at ~80k, and oldest turns are dropped at ~95k.
 
 **Tasks** — a live task list showing every tool call made in the current goal, with status markers:
 
@@ -325,9 +327,33 @@ On terminals 100+ columns wide, a sidebar appears on the right with two panels:
 
 ---
 
-## Destructive command guard
+## Command permissions
 
-Before running any shell command matching a destructive pattern (`rm`, `git push --force`, `kill`, `dd`, `DROP TABLE`, etc.), Marlin pauses and shows a modal:
+Marlin enforces a two-layer permission model for shell commands:
+
+**Allow list** — use `/allow <prefix>` to permit commands by executable name or command prefix:
+
+```
+/allow git          # permits: git status, git push, git log ...
+/allow cargo test   # permits: cargo test, cargo test --release
+                    # denies:  cargo build (different subcommand)
+```
+
+**Chain detection** — commands containing `&&`, `||`, `;`, backtick, or `$()` are always denied regardless of the allow list, because the second clause can be anything. Use `/sandbox permissive` or `"*"` in your allow list to lift this restriction.
+
+```
+git status          →  allowed (if git is allowed)
+git log | head -20  →  allowed (pipes and redirects pass through)
+git status && rm -rf .  →  denied (chain operator detected)
+cargo test; curl evil.com  →  denied
+```
+
+**Sandbox modes** (set with `/sandbox`):
+- `off` — default; commands require an explicit `/allow` entry
+- `permissive` — all commands allowed, runs directly on the host
+- `mxc` — runs commands inside an MXC isolation container
+
+**Destructive command guard** — before running any shell command matching a destructive pattern (`rm`, `git push --force`, `kill`, `dd`, `DROP TABLE`, etc.), Marlin pauses regardless of allow status and shows a modal:
 
 ```
 ╔══ ⚠  Destructive Command ══╗
@@ -396,9 +422,11 @@ Ratatui TUI    ←──  UiUpdate  (chunks, tool events, tasks, tokens, skills)
 ```
 
 **Context management (token-based):**
-- At ~70k tokens: LLM compaction — old turns summarized into one block via the configured provider
-- At ~80k tokens: mechanical compression — long messages trimmed to a tail snippet
-- At ~100k tokens: oldest turns dropped, keeping the last 8 intact
+- At ~70k tokens: LLM compaction — old turns summarized into one block using the cheapest available model (haiku → sonnet → active); tool-call messages are serialized faithfully so the summary captures what was actually done
+- At ~80k tokens: mechanical compression — tool results truncated first (highest token density, lowest value), then user/assistant messages trimmed to a tail snippet
+- At ~95k tokens: oldest turns dropped, keeping the most recent 6 intact
+
+Token counts use Claude's `POST /v1/messages/count_tokens` API for exact figures when the active provider is Claude; other providers fall back to a chars/4 heuristic.
 
 **Loop guard:**
 - Intercepts after 3 identical failing tool calls
@@ -406,9 +434,11 @@ Ratatui TUI    ←──  UiUpdate  (chunks, tool events, tasks, tokens, skills)
 
 **Safety:**
 - 100 tool-call cap per goal
+- Chain operator detection — `&&`, `||`, `;`, backtick, `$()` blocked at the policy layer before execution
 - Destructive command approval modal
 - Optional `env_clear()` subprocess isolation (`/clean-env on`)
 - Large command outputs (> 6k chars) spilled to `~/.marlin/logs/` with a pointer returned to the LLM
+- Skills run outside the sandbox (intentional) but still go through output truncation and logging
 
 ---
 
