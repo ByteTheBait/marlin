@@ -4,7 +4,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     symbols::Marker,
     text::{Line, Span},
-    widgets::{Axis, Block, BorderType, Borders, Chart, Dataset, GraphType, Paragraph, Widget},
+    widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph, Widget},
 };
 
 use crate::engine::tasks::{TaskStatus, TaskStep};
@@ -202,12 +202,3 @@ impl StyleExt for Color {
     }
 }
 
-// Small helper so col_app_bg() can be used in the style
-trait StyleFgExt {
-    fn fg(self) -> Option<Color>;
-}
-impl StyleFgExt for Style {
-    fn fg(self) -> Option<Color> {
-        self.fg
-    }
-}

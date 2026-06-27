@@ -1,3 +1,7 @@
+// Style palette — not every constant or function is referenced by current UI code;
+// unused items are intentionally kept as the palette grows.
+#![allow(dead_code)]
+
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ratatui::style::{Color, Modifier, Style};

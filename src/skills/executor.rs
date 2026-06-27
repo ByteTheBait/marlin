@@ -2,26 +2,14 @@ use anyhow::{anyhow, Result};
 
 use super::{Skill, SkillKind};
 
-pub struct SkillResult {
-    pub output: String,
-}
-
-pub fn execute_shell(skill: &Skill, query: &str, work_dir: &str) -> Result<SkillResult> {
+/// Resolve the shell command for a shell skill, substituting `{query}`.
+/// The caller is responsible for executing it through the main tool executor
+/// (which applies output truncation, logging, and clean_env).
+pub fn skill_command(skill: &Skill, query: &str) -> Result<String> {
     if skill.run.kind != SkillKind::Shell {
         return Err(anyhow!("skill '{}' is not a shell skill", skill.name));
     }
-    let cmd = skill.run.command.replace("{query}", query);
-    let out = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&cmd)
-        .current_dir(work_dir)
-        .output()?;
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
-    Ok(SkillResult { output: text.trim().to_string() })
+    Ok(skill.run.command.replace("{query}", query))
 }
 
 pub fn expand_prompt(skill: &Skill, input: &str) -> Result<String> {

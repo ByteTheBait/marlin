@@ -1,12 +1,11 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, Widget},
 };
 
-use crate::tui::styles::{self, *};
+use crate::tui::styles::*;
 
 #[derive(Clone)]
 pub struct CmdDef {
@@ -91,6 +90,7 @@ pub struct SkillHint {
 pub struct SuggestionPanel<'a> {
     pub suggestions: &'a [&'a CmdDef],
     pub typed: &'a str,
+    #[allow(dead_code)] // set by caller for future layout use
     pub width: u16,
     pub frame: u64,
     pub streaming: bool,

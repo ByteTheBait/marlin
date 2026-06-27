@@ -1,14 +1,11 @@
-use std::collections::HashMap;
-
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures::StreamExt;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
 use super::{
-    Message, Provider, RateLimitState, StreamChunk, StreamRequest, ToolCall, ToolDef,
+    Message, Provider, StreamChunk, StreamRequest, ToolCall, ToolDef,
     ratelimit::{parse_rate_limit_state, retry_after_seconds},
 };
 

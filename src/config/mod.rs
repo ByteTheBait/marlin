@@ -18,6 +18,7 @@ pub struct ModelTier {
 }
 
 impl ModelTier {
+    #[allow(dead_code)]
     pub fn has_backup(&self) -> bool {
         !self.backup_provider.is_empty() && !self.backup_model.is_empty()
     }

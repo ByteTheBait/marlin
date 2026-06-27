@@ -1,5 +1,6 @@
 pub mod executor;
 pub mod extract;
+pub mod policy;
 
 use crate::config::AstMode;
 use crate::providers::{ToolDef, ToolProp};

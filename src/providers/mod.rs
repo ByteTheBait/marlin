@@ -86,6 +86,7 @@ pub struct StreamRequest {
 
 #[async_trait]
 pub trait Provider: Send + Sync {
+    #[allow(dead_code)]
     fn name(&self) -> &str;
     fn models(&self) -> Vec<String>;
     async fn stream(&self, req: StreamRequest) -> Result<mpsc::Receiver<StreamChunk>>;

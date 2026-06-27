@@ -12,15 +12,15 @@ use tokio::sync::mpsc;
 
 use crate::config::{AstMode, Config, ModelTier, SandboxMode};
 use crate::history::{
-    self, InputHistory, Session, SessionEntry, from_session_message, to_session_message,
+    self, InputHistory, Session, from_session_message, to_session_message,
 };
 use crate::index::{self, Index};
 use crate::providers::{
-    Message, Provider, RateLimitState, StreamRequest, ToolCall, ToolCallMsg, registry::Registry,
+    Message, RateLimitState, StreamRequest, ToolCall, ToolCallMsg, registry::Registry,
 };
 use crate::skills::{self, Skill, SkillDef};
 use crate::snapshots;
-use crate::tools::{all_tools, executor};
+use crate::tools::{all_tools, executor, policy};
 use context::{estimate_tokens, maybe_prune_history};
 use loop_guard::LoopGuard;
 use tasks::{TaskStatus, TaskStep};
@@ -37,7 +37,7 @@ pub enum UiUpdate {
     RateLimited { secs: u32 },
     GoalComplete { tool_count: usize },
     StatusUpdate(StatusInfo),
-    IndexBuilt { files: usize, terms: usize },
+    IndexBuilt,
     /// Engine is paused waiting for user approval of a destructive command
     AwaitingApproval { cmd: String },
     /// Updated task list for the sidebar
@@ -573,9 +573,31 @@ impl Engine {
                 let result = if let Some(skill) = self.skills.iter().find(|s| s.name == skill_name) {
                     match skill.run.kind {
                         skills::SkillKind::Shell => {
-                            match skills::executor::execute_shell(skill, &query, &self.work_dir) {
-                                Ok(r) => executor::ToolResult { output: r.output, is_error: false },
+                            match skills::executor::skill_command(skill, &query) {
                                 Err(e) => executor::ToolResult { output: e.to_string(), is_error: true },
+                                Ok(cmd) => {
+                                    let cmd_json = serde_json::json!({"command": cmd}).to_string();
+                                    let wd = self.work_dir.clone();
+                                    let clean_env = self.cfg.clean_env;
+                                    let logs_dir = self.marlin_dir.join("logs");
+                                    tokio::task::spawn_blocking(move || {
+                                        executor::execute(
+                                            "run_command",
+                                            &cmd_json,
+                                            &wd,
+                                            &|_| true,  // skills bypass the command allow-list
+                                            None,
+                                            None,
+                                            Some(&logs_dir),
+                                            clean_env,
+                                            crate::config::AstMode::Off,
+                                            &crate::config::SandboxMode::Off, // skills run outside sandbox
+                                        )
+                                    }).await.unwrap_or_else(|e| executor::ToolResult {
+                                        output: e.to_string(),
+                                        is_error: true,
+                                    })
+                                }
                             }
                         }
                         skills::SkillKind::Prompt => {
@@ -619,7 +641,7 @@ impl Engine {
                     &name,
                     &input,
                     &work_dir,
-                    &|cmd| sandbox || allowed.iter().any(|p| p == "*" || cmd.starts_with(p.as_str())),
+                    &|cmd| sandbox || policy::is_command_allowed(cmd, &allowed),
                     search_fn.as_deref(),
                     Some(&|abs_path: &str, tool: &str| {
                         snapshots::take(&marlin_dir, &wd2, abs_path, tool);
@@ -1380,10 +1402,7 @@ impl Engine {
                 let result = tokio::task::spawn_blocking(move || index::build(&wd, None)).await;
                 match result {
                     Ok(Ok((idx, stats))) => {
-                        let _ = ui_tx.send(UiUpdate::IndexBuilt {
-                            files: stats.files,
-                            terms: stats.terms,
-                        }).await;
+                        let _ = ui_tx.send(UiUpdate::IndexBuilt).await;
                         index::save(&self.marlin_dir, &idx);
                         sys!(format!("Index built: {} files, {} terms in {:?}. Use /search <query> or the AI will use it automatically.",
                             stats.files, stats.terms, stats.elapsed));
@@ -1538,7 +1557,7 @@ impl Engine {
 
             "/skill" | "/skills" => {
                 let subcmd = args.first().copied().unwrap_or("list");
-                let subrest = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
+                let _subrest = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
                 let subargs: Vec<&str> = args.get(1..).map(|a| a.to_vec()).unwrap_or_default();
 
                 match subcmd {
@@ -1568,16 +1587,33 @@ impl Engine {
                             match skill.run.kind {
                                 skills::SkillKind::Shell => {
                                     sys!(format!("Running skill '{}' with query: {query}", skill.name));
-                                    let wd = self.work_dir.clone();
-                                    let s = skill.clone();
-                                    let q = query.clone();
-                                    let result = tokio::task::spawn_blocking(move || {
-                                        skills::executor::execute_shell(&s, &q, &wd)
-                                    }).await;
-                                    match result {
-                                        Ok(Ok(r))  => sys!(format!("[skill: {}]\n{}", skill_name, r.output)),
-                                        Ok(Err(e)) => err!(format!("Skill error: {e}")),
-                                        Err(e)     => err!(format!("Skill task panic: {e}")),
+                                    match skills::executor::skill_command(&skill, &query) {
+                                        Err(e) => err!(format!("Skill error: {e}")),
+                                        Ok(cmd) => {
+                                            let cmd_json = serde_json::json!({"command": cmd}).to_string();
+                                            let wd = self.work_dir.clone();
+                                            let clean_env = self.cfg.clean_env;
+                                            let logs_dir = self.marlin_dir.join("logs");
+                                            let result = tokio::task::spawn_blocking(move || {
+                                                executor::execute(
+                                                    "run_command",
+                                                    &cmd_json,
+                                                    &wd,
+                                                    &|_| true,
+                                                    None,
+                                                    None,
+                                                    Some(&logs_dir),
+                                                    clean_env,
+                                                    crate::config::AstMode::Off,
+                                                    &crate::config::SandboxMode::Off,
+                                                )
+                                            }).await;
+                                            match result {
+                                                Ok(r) if r.is_error => err!(format!("[skill: {skill_name}]\n{}", r.output)),
+                                                Ok(r)               => sys!(format!("[skill: {skill_name}]\n{}", r.output)),
+                                                Err(e)              => err!(format!("Skill task panic: {e}")),
+                                            }
+                                        }
                                     }
                                 }
                                 skills::SkillKind::Prompt => {
@@ -1695,7 +1731,7 @@ impl Engine {
     }
 
     fn is_allowed(&self, cmd: &str) -> bool {
-        self.allowed_commands.iter().any(|p| p == "*" || cmd.starts_with(p.as_str()))
+        policy::is_command_allowed(cmd, &self.allowed_commands)
     }
 
     fn resolve_path(&self, p: &str) -> String {

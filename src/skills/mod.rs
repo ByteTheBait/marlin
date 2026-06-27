@@ -41,6 +41,7 @@ pub struct SkillDef {
     pub name: String,
     pub description: String,
     pub triggers: Vec<String>,
+    #[allow(dead_code)]
     pub kind: SkillKind,
 }
 

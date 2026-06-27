@@ -2,7 +2,7 @@ use std::io;
 use std::time::Duration;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -17,11 +17,9 @@ use ratatui::{
 };
 use tokio::sync::mpsc;
 
-use crate::config::AstMode;
 use crate::engine::{Action, UiUpdate};
-use crate::engine::tasks::TaskStep;
 use crate::tui::{
-    styles::{self, *},
+    styles,
     views::{chat::ChatView, splash::SplashView},
     widgets::{sidebar::Sidebar, statusbar::StatusBar},
 };

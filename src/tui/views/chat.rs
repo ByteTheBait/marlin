@@ -4,7 +4,7 @@ use chrono::{DateTime, Local};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     layout::Size,
     widgets::{Block, BorderType, Borders, Paragraph, StatefulWidget, Widget},
@@ -15,7 +15,7 @@ use tui_textarea::TextArea;
 
 use crate::engine::{Action, UiUpdate};
 use crate::tui::{
-    styles::{self, *},
+    styles::*,
     widgets::suggestions::{CmdDef, SuggestionPanel, all_commands, filter_suggestions, tab_complete},
 };
 
@@ -27,6 +27,7 @@ pub enum EntryRole {
     Assistant,
     System,
     Error,
+    #[allow(dead_code)]
     Output,
     ToolCall,
     ToolResult { is_error: bool },
