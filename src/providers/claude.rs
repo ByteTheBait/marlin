@@ -36,6 +36,40 @@ impl Provider for ClaudeProvider {
         ]
     }
 
+    async fn count_tokens(&self, req: &StreamRequest) -> Option<usize> {
+        if self.api_key.is_empty() { return None; }
+
+        let messages = marshal_claude_messages(&req.messages);
+        let tools = marshal_claude_tools(&req.tools);
+        let mut body = serde_json::json!({
+            "model": req.model,
+            "messages": messages,
+        });
+        if !req.system_prompt.is_empty() {
+            body["system"] = serde_json::json!([{
+                "type": "text",
+                "text": req.system_prompt,
+            }]);
+        }
+        if !tools.is_empty() {
+            body["tools"] = serde_json::json!(tools);
+        }
+
+        let resp = reqwest::Client::new()
+            .post("https://api.anthropic.com/v1/messages/count_tokens")
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .ok()?;
+
+        if !resp.status().is_success() { return None; }
+        let json: serde_json::Value = resp.json().await.ok()?;
+        json["input_tokens"].as_u64().map(|n| n as usize)
+    }
+
     async fn stream(&self, req: StreamRequest) -> Result<mpsc::Receiver<StreamChunk>> {
         if self.api_key.is_empty() {
             return Err(anyhow!("claude: no API key set — use /key claude <key>"));

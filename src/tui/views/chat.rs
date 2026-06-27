@@ -572,11 +572,14 @@ impl ChatView {
                         Span::styled("you".to_string(), style_user_label()),
                         Span::styled(format!("  ·  {ts}"), style_system()),
                     ]));
+                    let wrap_w = width.saturating_sub(2);
                     for l in entry.content.lines() {
-                        lines.push(Line::from(Span::styled(
-                            format!("  {l}"),
-                            style_user_text(),
-                        )));
+                        for wrapped in word_wrap(l, wrap_w) {
+                            lines.push(Line::from(Span::styled(
+                                format!("  {wrapped}"),
+                                style_user_text(),
+                            )));
+                        }
                     }
                     lines.push(Line::from(""));
                     i += 1;
@@ -847,9 +850,68 @@ impl ChatView {
     }
 }
 
+// ── Word wrap helper ─────────────────────────────────────────────────────────
+
+fn word_wrap(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![text.to_string()];
+    }
+    if text.chars().count() <= max_width {
+        return vec![text.to_string()];
+    }
+    let mut result: Vec<String> = Vec::new();
+    let mut line = String::new();
+
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+        if line.is_empty() {
+            if word_len >= max_width {
+                let mut chars = word.chars();
+                loop {
+                    let chunk: String = chars.by_ref().take(max_width).collect();
+                    if chunk.is_empty() { break; }
+                    if chunk.chars().count() < max_width {
+                        line = chunk;
+                        break;
+                    }
+                    result.push(chunk);
+                }
+            } else {
+                line = word.to_string();
+            }
+        } else if line.chars().count() + 1 + word_len <= max_width {
+            line.push(' ');
+            line.push_str(word);
+        } else {
+            result.push(std::mem::take(&mut line));
+            if word_len >= max_width {
+                let mut chars = word.chars();
+                loop {
+                    let chunk: String = chars.by_ref().take(max_width).collect();
+                    if chunk.is_empty() { break; }
+                    if chunk.chars().count() < max_width {
+                        line = chunk;
+                        break;
+                    }
+                    result.push(chunk);
+                }
+            } else {
+                line = word.to_string();
+            }
+        }
+    }
+    if !line.is_empty() {
+        result.push(line);
+    }
+    if result.is_empty() {
+        result.push(String::new());
+    }
+    result
+}
+
 // ── Markdown renderer (lightweight inline) ───────────────────────────────────
 
-fn render_markdown(text: &str, _width: usize) -> Vec<Line<'static>> {
+fn render_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut in_code_block = false;
 
@@ -857,7 +919,6 @@ fn render_markdown(text: &str, _width: usize) -> Vec<Line<'static>> {
         if raw_line.starts_with("```") {
             in_code_block = !in_code_block;
             if in_code_block {
-                // Show fence dimmed
                 lines.push(Line::from(Span::styled(raw_line.to_string(), style_system())));
             } else {
                 lines.push(Line::from(Span::styled("```".to_string(), style_system())));
@@ -865,32 +926,52 @@ fn render_markdown(text: &str, _width: usize) -> Vec<Line<'static>> {
             continue;
         }
         if in_code_block {
-            lines.push(Line::from(Span::styled(raw_line.to_string(), style_code_block())));
+            // Wrap code lines by character (don't reformat whitespace)
+            let chars: Vec<char> = raw_line.chars().collect();
+            if width == 0 || chars.len() <= width {
+                lines.push(Line::from(Span::styled(raw_line.to_string(), style_code_block())));
+            } else {
+                for chunk in chars.chunks(width.max(1)) {
+                    lines.push(Line::from(Span::styled(chunk.iter().collect::<String>(), style_code_block())));
+                }
+            }
             continue;
         }
         if raw_line.starts_with("# ") {
-            lines.push(Line::from(Span::styled(
-                raw_line[2..].to_string(),
-                Style::default().fg(COL_USER).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            )));
+            for wrapped in word_wrap(&raw_line[2..], width) {
+                lines.push(Line::from(Span::styled(
+                    wrapped,
+                    Style::default().fg(COL_USER).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                )));
+            }
             continue;
         }
         if raw_line.starts_with("## ") {
-            lines.push(Line::from(Span::styled(
-                raw_line[3..].to_string(),
-                Style::default().fg(COL_AQUA).add_modifier(Modifier::BOLD),
-            )));
+            for wrapped in word_wrap(&raw_line[3..], width) {
+                lines.push(Line::from(Span::styled(
+                    wrapped,
+                    Style::default().fg(COL_AQUA).add_modifier(Modifier::BOLD),
+                )));
+            }
             continue;
         }
         if raw_line.starts_with("### ") {
-            lines.push(Line::from(Span::styled(
-                raw_line[4..].to_string(),
-                Style::default().fg(COL_STEEL).add_modifier(Modifier::BOLD),
-            )));
+            for wrapped in word_wrap(&raw_line[4..], width) {
+                lines.push(Line::from(Span::styled(
+                    wrapped,
+                    Style::default().fg(COL_STEEL).add_modifier(Modifier::BOLD),
+                )));
+            }
             continue;
         }
-        // Inline spans (bold, italic, code)
-        lines.push(parse_inline(raw_line));
+        // Inline spans (bold, italic, code) — wrap then parse each chunk
+        if width > 0 && raw_line.chars().count() > width {
+            for wrapped in word_wrap(raw_line, width) {
+                lines.push(parse_inline(&wrapped));
+            }
+        } else {
+            lines.push(parse_inline(raw_line));
+        }
     }
 
     lines

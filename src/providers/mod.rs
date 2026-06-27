@@ -89,4 +89,8 @@ pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
     fn models(&self) -> Vec<String>;
     async fn stream(&self, req: StreamRequest) -> Result<mpsc::Receiver<StreamChunk>>;
+
+    /// Exact input token count for the given request.
+    /// Returns None if the provider doesn't support this (falls back to heuristic).
+    async fn count_tokens(&self, _req: &StreamRequest) -> Option<usize> { None }
 }

@@ -109,6 +109,9 @@ pub struct Engine {
     /// Backup provider/model to use if req_provider is rate-limited
     req_backup_provider: String,
     req_backup_model: String,
+
+    /// Token count at last LLM compaction — prevents immediate re-triggering.
+    compact_guard_tokens: usize,
 }
 
 impl Engine {
@@ -157,6 +160,7 @@ impl Engine {
             req_model,
             req_backup_provider: String::new(),
             req_backup_model: String::new(),
+            compact_guard_tokens: 0,
         })
     }
 
@@ -234,8 +238,22 @@ impl Engine {
                     // Select model tier based on difficulty score (if tiers enabled).
                     self.rate_and_route(&text, &ui_tx).await;
 
-                    // Broadcast token count immediately so the sidebar isn't stale while waiting
-                    let tok = estimate_tokens(&self.history, &self.effective_system_prompt());
+                    // Broadcast token count immediately so the sidebar isn't stale while waiting.
+                    // Prefer exact count from provider API; fall back to heuristic.
+                    let system_prompt = self.effective_system_prompt();
+                    let tok = if let Ok(p) = self.registry.get(&self.req_provider) {
+                        let req_for_count = StreamRequest {
+                            model: self.req_model.clone(),
+                            messages: self.history.clone(),
+                            system_prompt: system_prompt.clone(),
+                            max_tokens: 1,
+                            tools: all_tools(&self.ast_mode, &self.skills.iter().map(|s| (s.name.clone(), s.description.clone())).collect::<Vec<_>>()),
+                        };
+                        p.count_tokens(&req_for_count).await
+                            .unwrap_or_else(|| estimate_tokens(&self.history, &system_prompt))
+                    } else {
+                        estimate_tokens(&self.history, &system_prompt)
+                    };
                     let _ = ui_tx.send(UiUpdate::TokenUsage {
                         used: tok,
                         budget: self.token_budget,
@@ -714,33 +732,36 @@ impl Engine {
         const COMPACT_ABOVE: usize = 70_000;
         const KEEP_RECENT: usize = 8;
 
-        if estimate_tokens(&self.history, "") < COMPACT_ABOVE { return; }
+        let cur_tokens = estimate_tokens(&self.history, "");
+        if cur_tokens < COMPACT_ABOVE { return; }
         if self.history.len() <= KEEP_RECENT { return; }
+        // Don't re-compact immediately after a previous compaction; wait for 5k more tokens
+        if self.compact_guard_tokens > 0 && cur_tokens < self.compact_guard_tokens + 5_000 {
+            return;
+        }
 
         let split = self.history.len() - KEEP_RECENT;
         let old: Vec<Message> = self.history[..split].to_vec();
 
-        let provider = match self.registry.get(&self.cfg.active_provider) {
+        // Prefer the cheapest/fastest model so compaction doesn't waste quota
+        let (compact_provider, compact_model) = self.cheapest_model();
+        let provider = match self.registry.get(&compact_provider) {
             Ok(p) => p,
             Err(_) => return,
         };
 
-        // Build a compaction prompt from the old messages
-        let mut ctx = String::new();
-        for m in &old {
-            let role = &m.role;
-            let snip = if m.content.len() > 800 { &m.content[..800] } else { &m.content };
-            ctx.push_str(&format!("[{role}]: {snip}\n\n"));
-        }
+        let ctx = compact_serialize(&old);
 
         let summary_req = StreamRequest {
-            model: self.cfg.active_model.clone(),
+            model: compact_model,
             messages: vec![Message {
                 role: "user".into(),
                 content: format!(
-                    "Summarize the following conversation fragment concisely for an AI coding assistant. \
-                    Focus on: files changed, technical decisions made, errors encountered, and current state. \
-                    Be dense and precise — this replaces the original context.\n\n{ctx}"
+                    "Produce a dense technical summary of this coding session fragment for an AI \
+                    coding assistant. Include: files created/modified (with key changes), commands \
+                    run and their outcomes, errors encountered and how they were resolved, decisions \
+                    made, and current task state. Be precise and comprehensive — this summary \
+                    replaces the original turns in context.\n\n{ctx}"
                 ),
                 tool_calls: vec![],
                 tool_use_id: String::new(),
@@ -748,12 +769,12 @@ impl Engine {
                 is_error: false,
             }],
             system_prompt: String::new(),
-            max_tokens: 1024,
+            max_tokens: 1500,
             tools: vec![],
         };
 
         let _ = ui_tx.send(UiUpdate::SystemMsg(
-            "Context compacting — summarizing older turns via LLM…".into()
+            format!("Compacting context (~{cur_tokens} tokens) — summarizing {split} older turns…")
         )).await;
 
         let mut stream = match provider.stream(summary_req).await {
@@ -769,12 +790,11 @@ impl Engine {
 
         if summary.trim().is_empty() { return; }
 
-        // Replace old turns with the summary block
         let recent = self.history.split_off(split);
         self.history.clear();
         self.history.push(Message {
             role: "user".into(),
-            content: format!("[Marlin Context Summary]\n{}", summary.trim()),
+            content: format!("[Marlin Context Summary — {split} turns condensed]\n{}", summary.trim()),
             tool_calls: vec![],
             tool_use_id: String::new(),
             tool_call_id: String::new(),
@@ -782,9 +802,27 @@ impl Engine {
         });
         self.history.extend(recent);
 
+        let new_tokens = estimate_tokens(&self.history, "");
+        self.compact_guard_tokens = new_tokens;
+
         let _ = ui_tx.send(UiUpdate::SystemMsg(
-            format!("Context compacted: {split} older turns → 1 summary block.")
+            format!("Context compacted: {split} turns → 1 summary (~{new_tokens} tokens now).")
         )).await;
+    }
+
+    /// Returns (provider, model) for cheap compaction calls, preferring haiku > sonnet > active.
+    fn cheapest_model(&self) -> (String, String) {
+        let p = &self.cfg.active_provider;
+        if let Ok(prov) = self.registry.get(p) {
+            let models = prov.models();
+            if let Some(m) = models.iter().find(|m| m.contains("haiku")) {
+                return (p.clone(), m.clone());
+            }
+            if let Some(m) = models.iter().find(|m| m.contains("sonnet")) {
+                return (p.clone(), m.clone());
+            }
+        }
+        (self.cfg.active_provider.clone(), self.cfg.active_model.clone())
     }
 
     // ── Model tier routing ────────────────────────────────────────────────────
@@ -1704,6 +1742,36 @@ fn is_destructive_cmd(cmd: &str) -> bool {
     ];
     let lower = cmd.to_lowercase();
     PATTERNS.iter().any(|p| lower.contains(&p.to_lowercase()))
+}
+
+/// Serialize a slice of messages into a compact text block for the compaction LLM call.
+/// Handles tool-call messages (content is often empty) by including the call list.
+fn compact_serialize(messages: &[Message]) -> String {
+    let mut out = String::new();
+    for m in messages {
+        match m.role.as_str() {
+            "assistant" if !m.tool_calls.is_empty() => {
+                if !m.content.is_empty() {
+                    let snip: String = m.content.chars().take(300).collect();
+                    out.push_str(&format!("[assistant]: {snip}\n"));
+                }
+                for tc in &m.tool_calls {
+                    let input_snip: String = tc.input.chars().take(200).collect();
+                    out.push_str(&format!("  [tool_call] {}({})\n", tc.name, input_snip));
+                }
+                out.push('\n');
+            }
+            "tool" => {
+                let snip: String = m.content.chars().take(400).collect();
+                out.push_str(&format!("  [tool_result]: {snip}\n\n"));
+            }
+            _ => {
+                let snip: String = m.content.chars().take(600).collect();
+                out.push_str(&format!("[{}]: {snip}\n\n", m.role));
+            }
+        }
+    }
+    out
 }
 
 fn tool_short_desc(name: &str, input_json: &str) -> String {
