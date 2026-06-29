@@ -2,11 +2,15 @@
 // unused items are intentionally kept as the palette grows.
 #![allow(dead_code)]
 
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ratatui::style::{Color, Modifier, Style};
 
+use crate::config::{ThemeColors, ThemePalette};
+
 static LIGHT_THEME: AtomicBool = AtomicBool::new(false);
+static THEME: OnceLock<ThemePalette> = OnceLock::new();
 
 pub fn set_light_theme(on: bool) {
     LIGHT_THEME.store(on, Ordering::Relaxed);
@@ -16,37 +20,61 @@ pub fn is_light() -> bool {
     LIGHT_THEME.load(Ordering::Relaxed)
 }
 
+/// Install a custom theme palette loaded from `~/.marlin/theme.toml`.
+/// Must be called before the TUI starts. Missing fields fall back to defaults.
+pub fn load_palette(p: ThemePalette) {
+    let _ = THEME.set(p);
+}
+
+// Resolve a named color from the palette, falling back to the built-in default.
+fn theme_rgb(
+    dark_default: [u8; 3],
+    light_default: [u8; 3],
+    key: fn(&ThemeColors) -> Option<[u8; 3]>,
+) -> Color {
+    let palette = THEME.get();
+    if is_light() {
+        let c = palette.and_then(|p| p.light.as_ref()).and_then(|t| key(t));
+        let [r, g, b] = c.unwrap_or(light_default);
+        Color::Rgb(r, g, b)
+    } else {
+        let c = palette.and_then(|p| p.dark.as_ref()).and_then(|t| key(t));
+        let [r, g, b] = c.unwrap_or(dark_default);
+        Color::Rgb(r, g, b)
+    }
+}
+
 // ── Semantic color accessors ─────────────────────────────────────────────────
 
 pub fn col_aqua() -> Color {
-    if is_light() { Color::Rgb(0, 110, 140) } else { Color::Rgb(0, 200, 200) }
+    theme_rgb([0, 200, 200], [0, 110, 140], |t| t.assistant)
 }
-fn col_cobalt() -> Color {
-    if is_light() { Color::Rgb(25, 70, 165) } else { Color::Rgb(40, 90, 210) }
+pub fn col_cobalt() -> Color {
+    theme_rgb([40, 90, 210], [25, 70, 165], |t| t.cobalt)
 }
-fn col_steel() -> Color {
-    if is_light() { Color::Rgb(75, 105, 145) } else { Color::Rgb(90, 120, 155) }
+pub fn col_steel() -> Color {
+    theme_rgb([90, 120, 155], [75, 105, 145], |t| t.steel)
 }
-fn col_system() -> Color {
-    if is_light() { Color::Rgb(95, 120, 150) } else { Color::Rgb(100, 125, 150) }
+pub fn col_system() -> Color {
+    theme_rgb([100, 125, 150], [95, 120, 150], |t| t.system)
 }
-fn col_user() -> Color {
-    if is_light() { Color::Rgb(20, 45, 95) } else { Color::Rgb(200, 215, 245) }
+pub fn col_user() -> Color {
+    theme_rgb([200, 215, 245], [20, 45, 95], |t| t.user)
 }
-fn col_success() -> Color {
-    if is_light() { Color::Rgb(25, 125, 60) } else { Color::Rgb(70, 195, 110) }
+pub fn col_success() -> Color {
+    theme_rgb([70, 195, 110], [25, 125, 60], |t| t.success)
 }
-fn col_error() -> Color {
-    if is_light() { Color::Rgb(175, 35, 35) } else { Color::Rgb(215, 70, 70) }
+pub fn col_error() -> Color {
+    theme_rgb([215, 70, 70], [175, 35, 35], |t| t.error)
 }
-fn col_amber() -> Color {
-    if is_light() { Color::Rgb(150, 90, 15) } else { Color::Rgb(215, 155, 45) }
+pub fn col_amber() -> Color {
+    theme_rgb([215, 155, 45], [150, 90, 15], |t| t.amber)
 }
 fn col_bg_status() -> Color {
     if is_light() { Color::Rgb(215, 230, 248) } else { Color::Rgb(20, 30, 68) }
 }
 fn col_deep_ocean() -> Color {
-    // Used as foreground on coloured chips — white in both themes
+    // Foreground on colored chips — white in both themes
     if is_light() { Color::Rgb(255, 255, 255) } else { Color::Rgb(8, 12, 24) }
 }
 
@@ -294,16 +322,12 @@ pub fn style_user_text() -> Style {
     Style::default().fg(col_user())
 }
 
-pub fn style_app_bg() -> Style {
-    if is_light() {
-        Style::default().bg(Color::Rgb(252, 253, 255))
-    } else {
-        Style::default().bg(Color::Rgb(8, 12, 24))
-    }
+pub fn col_app_bg() -> Color {
+    theme_rgb([8, 12, 24], [252, 253, 255], |t| t.bg)
 }
 
-pub fn col_app_bg() -> Color {
-    if is_light() { Color::Rgb(252, 253, 255) } else { Color::Rgb(8, 12, 24) }
+pub fn style_app_bg() -> Style {
+    Style::default().bg(col_app_bg())
 }
 
 pub fn col_veil() -> Color {

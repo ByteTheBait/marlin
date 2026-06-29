@@ -35,18 +35,20 @@ Enter
 Sleep 2200ms
 
 #  
-Type "/permissi"
+Type "/sandb"
 Sleep 500ms
 Tab
 Sleep 100ms
 Type " "
 
-Type "skip"
+Type "on"
 
 Sleep 500ms
 
 Enter
-
+Type "/animate on"
+Sleep 100ms
+Enter
 Sleep 750ms
 
 # ── ask something real (Groq / qwen3-32b will respond) ───────────────────────

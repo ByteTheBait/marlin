@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -300,4 +300,58 @@ impl Default for ProviderConfig {
             model: String::new(),
         }
     }
+}
+
+// ── Theme palette (optional ~/.marlin/theme.toml) ────────────────────────────
+//
+// Each field is an optional [R, G, B] triple. Missing fields fall back to
+// Marlin's built-in defaults, so you only need to specify what you want to change.
+// See the "Hacking Marlin" section in README.md for the full list.
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ThemeColors {
+    /// App background
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bg: Option<[u8; 3]>,
+    /// Your message text
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<[u8; 3]>,
+    /// Marlin label / primary accent
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant: Option<[u8; 3]>,
+    /// System messages and timestamps
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<[u8; 3]>,
+    /// Success indicators (✓)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success: Option<[u8; 3]>,
+    /// Error indicators (✗)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<[u8; 3]>,
+    /// Tool call name highlight
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amber: Option<[u8; 3]>,
+    /// Command keys and badge backgrounds
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cobalt: Option<[u8; 3]>,
+    /// Secondary text and argument labels
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steel: Option<[u8; 3]>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ThemePalette {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dark: Option<ThemeColors>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light: Option<ThemeColors>,
+}
+
+pub fn load_theme(marlin_dir: &Path) -> ThemePalette {
+    let path = marlin_dir.join("theme.toml");
+    if !path.exists() { return ThemePalette::default(); }
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| toml::from_str::<ThemePalette>(&s).ok())
+        .unwrap_or_default()
 }

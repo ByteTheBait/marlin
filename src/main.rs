@@ -13,8 +13,10 @@ use tokio::sync::mpsc;
 
 fn main() -> Result<()> {
     let cfg = config::Config::load()?;
+    let marlin_dir = config::marlin_dir()?;
 
     tui::styles::set_light_theme(cfg.theme == "light");
+    tui::styles::load_palette(config::load_theme(&marlin_dir));
 
     let mut eng = engine::Engine::new(cfg)?;
 

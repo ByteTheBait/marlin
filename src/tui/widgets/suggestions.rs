@@ -51,6 +51,7 @@ pub fn all_commands() -> Vec<CmdDef> {
         ("/pwd",       "",                  "show working directory"),
         ("/skill",     "[list|run|new|suggest|reload]", "manage and run skills"),
         ("/tiers",     "[on|off]",          "model tier routing with backup fallback"),
+        ("/animate",   "[on|off]",          "toggle typewriter animation for AI responses"),
     ];
     raw.iter().map(|(c, a, d)| CmdDef {
         cmd: c.to_string(),

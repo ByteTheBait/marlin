@@ -97,6 +97,10 @@ pub struct ChatView {
     pub skill_hints: Vec<crate::tui::widgets::suggestions::SkillHint>,
     /// Skill matches sent by the engine for the last message.
     pub last_skill_matches: Vec<(String, String)>,
+
+    // Typewriter animation
+    pub typewriter_enabled: bool,
+    typewriter_pos: usize,
 }
 
 impl ChatView {
@@ -138,6 +142,8 @@ impl ChatView {
             skills: vec![],
             skill_hints: vec![],
             last_skill_matches: vec![],
+            typewriter_enabled: false,
+            typewriter_pos: 0,
         }
     }
 
@@ -159,6 +165,9 @@ impl ChatView {
     pub fn apply_update(&mut self, update: UiUpdate) {
         match update {
             UiUpdate::StreamChunk(chunk) => {
+                if !self.streaming {
+                    self.typewriter_pos = 0;
+                }
                 self.streaming = true;
                 self.stream_buf.push_str(&chunk);
                 self.maybe_scroll_to_bottom();
@@ -198,6 +207,7 @@ impl ChatView {
             UiUpdate::GoalComplete { tool_count } => {
                 self.streaming = false;
                 self.current_tool = String::new();
+                self.typewriter_pos = 0;
                 if !self.stream_buf.is_empty() {
                     let text = std::mem::take(&mut self.stream_buf);
                     self.entries.push(ChatEntry {
@@ -287,6 +297,7 @@ impl ChatView {
                 self.rate_limited = false;
                 self.streaming = false;
                 self.stream_buf.clear();
+                self.typewriter_pos = 0;
                 self.active_goal.clear();
                 self.tool_iterations = 0;
                 self.add_system("Cancelled.");
@@ -397,6 +408,25 @@ impl ChatView {
                 self.input_history.insert(0, input.clone());
             }
 
+            // /animate is handled locally — no engine roundtrip needed
+            if input == "/animate" || input.starts_with("/animate ") {
+                let arg = input["animate".len() + 1..].trim();
+                match arg {
+                    "on"  => { self.typewriter_enabled = true;  self.typewriter_pos = 0; }
+                    "off" => { self.typewriter_enabled = false; }
+                    _     => { self.typewriter_enabled = !self.typewriter_enabled; self.typewriter_pos = 0; }
+                }
+                let state = if self.typewriter_enabled { "on" } else { "off" };
+                self.entries.push(ChatEntry {
+                    role: EntryRole::User,
+                    content: input.clone(),
+                    tool_name: String::new(),
+                    time: Local::now(),
+                });
+                self.add_system(&format!("Typing animation: {state}"));
+                return None;
+            }
+
             if input.starts_with('/') {
                 self.entries.push(ChatEntry {
                     role: EntryRole::User,
@@ -429,6 +459,13 @@ impl ChatView {
         self.frame = self.frame.wrapping_add(1);
         let tick_ms = self.last_frame_time.elapsed().as_millis().min(50) as u32;
         self.last_frame_time = Instant::now();
+
+        // Advance typewriter position each frame while streaming
+        const TYPEWRITER_SPEED: usize = 20; // chars/frame ≈ 1 200 chars/sec at 60 fps
+        if self.typewriter_enabled && self.streaming && !self.stream_buf.is_empty() {
+            let total = self.stream_buf.chars().count();
+            self.typewriter_pos = (self.typewriter_pos + TYPEWRITER_SPEED).min(total);
+        }
 
         let sugg_h: u16 = if !self.suggestions.is_empty() {
             (self.suggestions.len() as u16 + 2).min(10) // +2 for border
@@ -494,18 +531,36 @@ impl ChatView {
 
         // Live streaming buffer
         if self.streaming && !self.stream_buf.is_empty() {
+            // When typewriter is on, reveal only up to typewriter_pos chars
+            let tw_buf: String;
+            let display_buf: &str = if self.typewriter_enabled {
+                let pos = self.typewriter_pos.min(self.stream_buf.chars().count());
+                tw_buf = self.stream_buf.chars().take(pos).collect();
+                &tw_buf
+            } else {
+                &self.stream_buf
+            };
+
             all_lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled("marlin", style_assistant_label()),
             ]));
-            for md in render_markdown(&self.stream_buf, area.width.saturating_sub(2) as usize) {
+            for md in render_markdown(display_buf, area.width.saturating_sub(2) as usize) {
                 let mut spans = vec![Span::raw("  ")];
                 spans.extend(md.spans);
                 all_lines.push(Line::from(spans));
             }
+            // Cursor: blinking block while caught up, underscore while still typing out
+            let cursor_sym = if self.typewriter_enabled
+                && self.typewriter_pos < self.stream_buf.chars().count()
+            {
+                "▍"
+            } else {
+                "|"
+            };
             all_lines.push(Line::from(vec![
                 Span::raw("  "),
-                Span::styled("|", style_prompt_active()),
+                Span::styled(cursor_sym, style_prompt_active()),
             ]));
         }
 
@@ -831,7 +886,7 @@ impl ChatView {
                 Span::styled(format!("{goal}{ellipsis}"), style_system()),
                 Span::styled(
                     format!("  ({} tool calls)  ctrl+c to cancel", self.tool_iterations),
-                    Style::default().fg(COL_SYSTEM),
+                    Style::default().fg(col_system()),
                 ),
             ])
         } else {
@@ -942,7 +997,7 @@ fn render_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
             for wrapped in word_wrap(&raw_line[2..], width) {
                 lines.push(Line::from(Span::styled(
                     wrapped,
-                    Style::default().fg(COL_USER).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                    Style::default().fg(col_user()).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
                 )));
             }
             continue;
@@ -951,7 +1006,7 @@ fn render_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
             for wrapped in word_wrap(&raw_line[3..], width) {
                 lines.push(Line::from(Span::styled(
                     wrapped,
-                    Style::default().fg(COL_AQUA).add_modifier(Modifier::BOLD),
+                    Style::default().fg(col_aqua()).add_modifier(Modifier::BOLD),
                 )));
             }
             continue;
@@ -960,7 +1015,7 @@ fn render_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
             for wrapped in word_wrap(&raw_line[4..], width) {
                 lines.push(Line::from(Span::styled(
                     wrapped,
-                    Style::default().fg(COL_STEEL).add_modifier(Modifier::BOLD),
+                    Style::default().fg(col_steel()).add_modifier(Modifier::BOLD),
                 )));
             }
             continue;

@@ -461,6 +461,90 @@ Key directories:
 
 ---
 
+## Hacking Marlin
+
+Marlin is built to be extended. Three layers, from least to most code:
+
+### Skills — TOML, no Rust required
+
+The fastest way to add new behavior. Drop a `.toml` file in `~/.marlin/skills/`:
+
+```toml
+# ~/.marlin/skills/gh_issues.toml
+name        = "gh_issues"
+description = "List open GitHub issues for this repo"
+triggers    = ["issues", "github", "gh", "open bugs"]
+
+[run]
+type    = "shell"
+command = "gh issue list --limit 20"
+```
+
+Restart or run `/skill reload` and the skill appears in autocomplete and as a tool the LLM can call. See the **Skills** section above for the full format.
+
+---
+
+### Colors — `~/.marlin/theme.toml`
+
+Create this file to override any named color without recompiling. Each value is `[R, G, B]` with 0–255. Omit a key to keep the built-in default.
+
+```toml
+# ~/.marlin/theme.toml
+
+[dark]
+bg        = [8,   12,  24]   # app background
+user      = [200, 215, 245]  # your messages
+assistant = [0,   200, 200]  # marlin label / primary accent
+system    = [100, 125, 150]  # timestamps and status text
+success   = [70,  195, 110]  # ✓ indicators
+error     = [215, 70,  70]   # ✗ errors
+amber     = [215, 155, 45]   # tool call names
+cobalt    = [40,  90,  210]  # command keys and badge backgrounds
+steel     = [90,  120, 155]  # secondary text and arg labels
+
+[light]
+bg        = [252, 253, 255]
+user      = [20,  45,  95]
+assistant = [0,   110, 140]
+system    = [95,  120, 150]
+success   = [25,  125, 60]
+error     = [175, 35,  35]
+amber     = [150, 90,  15]
+cobalt    = [25,  70,  165]
+steel     = [75,  105, 145]
+```
+
+Restart Marlin to apply. To tweak just one color, specify only that key — the rest stay as-is.
+
+Style functions live in `src/tui/styles.rs`. Everything routes through named semantic functions (`style_user_text()`, `style_tool_badge()`, etc.) rather than raw colors, so a single palette change propagates everywhere.
+
+---
+
+### Rust extension points
+
+**Adding a new LLM tool** (a function the model can call):
+
+1. `src/tools/mod.rs` — add a `ToolDef` entry to `all_tools()`. This is what the LLM sees in its context.
+2. `src/tools/executor.rs` — add a match arm to `run_tool()`. This is what actually executes.
+3. `src/tui/views/chat.rs` — optionally add a display name in `tool_display_name()` for the UI bubble.
+
+**Adding a slash command**:
+
+1. `src/tui/widgets/suggestions.rs` — add a row to the `raw` array in `all_commands()`. Gives it tab-autocomplete.
+2. `src/engine/mod.rs` — add a match arm in `handle_slash_command()` to parse and dispatch it.
+
+**Adding a provider**:
+
+1. `src/config/mod.rs` — add a default `ProviderConfig` entry in `Config::defaults()`.
+2. If the provider is OpenAI-compatible (most are): that's it — the existing `src/providers/openai_compat.rs` handles the rest.
+3. For a custom protocol: add an impl in `src/providers/` and register it in `src/providers/registry.rs`.
+
+**Changing the layout**:
+
+`src/tui/runner.rs` owns the frame split (chat area / sidebar). `src/tui/views/` holds the main panels; `src/tui/widgets/` holds sidebar, statusbar, and suggestion panel.
+
+---
+
 ## License
 
 MIT
