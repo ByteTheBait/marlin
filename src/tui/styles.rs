@@ -2,7 +2,7 @@
 // unused items are intentionally kept as the palette grows.
 #![allow(dead_code)]
 
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ratatui::style::{Color, Modifier, Style};
@@ -10,7 +10,13 @@ use ratatui::style::{Color, Modifier, Style};
 use crate::config::{ThemeColors, ThemePalette};
 
 static LIGHT_THEME: AtomicBool = AtomicBool::new(false);
-static THEME: OnceLock<ThemePalette> = OnceLock::new();
+// RwLock inside OnceLock so load_palette() can replace the palette at runtime
+// (e.g. when the user runs /theme <name> to switch named themes).
+static THEME: OnceLock<RwLock<ThemePalette>> = OnceLock::new();
+
+fn palette_lock() -> &'static RwLock<ThemePalette> {
+    THEME.get_or_init(|| RwLock::new(ThemePalette::default()))
+}
 
 pub fn set_light_theme(on: bool) {
     LIGHT_THEME.store(on, Ordering::Relaxed);
@@ -20,25 +26,25 @@ pub fn is_light() -> bool {
     LIGHT_THEME.load(Ordering::Relaxed)
 }
 
-/// Install a custom theme palette loaded from `~/.marlin/theme.toml`.
-/// Must be called before the TUI starts. Missing fields fall back to defaults.
+/// Apply a palette loaded from `~/.marlin/theme.toml` or a named theme file.
+/// Safe to call at any time — takes effect on the next render frame.
 pub fn load_palette(p: ThemePalette) {
-    let _ = THEME.set(p);
+    *palette_lock().write().unwrap() = p;
 }
 
-// Resolve a named color from the palette, falling back to the built-in default.
+// Resolve a named color from the active palette, falling back to built-in defaults.
 fn theme_rgb(
     dark_default: [u8; 3],
     light_default: [u8; 3],
     key: fn(&ThemeColors) -> Option<[u8; 3]>,
 ) -> Color {
-    let palette = THEME.get();
+    let lock = palette_lock().read().unwrap();
     if is_light() {
-        let c = palette.and_then(|p| p.light.as_ref()).and_then(|t| key(t));
+        let c = lock.light.as_ref().and_then(|t| key(t));
         let [r, g, b] = c.unwrap_or(light_default);
         Color::Rgb(r, g, b)
     } else {
-        let c = palette.and_then(|p| p.dark.as_ref()).and_then(|t| key(t));
+        let c = lock.dark.as_ref().and_then(|t| key(t));
         let [r, g, b] = c.unwrap_or(dark_default);
         Color::Rgb(r, g, b)
     }

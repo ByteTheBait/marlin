@@ -1,11 +1,12 @@
 pub mod executor;
+pub mod external;
 pub mod extract;
 pub mod policy;
 
 use crate::config::AstMode;
 use crate::providers::{ToolDef, ToolProp};
 
-pub fn all_tools(ast_mode: &AstMode, skills: &[(String, String)]) -> Vec<ToolDef> {
+pub fn all_tools(ast_mode: &AstMode, skills: &[(String, String)], external: &[external::ExternalTool]) -> Vec<ToolDef> {
     let mut tools = vec![
         ToolDef {
             name: "read_file".into(),
@@ -190,6 +191,11 @@ pub fn all_tools(ast_mode: &AstMode, skills: &[(String, String)]) -> Vec<ToolDef
             ],
             required: vec!["file".into(), "node_id".into(), "operation".into()],
         });
+    }
+
+    // Append user-defined external tools from ~/.marlin/tools/*.toml.
+    for et in external {
+        tools.push(et.to_tool_def());
     }
 
     tools

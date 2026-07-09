@@ -1,3 +1,4 @@
+mod commands;
 mod config;
 mod engine;
 mod history;
@@ -17,6 +18,7 @@ fn main() -> Result<()> {
 
     tui::styles::set_light_theme(cfg.theme == "light");
     tui::styles::load_palette(config::load_theme(&marlin_dir));
+    let layout = config::load_layout(&marlin_dir);
 
     let mut eng = engine::Engine::new(cfg)?;
 
@@ -33,7 +35,7 @@ fn main() -> Result<()> {
     });
 
     // TUI runs on the main thread (synchronous)
-    tui::runner::run(action_tx, ui_rx)?;
+    tui::runner::run(action_tx, ui_rx, layout)?;
 
     Ok(())
 }

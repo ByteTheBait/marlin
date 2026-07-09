@@ -102,6 +102,16 @@ impl OpenAiCompatProvider {
             model_list: vec!["default".into()],
         }
     }
+
+    /// Generic constructor for user-defined providers from ~/.marlin/providers/*.toml.
+    pub fn new_generic(name: &str, endpoint: &str, api_key: &str, models: Vec<String>) -> Self {
+        Self {
+            provider_name: name.into(),
+            endpoint: endpoint.into(),
+            api_key: api_key.into(),
+            model_list: if models.is_empty() { vec!["default".into()] } else { models },
+        }
+    }
 }
 
 #[async_trait]

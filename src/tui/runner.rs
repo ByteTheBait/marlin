@@ -24,9 +24,6 @@ use crate::tui::{
     widgets::{sidebar::Sidebar, statusbar::StatusBar},
 };
 
-const SIDEBAR_WIDTH: u16 = 34;
-const MIN_WIDTH_FOR_SIDEBAR: u16 = 100;
-
 enum View {
     Splash(SplashView),
     Chat,
@@ -35,6 +32,7 @@ enum View {
 pub fn run(
     action_tx: mpsc::Sender<Action>,
     mut ui_rx: mpsc::Receiver<UiUpdate>,
+    layout: crate::config::LayoutConfig,
 ) -> io::Result<()> {
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -139,12 +137,12 @@ pub fn run(
                     status_bar.render(status_area, buf);
 
                     // Split body into chat + optional sidebar
-                    let (chat_area, sidebar_area) = if area.width >= MIN_WIDTH_FOR_SIDEBAR {
+                    let (chat_area, sidebar_area) = if area.width >= layout.min_sidebar_width {
                         let chunks = Layout::default()
                             .direction(Direction::Horizontal)
                             .constraints([
                                 Constraint::Min(40),
-                                Constraint::Length(SIDEBAR_WIDTH),
+                                Constraint::Length(layout.sidebar_width),
                             ])
                             .split(body_area);
                         (chunks[0], Some(chunks[1]))

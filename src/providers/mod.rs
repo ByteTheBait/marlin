@@ -2,6 +2,7 @@ pub mod claude;
 pub mod openai_compat;
 pub mod registry;
 pub mod ratelimit;
+pub mod user_providers;
 
 use std::time::SystemTime;
 

@@ -39,7 +39,7 @@ pub fn all_commands() -> Vec<CmdDef> {
         ("/verify",      "[cmd|off]",         "run command after every file edit (Write-Test-Fix)"),
         ("/ast",         "[off|sexpr|harness]", "AST context mode: sexpr=S-expr reads, harness=JSON surgery"),
         ("/clean-env",   "[on|off]",          "strip subprocess environment for isolation"),
-        ("/theme",       "[dark|light]",      "switch UI theme (persists)"),
+        ("/theme",       "[dark|light|<name>]", "switch theme or apply a named theme (~/.marlin/themes/)"),
         ("/index",     "[status]",          "build TF-IDF search index"),
         ("/search",    "<query>",           "search the codebase index"),
         ("/revert",    "<file> [n]",        "show or restore file snapshots"),
@@ -52,6 +52,9 @@ pub fn all_commands() -> Vec<CmdDef> {
         ("/skill",     "[list|run|new|suggest|reload]", "manage and run skills"),
         ("/tiers",     "[on|off]",          "model tier routing with backup fallback"),
         ("/animate",   "[on|off]",          "toggle typewriter animation for AI responses"),
+        ("/command",   "[list|new|reload]",  "manage user-defined slash commands (~/.marlin/commands/)"),
+        ("/tool",      "[list|new|reload]",  "manage user-defined LLM tools (~/.marlin/tools/)"),
+        ("/provider",  "[list|new <name>|<name>]", "list/create user providers or switch provider"),
     ];
     raw.iter().map(|(c, a, d)| CmdDef {
         cmd: c.to_string(),

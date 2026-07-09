@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -11,7 +12,9 @@ pub struct Registry {
 }
 
 impl Registry {
-    pub fn new(cfg: &Config) -> Self {
+    /// Build the registry from config. Also loads any user-defined providers
+    /// from `~/.marlin/providers/*.toml` if `marlin_dir` is supplied.
+    pub fn new(cfg: &Config, marlin_dir: Option<&Path>) -> Self {
         let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
 
         let claude_cfg = cfg.providers.get("claude").cloned().unwrap_or_default();
@@ -47,6 +50,17 @@ impl Registry {
         providers.insert("custom".into(), Arc::new(
             OpenAiCompatProvider::new_custom(&custom_cfg.api_key, &custom_cfg.endpoint)
         ));
+
+        // Load user-defined providers from ~/.marlin/providers/*.toml.
+        // These are always OpenAI-compatible and don't override built-ins.
+        if let Some(dir) = marlin_dir {
+            for up in super::user_providers::load_all(dir) {
+                if providers.contains_key(&up.name) { continue; } // built-ins win
+                providers.insert(up.name.clone(), Arc::new(
+                    OpenAiCompatProvider::new_generic(&up.name, &up.endpoint, &up.api_key, up.model_list())
+                ));
+            }
+        }
 
         Self { providers }
     }

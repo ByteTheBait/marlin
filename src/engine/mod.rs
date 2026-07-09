@@ -52,6 +52,8 @@ pub enum UiUpdate {
     SkillMatches(Vec<(String, String)>),
     /// Difficulty score and selected tier for the current request.
     TierSelected { score: u8, tier: String },
+    /// User-defined commands loaded from ~/.marlin/commands/ — sent to TUI for autocomplete.
+    UserCommandsLoaded(Vec<crate::commands::UserCommandDef>),
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +105,10 @@ pub struct Engine {
 
     /// Loaded skill definitions
     skills: Vec<Skill>,
+    /// User-defined slash commands from ~/.marlin/commands/
+    user_commands: Vec<crate::commands::UserCommand>,
+    /// User-defined LLM tools from ~/.marlin/tools/
+    external_tools: Vec<crate::tools::external::ExternalTool>,
     /// Provider/model selected for the current agentic request (may be tier-routed)
     req_provider: String,
     req_model: String,
@@ -117,7 +123,7 @@ pub struct Engine {
 impl Engine {
     pub fn new(cfg: Config) -> Result<Self> {
         let marlin_dir = crate::config::marlin_dir()?;
-        let registry = Registry::new(&cfg);
+        let registry = Registry::new(&cfg, Some(&marlin_dir));
         let work_dir = cfg.work_dir.clone();
         let allowed = cfg.allowed_commands.clone();
 
@@ -135,6 +141,8 @@ impl Engine {
         // Install built-in skills if not present, then load all.
         skills::install_defaults(&marlin_dir);
         let loaded_skills = skills::load_all(&marlin_dir);
+        let loaded_commands = crate::commands::load_all(&marlin_dir);
+        let loaded_external_tools = crate::tools::external::load_all(&marlin_dir);
 
         Ok(Self {
             cfg,
@@ -156,6 +164,8 @@ impl Engine {
             token_budget: 100_000,
             ast_mode,
             skills: loaded_skills,
+            user_commands: loaded_commands,
+            external_tools: loaded_external_tools,
             req_provider,
             req_model,
             req_backup_provider: String::new(),
@@ -185,9 +195,12 @@ impl Engine {
             )).await;
         }
 
-        // Send skills to TUI for suggestion panel.
+        // Send skills and user commands to TUI for suggestion panel.
         let skill_defs: Vec<SkillDef> = self.skills.iter().map(SkillDef::from).collect();
         let _ = ui_tx.send(UiUpdate::SkillsLoaded(skill_defs)).await;
+        let cmd_defs: Vec<crate::commands::UserCommandDef> =
+            self.user_commands.iter().map(crate::commands::UserCommandDef::from).collect();
+        let _ = ui_tx.send(UiUpdate::UserCommandsLoaded(cmd_defs)).await;
 
         // Spawn nightly skill-suggestion daemon.
         self.maybe_spawn_daemon(ui_tx.clone());
@@ -247,7 +260,7 @@ impl Engine {
                             messages: self.history.clone(),
                             system_prompt: system_prompt.clone(),
                             max_tokens: 1,
-                            tools: all_tools(&self.ast_mode, &self.skills.iter().map(|s| (s.name.clone(), s.description.clone())).collect::<Vec<_>>()),
+                            tools: all_tools(&self.ast_mode, &self.skills.iter().map(|s| (s.name.clone(), s.description.clone())).collect::<Vec<_>>(), &self.external_tools),
                         };
                         p.count_tokens(&req_for_count).await
                             .unwrap_or_else(|| estimate_tokens(&self.history, &system_prompt))
@@ -263,7 +276,26 @@ impl Engine {
 
                 Action::SlashCommand(cmd) => {
                     self.input_history.add(&cmd);
-                    self.handle_slash_command(&cmd, &ui_tx).await;
+                    if let Some(prompt) = self.handle_slash_command(&cmd, &ui_tx).await {
+                        // Prompt-type user command: inject expanded template and run agentic loop.
+                        let content = self.build_message_content(&prompt);
+                        self.history.push(Message {
+                            role: "user".into(),
+                            content,
+                            tool_calls: vec![],
+                            tool_use_id: String::new(),
+                            tool_call_id: String::new(),
+                            is_error: false,
+                        });
+                        self.attachments.clear();
+                        self.active_goal = prompt.clone();
+                        self.tool_iterations = 0;
+                        self.task_steps.clear();
+                        self.loop_guard.reset();
+                        self.cancel_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                        self.rate_and_route(&prompt, &ui_tx).await;
+                        self.agentic_loop(&ui_tx, &mut action_rx).await;
+                    }
                 }
             }
         }
@@ -336,7 +368,7 @@ impl Engine {
                 messages: self.history.clone(),
                 system_prompt: self.effective_system_prompt(),
                 max_tokens: self.cfg.max_tokens,
-                tools: all_tools(&self.ast_mode, &self.skills.iter().map(|s| (s.name.clone(), s.description.clone())).collect::<Vec<_>>()),
+                tools: all_tools(&self.ast_mode, &self.skills.iter().map(|s| (s.name.clone(), s.description.clone())).collect::<Vec<_>>(), &self.external_tools),
             };
 
             let mut stream = match provider.stream(req).await {
@@ -592,6 +624,7 @@ impl Engine {
                                             clean_env,
                                             crate::config::AstMode::Off,
                                             &crate::config::SandboxMode::Off, // skills run outside sandbox
+                                            &[],
                                         )
                                     }).await.unwrap_or_else(|e| executor::ToolResult {
                                         output: e.to_string(),
@@ -627,6 +660,7 @@ impl Engine {
             let sandbox_mode = self.cfg.sandbox_mode.clone();
 
             let idx_clone = self.code_index.clone();
+            let ext_tools = self.external_tools.clone();
 
             let result = tokio::task::spawn_blocking(move || {
                 let search_fn: Option<Box<dyn Fn(&str, usize) -> String>> =
@@ -650,6 +684,7 @@ impl Engine {
                     clean_env,
                     ast_mode,
                     &sandbox_mode,
+                    &ext_tools,
                 )
             }).await.unwrap_or_else(|e| executor::ToolResult {
                 output: e.to_string(),
@@ -1008,7 +1043,9 @@ impl Engine {
 
     // ── Slash command handler ─────────────────────────────────────────────────
 
-    async fn handle_slash_command(&mut self, raw: &str, ui_tx: &mpsc::Sender<UiUpdate>) {
+    /// Handle a slash command. Returns `Some(prompt)` if a prompt-type user command
+    /// expanded a template that should be injected into the agentic loop.
+    async fn handle_slash_command(&mut self, raw: &str, ui_tx: &mpsc::Sender<UiUpdate>) -> Option<String> {
         let parts: Vec<&str> = raw.trim().splitn(2, ' ').collect();
         let cmd = parts[0].to_lowercase();
         let args: Vec<&str> = if parts.len() > 1 {
@@ -1038,24 +1075,59 @@ impl Engine {
 
             "/provider" | "/p" => {
                 if args.is_empty() {
-                    sys!(format!("Usage: /provider <name>  — available: {}", self.registry.names().join(", ")));
-                    return;
+                    sys!(format!("Usage: /provider <name|list|new <name>>  — available: {}", self.registry.names().join(", ")));
+                    return None;
                 }
-                let name = args[0].to_lowercase();
-                if self.registry.get(&name).is_err() {
-                    err!(format!("Unknown provider: {name}"));
-                    return;
+                let subcmd = args[0].to_lowercase();
+                match subcmd.as_str() {
+                    "list" | "ls" => {
+                        let names: Vec<String> = self.registry.names();
+                        let user: Vec<crate::providers::user_providers::UserProvider> =
+                            crate::providers::user_providers::load_all(&self.marlin_dir);
+                        let mut lines: Vec<String> = names.iter()
+                            .map(|n| {
+                                let marker = if *n == self.cfg.active_provider { " *" } else { "" };
+                                format!("  {n}{marker}")
+                            })
+                            .collect();
+                        for up in &user {
+                            if !names.contains(&up.name) {
+                                lines.push(format!("  {} (user, restart to activate)", up.name));
+                            }
+                        }
+                        sys!(format!("Providers:\n{}", lines.join("\n")));
+                    }
+
+                    "new" | "create" => {
+                        let name = args.get(1).copied().unwrap_or("my_provider");
+                        match crate::providers::user_providers::save_template(&self.marlin_dir, name) {
+                            Ok(path) => {
+                                sys!(format!(
+                                    "Provider template created:\n  {}\n\nEdit it and restart Marlin to activate.",
+                                    path.display()
+                                ));
+                            }
+                            Err(e) => err!(format!("Failed to create provider: {e}")),
+                        }
+                    }
+
+                    name => {
+                        if self.registry.get(name).is_err() {
+                            err!(format!("Unknown provider: {name}"));
+                            return None;
+                        }
+                        self.cfg.active_provider = name.to_string();
+                        let model = self.cfg.providers.get(name)
+                            .and_then(|p| if p.model.is_empty() { None } else { Some(p.model.clone()) })
+                            .unwrap_or_default();
+                        self.cfg.active_model = model.clone();
+                        let _ = self.cfg.save();
+                        sys!(format!("Switched to provider: {name}  model: {model}"));
+                        let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
+                            provider: name.to_string(), model,
+                        })).await;
+                    }
                 }
-                self.cfg.active_provider = name.clone();
-                let model = self.cfg.providers.get(&name)
-                    .and_then(|p| if p.model.is_empty() { None } else { Some(p.model.clone()) })
-                    .unwrap_or_default();
-                self.cfg.active_model = model.clone();
-                let _ = self.cfg.save();
-                sys!(format!("Switched to provider: {name}  model: {model}"));
-                let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
-                    provider: name, model,
-                })).await;
             }
 
             "/model" | "/m" => {
@@ -1063,7 +1135,7 @@ impl Engine {
                     if let Ok(p) = self.registry.get(&self.cfg.active_provider) {
                         sys!(format!("Available models: {}", p.models().join(", ")));
                     }
-                    return;
+                    return None;
                 }
                 let model = args[0].to_string();
                 self.cfg.active_model = model.clone();
@@ -1081,28 +1153,28 @@ impl Engine {
             "/key" => {
                 if args.is_empty() {
                     sys!("Usage: /key <provider> <api-key>");
-                    return;
+                    return None;
                 }
                 if args.len() < 2 {
                     sys!("Usage: /key <provider> <api-key>");
-                    return;
+                    return None;
                 }
                 let provider = args[0].to_lowercase();
                 let key = args[1];
                 self.cfg.set_key(&provider, key);
                 let _ = self.cfg.save();
-                self.registry = Registry::new(&self.cfg);
+                self.registry = Registry::new(&self.cfg, Some(&self.marlin_dir));
                 sys!(format!("API key saved for {provider}."));
             }
 
             "/endpoint" => {
                 if args.len() < 2 {
                     sys!("Usage: /endpoint <provider> <url>");
-                    return;
+                    return None;
                 }
                 self.cfg.set_endpoint(args[0], args[1]);
                 let _ = self.cfg.save();
-                self.registry = Registry::new(&self.cfg);
+                self.registry = Registry::new(&self.cfg, Some(&self.marlin_dir));
                 sys!(format!("Endpoint updated for {}: {}", args[0], args[1]));
             }
 
@@ -1113,7 +1185,7 @@ impl Engine {
                     } else {
                         sys!(format!("Custom system prompt: {}", self.cfg.system_prompt));
                     }
-                    return;
+                    return None;
                 }
                 self.cfg.system_prompt = rest.to_string();
                 let _ = self.cfg.save();
@@ -1123,7 +1195,7 @@ impl Engine {
             "/tokens" => {
                 if args.is_empty() {
                     sys!(format!("Max tokens: {}  (use /tokens <n> to change)", self.cfg.max_tokens));
-                    return;
+                    return None;
                 }
                 if let Ok(n) = args[0].parse::<usize>() {
                     if n > 0 {
@@ -1165,7 +1237,7 @@ impl Engine {
                             .collect();
                         sys!(format!("Attached:\n{}", names.join("\n")));
                     }
-                    return;
+                    return None;
                 }
                 let path = self.resolve_path(args[0]);
                 match std::fs::read_to_string(&path) {
@@ -1201,12 +1273,12 @@ impl Engine {
             "/exec" => {
                 if rest.is_empty() {
                     sys!("Usage: /exec <shell command>");
-                    return;
+                    return None;
                 }
                 if self.cfg.sandbox_mode == SandboxMode::Off && !self.cfg.skip_permissions && !self.is_allowed(rest) {
                     let first = rest.split_whitespace().next().unwrap_or(rest);
                     err!(format!("Command not allowed: {rest:?}\nUse /allow {first} or /sandbox [permissive|docker|gvisor]."));
-                    return;
+                    return None;
                 }
                 sys!(format!("Running: {rest}"));
                 let cmd = rest.to_string();
@@ -1230,7 +1302,7 @@ impl Engine {
                     } else {
                         sys!(format!("Allowed prefixes: {}", self.allowed_commands.join(", ")));
                     }
-                    return;
+                    return None;
                 }
                 let pattern = rest.to_string();
                 self.allowed_commands.push(pattern.clone());
@@ -1326,7 +1398,7 @@ impl Engine {
                     Some("harness") => Some(AstMode::Harness),
                     Some(other) => {
                         err!(format!("Unknown AST mode {other:?} — use: off, sexpr, harness"));
-                        return;
+                        return None;
                     }
                     None => None,
                 };
@@ -1380,8 +1452,130 @@ impl Engine {
                         let _ = self.cfg.save();
                         sys!("Theme set to dark.");
                     }
+                    Some(name) => {
+                        // Try to load a named theme from ~/.marlin/themes/<name>.toml
+                        if let Some(palette) = crate::config::load_named_theme(&self.marlin_dir, name) {
+                            crate::tui::styles::load_palette(palette);
+                            sys!(format!("Theme '{}' applied.", name));
+                        } else {
+                            let named = crate::config::list_themes(&self.marlin_dir);
+                            if named.is_empty() {
+                                err!(format!("Theme '{name}' not found. Add ~/.marlin/themes/{name}.toml to create it."));
+                            } else {
+                                let list: Vec<String> = named.iter()
+                                    .map(|(n, d)| format!("  {n}  —  {d}"))
+                                    .collect();
+                                err!(format!("Theme '{name}' not found. Available named themes:\n{}", list.join("\n")));
+                            }
+                        }
+                    }
+                    None => {
+                        let named = crate::config::list_themes(&self.marlin_dir);
+                        let named_list = if named.is_empty() {
+                            "  (none — add .toml files to ~/.marlin/themes/)".into()
+                        } else {
+                            named.iter().map(|(n, d)| format!("  {n}  —  {d}")).collect::<Vec<_>>().join("\n")
+                        };
+                        sys!(format!(
+                            "Theme: {}  (use /theme dark|light|<name>)\n\nNamed themes:\n{}",
+                            self.cfg.theme, named_list
+                        ));
+                    }
+                }
+            }
+
+            "/command" | "/commands" => {
+                let subcmd = args.first().copied().unwrap_or("list");
+                let subargs: Vec<&str> = args.get(1..).map(|a| a.to_vec()).unwrap_or_default();
+
+                match subcmd {
+                    "list" | "ls" => {
+                        if self.user_commands.is_empty() {
+                            sys!("No user commands. Add TOML files to ~/.marlin/commands/");
+                        } else {
+                            let lines: Vec<String> = self.user_commands.iter().map(|c| {
+                                let args_hint = if c.args.is_empty() { String::new() } else { format!(" {}", c.args) };
+                                format!("  /{}{:<20} — {}", c.name, args_hint, c.description)
+                            }).collect();
+                            sys!(format!("User commands ({}):\n{}", self.user_commands.len(), lines.join("\n")));
+                        }
+                    }
+
+                    "new" | "create" => {
+                        let name = if subargs.is_empty() { "my_command" } else { subargs[0] };
+                        let cmd = crate::commands::UserCommand {
+                            name: name.to_string(),
+                            description: "Describe what this command does".into(),
+                            args: "[optional-args]".into(),
+                            run: crate::commands::CommandRun {
+                                kind: crate::commands::CommandKind::Shell,
+                                command: "echo {args}".into(),
+                                template: String::new(),
+                            },
+                        };
+                        match crate::commands::save_command(&self.marlin_dir, &cmd) {
+                            Ok(path) => {
+                                sys!(format!(
+                                    "Command template created:\n  {}\n\nEdit it, then /command reload to activate.",
+                                    path.display()
+                                ));
+                                self.user_commands = crate::commands::load_all(&self.marlin_dir);
+                            }
+                            Err(e) => err!(format!("Failed to create command: {e}")),
+                        }
+                    }
+
+                    "reload" => {
+                        self.user_commands = crate::commands::load_all(&self.marlin_dir);
+                        let defs: Vec<crate::commands::UserCommandDef> =
+                            self.user_commands.iter().map(crate::commands::UserCommandDef::from).collect();
+                        let _ = ui_tx.send(UiUpdate::UserCommandsLoaded(defs)).await;
+                        sys!(format!("Reloaded {} user command(s).", self.user_commands.len()));
+                    }
+
                     _ => {
-                        sys!(format!("Theme: {}  (use /theme dark|light)", self.cfg.theme));
+                        sys!("Usage: /command [list|new <name>|reload]");
+                    }
+                }
+            }
+
+            "/tool" | "/tools" => {
+                let subcmd = args.first().copied().unwrap_or("list");
+                let subargs: Vec<&str> = args.get(1..).map(|a| a.to_vec()).unwrap_or_default();
+
+                match subcmd {
+                    "list" | "ls" => {
+                        if self.external_tools.is_empty() {
+                            sys!("No user tools. Add TOML files to ~/.marlin/tools/");
+                        } else {
+                            let lines: Vec<String> = self.external_tools.iter().map(|t| {
+                                format!("  {:<24} — {}", t.name, t.description)
+                            }).collect();
+                            sys!(format!("User tools ({}):\n{}", self.external_tools.len(), lines.join("\n")));
+                        }
+                    }
+
+                    "new" | "create" => {
+                        let name = if subargs.is_empty() { "my_tool" } else { subargs[0] };
+                        match crate::tools::external::save_template(&self.marlin_dir, name) {
+                            Ok(path) => {
+                                sys!(format!(
+                                    "Tool template created:\n  {}\n\nEdit it, then /tool reload to activate.",
+                                    path.display()
+                                ));
+                                self.external_tools = crate::tools::external::load_all(&self.marlin_dir);
+                            }
+                            Err(e) => err!(format!("Failed to create tool: {e}")),
+                        }
+                    }
+
+                    "reload" => {
+                        self.external_tools = crate::tools::external::load_all(&self.marlin_dir);
+                        sys!(format!("Reloaded {} user tool(s).", self.external_tools.len()));
+                    }
+
+                    _ => {
+                        sys!("Usage: /tool [list|new <name>|reload]");
                     }
                 }
             }
@@ -1395,7 +1589,7 @@ impl Engine {
                     } else {
                         sys!("No index built. Run /index to build one.");
                     }
-                    return;
+                    return None;
                 }
                 let wd = self.work_dir.clone();
                 sys!(format!("Building index for {wd}…"));
@@ -1415,11 +1609,11 @@ impl Engine {
             "/search" => {
                 if rest.is_empty() {
                     sys!("Usage: /search <query>");
-                    return;
+                    return None;
                 }
                 let Some(idx) = &self.code_index else {
                     err!("No index. Run /index first.");
-                    return;
+                    return None;
                 };
                 let results = index::search(idx, rest, 8);
                 sys!(index::format_results(&results, rest));
@@ -1428,13 +1622,13 @@ impl Engine {
             "/revert" => {
                 if args.is_empty() {
                     sys!("Usage: /revert <file> [n]  —  list snapshots or restore one");
-                    return;
+                    return None;
                 }
                 let abs_path = self.resolve_path(args[0]);
                 let snaps = snapshots::list(&self.marlin_dir, &self.work_dir, &abs_path);
                 if snaps.is_empty() {
                     sys!(format!("No snapshots for {} — Marlin snapshots files before every AI edit.", args[0]));
-                    return;
+                    return None;
                 }
                 if args.len() < 2 {
                     let lines: Vec<String> = snaps.iter().enumerate().map(|(i, s)| {
@@ -1446,12 +1640,12 @@ impl Engine {
                     }).collect();
                     sys!(format!("Snapshots for {} (newest first):\n{}\n\nUse /revert {} <n> to restore.",
                         args[0], lines.join("\n"), args[0]));
-                    return;
+                    return None;
                 }
                 let n: usize = args[1].parse().unwrap_or(0);
                 if n < 1 || n > snaps.len() {
                     err!(format!("Invalid snapshot number (1–{}).", snaps.len()));
-                    return;
+                    return None;
                 }
                 let snap = &snaps[n - 1];
                 match snapshots::restore(&self.marlin_dir, &self.work_dir, &abs_path, &snap.id) {
@@ -1478,12 +1672,12 @@ impl Engine {
                         Ok(_) => sys!("Session history cleared."),
                         Err(e) => err!(format!("Failed to clear sessions: {e}")),
                     }
-                    return;
+                    return None;
                 }
                 let sessions = history::list_sessions(&self.marlin_dir).unwrap_or_default();
                 if sessions.is_empty() {
                     sys!("No saved sessions.");
-                    return;
+                    return None;
                 }
                 if let Some(n_str) = args.first() {
                     if let Ok(n) = n_str.parse::<usize>() {
@@ -1491,10 +1685,10 @@ impl Engine {
                             let s = &sessions[n - 1];
                             self.history = s.messages.iter().map(from_session_message).collect();
                             sys!(format!("Loaded: {}", s.summary()));
-                            return;
+                            return None;
                         }
                         err!(format!("Invalid session number (1–{}).", sessions.len()));
-                        return;
+                        return None;
                     }
                 }
                 let limit = sessions.len().min(20);
@@ -1506,7 +1700,7 @@ impl Engine {
             }
 
             "/cat" => {
-                if args.is_empty() { sys!("Usage: /cat <file>"); return; }
+                if args.is_empty() { sys!("Usage: /cat <file>"); return None; }
                 let path = self.resolve_path(args[0]);
                 match std::fs::read_to_string(&path) {
                     Ok(content) => sys!(format!("[{path}]\n{content}")),
@@ -1537,7 +1731,7 @@ impl Engine {
             "/cd" => {
                 if args.is_empty() {
                     sys!(format!("Current directory: {}", self.work_dir));
-                    return;
+                    return None;
                 }
                 let new_dir = self.resolve_path(args[0]);
                 match std::fs::metadata(&new_dir) {
@@ -1575,7 +1769,7 @@ impl Engine {
                     "run" | "r" => {
                         if subargs.is_empty() {
                             sys!("Usage: /skill run <name> [query]");
-                            return;
+                            return None;
                         }
                         let skill_name = subargs[0];
                         let query = if subargs.len() > 1 {
@@ -1606,6 +1800,7 @@ impl Engine {
                                                     clean_env,
                                                     crate::config::AstMode::Off,
                                                     &crate::config::SandboxMode::Off,
+                                                    &[],
                                                 )
                                             }).await;
                                             match result {
@@ -1725,9 +1920,44 @@ impl Engine {
             }
 
             _ => {
-                err!(format!("Unknown command: {cmd}  (type /help for list)"));
+                // Check user-defined commands before reporting unknown.
+                let cmd_name = cmd.trim_start_matches('/');
+                if let Some(ucmd) = self.user_commands.iter().find(|c| c.name == cmd_name).cloned() {
+                    let args_str = rest.to_string();
+                    match ucmd.run.kind {
+                        crate::commands::CommandKind::Shell => {
+                            let command = ucmd.run.command.replace("{args}", &args_str);
+                            sys!(format!("Running /{}: {command}", ucmd.name));
+                            let wd = self.work_dir.clone();
+                            let logs_dir = self.marlin_dir.join("logs");
+                            let clean_env = self.cfg.clean_env;
+                            let cmd_json = serde_json::json!({"command": command}).to_string();
+                            let result = tokio::task::spawn_blocking(move || {
+                                executor::execute(
+                                    "run_command", &cmd_json, &wd,
+                                    &|_| true, None, None, Some(&logs_dir),
+                                    clean_env, crate::config::AstMode::Off,
+                                    &crate::config::SandboxMode::Off, &[],
+                                )
+                            }).await;
+                            match result {
+                                Ok(r) if r.is_error => err!(format!("[/{}]\n{}", ucmd.name, r.output)),
+                                Ok(r)               => sys!(format!("[/{}]\n{}", ucmd.name, r.output)),
+                                Err(e)              => err!(format!("Command task panic: {e}")),
+                            }
+                        }
+                        crate::commands::CommandKind::Prompt => {
+                            let prompt = ucmd.run.template.replace("{input}", &args_str);
+                            sys!(format!("/{}: injecting prompt into conversation…", ucmd.name));
+                            return Some(prompt);
+                        }
+                    }
+                } else {
+                    err!(format!("Unknown command: {cmd}  (type /help for list)"));
+                }
             }
         }
+        None
     }
 
     fn is_allowed(&self, cmd: &str) -> bool {
@@ -1867,7 +2097,8 @@ fn help_text() -> String {
         ("/verify [cmd|off]", "set shell command to run after every file edit (Write-Test-Fix)"),
         ("/ast [off|sexpr|harness]", "AST context mode: off=raw, sexpr=S-expr reads, harness=JSON surgery (persists)"),
         ("/clean-env [on|off]", "strip subprocess environment for isolation (persists)"),
-        ("/theme [dark|light]", "switch UI theme (persists)"),
+        ("/theme [dark|light|<name>]", "switch theme; named themes live in ~/.marlin/themes/"),
+        ("/command [list|new|reload]", "manage user-defined slash commands (~/.marlin/commands/)"),
         ("/index [status]", "build (or check) the TF-IDF codebase search index"),
         ("/search <query>", "search the index and show ranked results with snippets"),
         ("/revert <file> [n]", "list file snapshots or restore one"),

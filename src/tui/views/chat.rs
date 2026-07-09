@@ -101,6 +101,9 @@ pub struct ChatView {
     // Typewriter animation
     pub typewriter_enabled: bool,
     typewriter_pos: usize,
+
+    /// Number of built-in slash commands — used to safely append/remove user commands.
+    builtin_cmd_count: usize,
 }
 
 impl ChatView {
@@ -108,13 +111,15 @@ impl ChatView {
         let mut ta = TextArea::default();
         ta.set_placeholder_text("Message Marlin... (Enter to send, Ctrl+J for newline)");
 
+        let builtin_cmds = all_commands();
+        let builtin_count = builtin_cmds.len();
         Self {
             entries: vec![],
             textarea: ta,
             input_history: vec![],
             history_idx: -1,
             history_draft: String::new(),
-            suggestions_defs: all_commands(),
+            suggestions_defs: builtin_cmds,
             suggestions: vec![],
             streaming: false,
             stream_buf: String::new(),
@@ -144,6 +149,7 @@ impl ChatView {
             last_skill_matches: vec![],
             typewriter_enabled: false,
             typewriter_pos: 0,
+            builtin_cmd_count: builtin_count,
         }
     }
 
@@ -239,6 +245,17 @@ impl ChatView {
             }
             UiUpdate::TierSelected { score, tier } => {
                 self.add_system(&format!("difficulty {score}/100 → {tier} tier"));
+            }
+            UiUpdate::UserCommandsLoaded(defs) => {
+                // Keep only built-in commands, then append loaded user commands.
+                self.suggestions_defs.truncate(self.builtin_cmd_count);
+                for d in defs {
+                    self.suggestions_defs.push(CmdDef {
+                        cmd: format!("/{}", d.name),
+                        args: d.args,
+                        desc: d.description,
+                    });
+                }
             }
             // TaskUpdate, TokenUsage, and AstMode are consumed by the runner/sidebar
             UiUpdate::TaskUpdate(_) | UiUpdate::TokenUsage { .. } | UiUpdate::AstMode(_) => {}

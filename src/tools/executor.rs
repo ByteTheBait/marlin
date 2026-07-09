@@ -35,6 +35,7 @@ pub fn execute(
     clean_env: bool,
     ast_mode: AstMode,
     sandbox_mode: &SandboxMode,
+    external_tools: &[super::external::ExternalTool],
 ) -> ToolResult {
     let input: HashMap<String, String> = match parse_input(input_json) {
         Some(m) => m,
@@ -357,7 +358,18 @@ pub fn execute(
             }
         }
 
-        _ => ToolResult::err(format!("unknown tool: {name}")),
+        _ => {
+            // Try user-defined external tools from ~/.marlin/tools/*.toml.
+            if let Some(et) = external_tools.iter().find(|t| t.name == name) {
+                let (output, is_error) = et.run(&input, work_dir, clean_env);
+                return if is_error {
+                    ToolResult::err(output)
+                } else {
+                    ToolResult::ok(output)
+                };
+            }
+            ToolResult::err(format!("unknown tool: {name}"))
+        }
     }
 }
 

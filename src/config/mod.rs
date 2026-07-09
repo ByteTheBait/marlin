@@ -355,3 +355,85 @@ pub fn load_theme(marlin_dir: &Path) -> ThemePalette {
         .and_then(|s| toml::from_str::<ThemePalette>(&s).ok())
         .unwrap_or_default()
 }
+
+// ── Named themes (~/.marlin/themes/<name>.toml) ───────────────────────────────
+
+/// A named theme file — same color fields as ThemePalette, plus name/description.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThemeFile {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dark: Option<ThemeColors>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light: Option<ThemeColors>,
+}
+
+pub fn themes_dir(marlin_dir: &Path) -> PathBuf {
+    let d = marlin_dir.join("themes");
+    let _ = std::fs::create_dir_all(&d);
+    d
+}
+
+/// Load a named theme from `~/.marlin/themes/<name>.toml`, returning its palette.
+pub fn load_named_theme(marlin_dir: &Path, name: &str) -> Option<ThemePalette> {
+    let path = themes_dir(marlin_dir).join(format!("{name}.toml"));
+    if !path.exists() { return None; }
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| toml::from_str::<ThemeFile>(&s).ok())
+        .map(|tf| ThemePalette { dark: tf.dark, light: tf.light })
+}
+
+/// List all named themes: (name, description).
+pub fn list_themes(marlin_dir: &Path) -> Vec<(String, String)> {
+    let dir = themes_dir(marlin_dir);
+    let Ok(entries) = std::fs::read_dir(&dir) else { return vec![] };
+    let mut themes: Vec<(String, String)> = entries.flatten()
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("toml"))
+        .filter_map(|e| {
+            let data = std::fs::read_to_string(e.path()).ok()?;
+            let tf: ThemeFile = toml::from_str(&data).ok()?;
+            Some((tf.name, tf.description))
+        })
+        .collect();
+    themes.sort_by(|a, b| a.0.cmp(&b.0));
+    themes
+}
+
+// ── Layout config ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayoutConfig {
+    /// Width of the sidebar in terminal columns (default 34).
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: u16,
+    /// Minimum total terminal width for the sidebar to appear (default 100).
+    #[serde(default = "default_min_sidebar_width")]
+    pub min_sidebar_width: u16,
+}
+
+fn default_sidebar_width() -> u16 { 34 }
+fn default_min_sidebar_width() -> u16 { 100 }
+
+impl Default for LayoutConfig {
+    fn default() -> Self {
+        Self {
+            sidebar_width: default_sidebar_width(),
+            min_sidebar_width: default_min_sidebar_width(),
+        }
+    }
+}
+
+/// Load `~/.marlin/layout.toml`, falling back to defaults if absent or invalid.
+pub fn load_layout(marlin_dir: &Path) -> LayoutConfig {
+    let path = marlin_dir.join("layout.toml");
+    match std::fs::read_to_string(&path) {
+        Err(_) => LayoutConfig::default(),
+        Ok(data) => toml::from_str::<LayoutConfig>(&data).unwrap_or_else(|e| {
+            eprintln!("layout.toml parse error: {e}");
+            LayoutConfig::default()
+        }),
+    }
+}
