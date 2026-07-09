@@ -24,13 +24,35 @@ const LOG_THRESHOLD_BYTES: usize = 6_000;
 // Hard cap on what we ever put into a tool result
 const MAX_OUTPUT_BYTES: usize = 40_000;
 
+/// Environment variables preserved across subprocess spawns when `clean_env` is set.
+/// Single source of truth — previously duplicated (and drifted) across executor.rs,
+/// external.rs, and the verify-command runner in engine/mod.rs.
+pub(crate) const CLEAN_ENV_VARS: &[&str] = &[
+    "PATH", "HOME", "USER", "LANG", "LC_ALL",
+    "CARGO_HOME", "RUSTUP_HOME", "GOPATH",
+    "NODE_PATH", "npm_config_prefix",
+];
+
+/// Single-quote `s` for safe inclusion as one shell word, escaping embedded `'`.
+/// Callers must place the placeholder bare (not already inside author-supplied
+/// quotes) — this function supplies the only layer of quoting.
+pub(crate) fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Callback used to search the code index for `search_codebase`.
+pub type SearchFn<'a> = dyn Fn(&str, usize) -> String + 'a;
+/// Callback used to snapshot a file before a write/edit tool mutates it.
+pub type SnapshotFn<'a> = dyn Fn(&str, &str) + 'a;
+
+#[allow(clippy::too_many_arguments)]
 pub fn execute(
     name: &str,
     input_json: &str,
     work_dir: &str,
     is_allowed: &dyn Fn(&str) -> bool,
-    search_fn: Option<&dyn Fn(&str, usize) -> String>,
-    snapshot_fn: Option<&dyn Fn(&str, &str)>,
+    search_fn: Option<&SearchFn<'_>>,
+    snapshot_fn: Option<&SnapshotFn<'_>>,
     logs_dir: Option<&Path>,
     clean_env: bool,
     ast_mode: AstMode,
@@ -45,7 +67,12 @@ pub fn execute(
     let resolve = |p: &str| resolve_path(p, work_dir);
     let clamp = |s: String| -> String {
         if s.len() > MAX_OUTPUT_BYTES {
-            format!("{}\n…(truncated)", &s[..MAX_OUTPUT_BYTES])
+            // Back off to the nearest char boundary — slicing mid-UTF-8-char panics.
+            let mut end = MAX_OUTPUT_BYTES;
+            while end > 0 && !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}\n…(truncated)", &s[..end])
         } else {
             s
         }
@@ -156,9 +183,7 @@ pub fn execute(
                 command.arg("-c").arg(cmd).current_dir(work_dir);
                 if clean_env {
                     command.env_clear();
-                    for var in &["PATH", "HOME", "USER", "LANG", "LC_ALL",
-                                  "CARGO_HOME", "RUSTUP_HOME", "GOPATH",
-                                  "NODE_PATH", "npm_config_prefix"] {
+                    for var in CLEAN_ENV_VARS {
                         if let Ok(val) = std::env::var(var) {
                             command.env(var, val);
                         }
@@ -262,8 +287,7 @@ pub fn execute(
             let limit: usize = input.get("limit")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(5)
-                .max(1)
-                .min(20);
+                .clamp(1, 20);
             ToolResult::ok(sf(query, limit))
         }
 
@@ -334,7 +358,7 @@ pub fn execute(
             };
 
             match mutate_result {
-                Err(e) => return ToolResult::err(format!("ast-harness failed: {e}")),
+                Err(e) => ToolResult::err(format!("ast-harness failed: {e}")),
                 Ok(mutate_out) => {
                     // Recompile source from the mutated AST JSON
                     let compile_out = if !lang.is_empty() && !source_file.is_empty() {
@@ -361,7 +385,14 @@ pub fn execute(
         _ => {
             // Try user-defined external tools from ~/.marlin/tools/*.toml.
             if let Some(et) = external_tools.iter().find(|t| t.name == name) {
-                let (output, is_error) = et.run(&input, work_dir, clean_env);
+                let cmd = et.resolved_command(&input);
+                if !is_allowed(&cmd) {
+                    let first = cmd.split_whitespace().next().unwrap_or(&cmd);
+                    return ToolResult::err(format!(
+                        "not permitted: {cmd:?} — use /allow {first} or /sandbox [permissive|docker|gvisor]"
+                    ));
+                }
+                let (output, is_error) = et.execute(&cmd, work_dir, clean_env, sandbox_mode);
                 return if is_error {
                     ToolResult::err(output)
                 } else {
@@ -400,9 +431,7 @@ pub fn detect_mxc() -> bool {
 ///   - 60-second timeout
 fn mxc_config_json(cmd: &str, work_dir: &str) -> String {
     // cd into workdir first so relative paths in cmd resolve correctly.
-    // Single-quote work_dir to handle spaces; escape any embedded single quotes.
-    let safe_wd = work_dir.replace('\'', "'\\''");
-    let full_cmd = format!("cd '{}' && {}", safe_wd, cmd);
+    let full_cmd = format!("cd {} && {}", shell_quote(work_dir), cmd);
     // serde_json::to_string produces a JSON-quoted string including surrounding '"'.
     let command_line = format!("sh -c {}", serde_json::to_string(full_cmd.as_str()).unwrap());
 
@@ -423,7 +452,7 @@ fn mxc_config_json(cmd: &str, work_dir: &str) -> String {
 }
 
 /// Execute `cmd` inside an MXC sandbox.
-fn run_in_mxc(cmd: &str, work_dir: &str) -> std::io::Result<std::process::Output> {
+pub(crate) fn run_in_mxc(cmd: &str, work_dir: &str) -> std::io::Result<std::process::Output> {
     let json = mxc_config_json(cmd, work_dir);
 
     // Write the config to a temp file; MXC takes a file path argument.
@@ -509,7 +538,7 @@ fn parse_input(json: &str) -> Option<HashMap<String, String>> {
     None
 }
 
-fn resolve_path(p: &str, work_dir: &str) -> String {
+pub(crate) fn resolve_path(p: &str, work_dir: &str) -> String {
     if p.is_empty() { return work_dir.to_string(); }
     if p == "~" {
         return dirs::home_dir().unwrap_or_default().to_string_lossy().to_string();

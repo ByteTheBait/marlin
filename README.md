@@ -128,37 +128,46 @@ Shell skills run **outside the sandbox** and bypass the command allow-list — t
 /skill new my_skill           create a template file to edit
 /skill suggest                show AI-generated suggestions from nightly analysis
 /skill reload                 reload skills from disk after editing
+/skill migrate                rewrite deprecated .toml skills to .qmd
 ```
 
 As you type, Marlin matches your message against skill trigger keywords and shows relevant skills in the suggestion panel — before you even send.
 
 ### Writing a skill
 
-Drop a `.toml` file in `~/.marlin/skills/`:
+Drop a `.qmd` file in `~/.marlin/skills/` — YAML frontmatter for metadata, then optional prose, then an optional fenced shell chunk:
 
-```toml
-name = "gh_issues"
-description = "List open GitHub issues for this repo"
-triggers = ["issues", "github", "gh", "open bugs"]
+```qmd
+---
+name: gh_issues
+description: List open GitHub issues for this repo
+triggers: [issues, github, gh, open bugs]
+---
 
-[run]
-type = "shell"
-command = "gh issue list --limit 20"
+List the open issues, then summarize them by priority.
+
+```{sh}
+gh issue list --limit 20
+```
 ```
 
-Or a prompt-type skill:
+Or a prompt-only skill (no fenced chunk — the prose is expanded and fed back to the model instead of executed):
 
-```toml
-name = "explain_diff"
-description = "Explain the current git diff"
-triggers = ["explain diff", "what changed", "review changes"]
+```qmd
+---
+name: explain_diff
+description: Explain the current git diff
+triggers: [explain diff, what changed, review changes]
+---
 
-[run]
-type = "prompt"
-template = "Please explain this git diff clearly:\n\n{input}"
+Please explain this git diff clearly:
+
+{input}
 ```
 
-Use `{query}` (shell) or `{input}` (prompt) as the placeholder for user-supplied text.
+Use `{query}` (shell chunks) or `{input}` (prompt body) as the placeholder for user-supplied text — it's substituted as a single shell-quoted word in chunks, so leave it bare (`cmd {query}`, not `cmd '{query}'`). A skill can have both a chunk and prose: the chunk(s) run first, then the prose plus their output is fed to the model together. Chunks execute in order; nothing pipes from one into the next.
+
+`.toml` skills (the pre-qmd format) still load but are deprecated — run `/skill migrate` to rewrite them to `.qmd`.
 
 ### Nightly skill suggestions
 
@@ -434,11 +443,13 @@ Token counts use Claude's `POST /v1/messages/count_tokens` API for exact figures
 
 **Safety:**
 - 100 tool-call cap per goal
-- Chain operator detection — `&&`, `||`, `;`, backtick, `$()` blocked at the policy layer before execution
-- Destructive command approval modal
+- Every shell-executing path — the LLM's `run_command`, skills, external tools, and user-defined `/command`s — funnels through one preflight check (`src/preflight/mod.rs`): the real allow-list and sandbox mode, chain-operator detection (`&&`, `||`, `;`, backtick, `$()`), and a tokenized destructive-command classifier. None of them bypass `/allow` or `/sandbox`.
+- Destructive command approval modal, shown for skills and user commands too, not just direct `run_command` calls
+- File tool paths (`read_file`/`write_file`/`edit_file`/`create_directory`) must resolve within the working directory; an escape (e.g. `~/.ssh/authorized_keys`) requires the same approval modal
+- Skill/tool/command placeholders (`{query}`, `{args}`, ...) are substituted as a single shell-quoted word, not raw string interpolation
+- `/preflight [startup|skills|all]` reports missing binaries, unparsable config files, a stale index, and per-skill validation issues
 - Optional `env_clear()` subprocess isolation (`/clean-env on`)
 - Large command outputs (> 6k chars) spilled to `~/.marlin/logs/` with a pointer returned to the LLM
-- Skills run outside the sandbox (intentional) but still go through output truncation and logging
 
 ---
 
@@ -453,7 +464,7 @@ Key directories:
   config.json          main config
   theme.toml           optional color overrides (see Hacking Marlin)
   layout.toml          sidebar dimensions (see Hacking Marlin)
-  skills/              skill TOML files (explore, web_search, ripgrep, make_skill built in)
+  skills/              skill .qmd files (explore, web_search, ripgrep, make_skill built in); .toml also loads, deprecated
   commands/            user-defined slash commands (TOML files, /command reload)
   themes/              named theme files, selectable with /theme <name>
   tools/               user-defined LLM tools (TOML files, /tool reload)

@@ -3,6 +3,7 @@ mod config;
 mod engine;
 mod history;
 mod index;
+mod preflight;
 mod providers;
 mod skills;
 mod snapshots;

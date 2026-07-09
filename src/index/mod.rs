@@ -146,7 +146,11 @@ fn extract_snippet(path: &str, terms: &[String]) -> String {
         if terms.iter().any(|t| lower.contains(t.as_str())) {
             let trimmed = line.trim();
             if trimmed.len() > 120 {
-                return format!("{}…", &trimmed[..120]);
+                let mut end = 120;
+                while end > 0 && !trimmed.is_char_boundary(end) {
+                    end -= 1;
+                }
+                return format!("{}…", &trimmed[..end]);
             }
             return trimmed.to_string();
         }

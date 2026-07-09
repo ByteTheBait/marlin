@@ -1,22 +1,27 @@
 use anyhow::{anyhow, Result};
 
-use super::{Skill, SkillKind};
+use super::Skill;
 
-/// Resolve the shell command for a shell skill, substituting `{query}`.
-/// The caller is responsible for executing it through the main tool executor
-/// (which applies output truncation, logging, and clean_env).
-pub fn skill_command(skill: &Skill, query: &str) -> Result<String> {
-    if skill.run.kind != SkillKind::Shell {
-        return Err(anyhow!("skill '{}' is not a shell skill", skill.name));
+/// Resolve every chunk's shell command in order, substituting `{query}` as a
+/// single shell-quoted word in each. Skill authors must leave `{query}` bare
+/// (not wrapped in their own quotes) — this is the only layer of quoting
+/// applied, and it's what stops `{query}` from smuggling in `;`, `&&`,
+/// backticks, etc. The caller is responsible for executing each result through
+/// the main tool executor (which applies output truncation, logging, and
+/// clean_env) — chunks don't chain, so run them independently in order.
+pub fn resolve_chunks(skill: &Skill, query: &str) -> Result<Vec<String>> {
+    if skill.chunks.is_empty() {
+        return Err(anyhow!("skill '{}' has no shell chunks", skill.name));
     }
-    Ok(skill.run.command.replace("{query}", query))
+    let quoted = crate::tools::executor::shell_quote(query);
+    Ok(skill.chunks.iter().map(|c| c.source.replace("{query}", &quoted)).collect())
 }
 
+/// Expand a prompt skill's prose body, substituting `{input}`/`{query}` with
+/// the caller's raw text (no shell-quoting — this is fed to the model, not a shell).
 pub fn expand_prompt(skill: &Skill, input: &str) -> Result<String> {
-    if skill.run.kind != SkillKind::Prompt {
-        return Err(anyhow!("skill '{}' is not a prompt skill", skill.name));
+    if !skill.is_prompt() {
+        return Err(anyhow!("skill '{}' has no prompt body", skill.name));
     }
-    Ok(skill.run.template
-        .replace("{input}", input)
-        .replace("{query}", input))
+    Ok(skill.body.replace("{input}", input).replace("{query}", input))
 }

@@ -72,9 +72,8 @@ pub fn all_tools(ast_mode: &AstMode, skills: &[(String, String)], external: &[ex
         },
         ToolDef {
             name: "search_codebase".into(),
-            description: "Search the project index using TF-IDF ranking. Returns the most relevant files \
-                for a query with scored snippets. Use this before read_file on large codebases to find \
-                the right file without reading everything. Returns an error if the index hasn't been built yet.".into(),
+            description: "TF-IDF search over the project index. Use before read_file on large codebases \
+                to find the right file without reading everything. Errors if the index isn't built yet.".into(),
             properties: vec![
                 ToolProp { name: "query".into(), ty: "string".into(), description: "Search terms or natural language description of what you're looking for.".into() },
                 ToolProp { name: "limit".into(), ty: "string".into(), description: "Maximum number of results to return (default 5, max 20).".into() },
@@ -83,10 +82,13 @@ pub fn all_tools(ast_mode: &AstMode, skills: &[(String, String)], external: &[ex
         },
     ];
 
-    // Inject skill tools when skills are loaded
+    // Inject skill tools when skills are loaded. `skills` is expected to already
+    // be narrowed to this turn's trigger-matched subset (falling back to bare
+    // names when nothing matched) — see Engine::skill_tool_list — so this list
+    // stays bounded instead of scaling with the number of installed skills.
     if !skills.is_empty() {
         let skill_list = skills.iter()
-            .map(|(name, desc)| format!("  - {name}: {desc}"))
+            .map(|(name, desc)| if desc.is_empty() { format!("  - {name}") } else { format!("  - {name}: {desc}") })
             .collect::<Vec<_>>()
             .join("\n");
         tools.push(ToolDef {
@@ -94,7 +96,7 @@ pub fn all_tools(ast_mode: &AstMode, skills: &[(String, String)], external: &[ex
             description: format!(
                 "Run a pre-built Marlin skill by name. Use this when a skill matches \
                 the user's request — it's faster and more reliable than writing a \
-                shell command from scratch. Available skills:\n{skill_list}"
+                shell command from scratch. Candidate skills for this turn:\n{skill_list}"
             ),
             properties: vec![
                 ToolProp {
@@ -145,12 +147,9 @@ pub fn all_tools(ast_mode: &AstMode, skills: &[(String, String)], external: &[ex
 
         tools.push(ToolDef {
             name: "ast_mutate".into(),
-            description: "Mutate an AST node using a structural JSON directive, then automatically \
-                recompile and optimize the source file. Supported operations: \
-                'str-replace' (requires old_json, new_json), \
-                'append-stmt' (requires statement_json), \
-                'insert-before' (requires index, statement_json). \
-                Always provide 'lang' and 'source_file' so the source can be regenerated.".into(),
+            description: "Mutate an AST node via a structural JSON directive (str-replace, append-stmt, \
+                insert-before — see each property below), then recompile and optimize the source file. \
+                Provide 'lang' and 'source_file' to regenerate the source.".into(),
             properties: vec![
                 ToolProp {
                     name: "file".into(), ty: "string".into(),
@@ -199,4 +198,42 @@ pub fn all_tools(ast_mode: &AstMode, skills: &[(String, String)], external: &[ex
     }
 
     tools
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_skill_desc(tools: &[ToolDef]) -> &str {
+        &tools.iter().find(|t| t.name == "run_skill").unwrap().description
+    }
+
+    #[test]
+    fn run_skill_description_names_only_when_bounded_fallback() {
+        // Engine::skill_tool_list falls back to (name, "") pairs when nothing
+        // trigger-matches the current turn — proves the description scales
+        // with skill *names*, not full descriptions, however many are installed.
+        let ten_names: Vec<(String, String)> = (0..10)
+            .map(|i| (format!("skill_{i}"), String::new()))
+            .collect();
+        let tools = all_tools(&AstMode::Off, &ten_names, &[]);
+        let desc = run_skill_desc(&tools);
+        for i in 0..10 {
+            assert!(desc.contains(&format!("skill_{i}")), "missing skill_{i} in: {desc}");
+        }
+        // No description text (colon-separated) should appear for the fallback case.
+        assert!(!desc.contains(':') || desc.matches(':').count() <= 1, "unexpected description text: {desc}");
+    }
+
+    #[test]
+    fn run_skill_description_bounded_by_matched_subset() {
+        // A large skill count with only a couple of matches (the normal
+        // Engine::skill_tool_list path) keeps the description small regardless
+        // of how many skills are installed overall.
+        let matched = vec![("relevant_skill".to_string(), "does the relevant thing".to_string())];
+        let tools = all_tools(&AstMode::Off, &matched, &[]);
+        let desc = run_skill_desc(&tools);
+        assert!(desc.contains("relevant_skill: does the relevant thing"));
+        assert!(desc.len() < 300, "run_skill description unexpectedly large: {} chars", desc.len());
+    }
 }

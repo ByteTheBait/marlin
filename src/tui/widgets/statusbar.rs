@@ -17,6 +17,9 @@ pub struct StatusBar {
     pub streaming: bool,
     pub width: u16,
     pub ast_mode: AstMode,
+    /// Set when the base prompt injection (system prompt + tool defs) exceeds
+    /// its ~2k token target. Informational only — never blocks a request.
+    pub prompt_budget_over: Option<usize>,
 }
 
 impl StatusBar {
@@ -29,6 +32,7 @@ impl StatusBar {
             streaming: false,
             width,
             ast_mode: AstMode::Off,
+            prompt_budget_over: None,
         }
     }
 
@@ -60,6 +64,11 @@ impl StatusBar {
                 left.push(Span::raw("    "));
                 left.push(Span::styled(" HARNESS ", style_status_ast_harness()));
             }
+        }
+
+        if let Some(tokens) = self.prompt_budget_over {
+            left.push(Span::raw("    "));
+            left.push(Span::styled(format!(" ⚠ PROMPT {tokens}t "), style_status_budget_warn()));
         }
 
         let (right_text, right_style) = if self.streaming {

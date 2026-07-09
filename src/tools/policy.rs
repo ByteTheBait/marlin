@@ -1,12 +1,12 @@
-/// Shell command permission policy.
-///
-/// The allow list holds string prefixes matching an executable name or a command prefix.
-/// Commands containing chaining operators (`&&`, `||`, `;`, backtick, `$()`) are denied
-/// unless the allow list entry covers the full command as a prefix — just matching the
-/// executable is not enough when operators are present.
-///
-/// Pipes (`|`) and redirects (`>`, `<`) are allowed through — they don't execute a second
-/// independent program the way `;` and `&&` do, and many legitimate workflows depend on them.
+//! Shell command permission policy.
+//!
+//! The allow list holds string prefixes matching an executable name or a command prefix.
+//! Commands containing chaining operators (`&&`, `||`, `;`, backtick, `$()`) are denied
+//! unless the allow list entry covers the full command as a prefix — just matching the
+//! executable is not enough when operators are present.
+//!
+//! Pipes (`|`) and redirects (`>`, `<`) are allowed through — they don't execute a second
+//! independent program the way `;` and `&&` do, and many legitimate workflows depend on them.
 
 const CHAIN_OPS: &[&str] = &["&&", "||", ";", "$(", "`"];
 

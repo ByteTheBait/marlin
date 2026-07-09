@@ -257,9 +257,10 @@ impl ChatView {
                     });
                 }
             }
-            // TaskUpdate, TokenUsage, and AstMode are consumed by the runner/sidebar
-            UiUpdate::TaskUpdate(_) | UiUpdate::TokenUsage { .. } | UiUpdate::AstMode(_) => {}
-            UiUpdate::IndexBuilt { .. } => {}
+            // TaskUpdate, TokenUsage, AstMode, and PromptBudget are consumed by the runner/sidebar
+            UiUpdate::TaskUpdate(_) | UiUpdate::TokenUsage { .. } | UiUpdate::AstMode(_)
+                | UiUpdate::PromptBudget(_) => {}
+            UiUpdate::IndexBuilt => {}
         }
     }
 
@@ -338,26 +339,26 @@ impl ChatView {
         }
 
         // Up/Down — input history
-        if key.code == KeyCode::Up && !self.textarea.lines().iter().any(|l| l.contains('\n')) {
-            if (self.history_idx + 1) < self.input_history.len() as i32 {
-                if self.history_idx == -1 {
-                    self.history_draft = self.textarea.lines().join("\n");
-                }
-                self.history_idx += 1;
-                let text = self.input_history[self.history_idx as usize].clone();
-                self.textarea = TextArea::default();
-                self.textarea.insert_str(&text);
-                self.update_suggestions();
-                return None;
+        if key.code == KeyCode::Up
+            && !self.textarea.lines().iter().any(|l| l.contains('\n'))
+            && (self.history_idx + 1) < self.input_history.len() as i32
+        {
+            if self.history_idx == -1 {
+                self.history_draft = self.textarea.lines().join("\n");
             }
-            // Fall through to viewport scroll
+            self.history_idx += 1;
+            let text = self.input_history[self.history_idx as usize].clone();
+            self.textarea = TextArea::default();
+            self.textarea.insert_str(&text);
+            self.update_suggestions();
+            return None;
         }
+        // Falls through to viewport scroll when history is exhausted.
 
         if key.code == KeyCode::Down && self.history_idx >= 0 {
             self.history_idx -= 1;
             let text = if self.history_idx < 0 {
-                let d = std::mem::take(&mut self.history_draft);
-                d
+                std::mem::take(&mut self.history_draft)
             } else {
                 self.input_history[self.history_idx as usize].clone()
             };
@@ -1010,8 +1011,8 @@ fn render_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
             }
             continue;
         }
-        if raw_line.starts_with("# ") {
-            for wrapped in word_wrap(&raw_line[2..], width) {
+        if let Some(rest) = raw_line.strip_prefix("# ") {
+            for wrapped in word_wrap(rest, width) {
                 lines.push(Line::from(Span::styled(
                     wrapped,
                     Style::default().fg(col_user()).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
@@ -1019,8 +1020,8 @@ fn render_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
             }
             continue;
         }
-        if raw_line.starts_with("## ") {
-            for wrapped in word_wrap(&raw_line[3..], width) {
+        if let Some(rest) = raw_line.strip_prefix("## ") {
+            for wrapped in word_wrap(rest, width) {
                 lines.push(Line::from(Span::styled(
                     wrapped,
                     Style::default().fg(col_aqua()).add_modifier(Modifier::BOLD),
@@ -1028,8 +1029,8 @@ fn render_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
             }
             continue;
         }
-        if raw_line.starts_with("### ") {
-            for wrapped in word_wrap(&raw_line[4..], width) {
+        if let Some(rest) = raw_line.strip_prefix("### ") {
+            for wrapped in word_wrap(rest, width) {
                 lines.push(Line::from(Span::styled(
                     wrapped,
                     Style::default().fg(col_steel()).add_modifier(Modifier::BOLD),

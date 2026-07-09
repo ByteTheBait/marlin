@@ -53,7 +53,7 @@ impl Widget for Sidebar {
 
         // ── Token budget section ───────────────────────────────────────────
         let header_style = Style::default()
-            .fg(col_app_bg().is_light_enough())
+            .fg(fg_on_app_bg())
             .add_modifier(Modifier::BOLD);
         let _ = header_style; // silence unused warning - recompute below
 
@@ -191,14 +191,8 @@ impl Widget for Sidebar {
     }
 }
 
-// Extension trait to reuse col_app_bg in the sidebar
-trait StyleExt {
-    fn is_light_enough(self) -> Color;
-}
-impl StyleExt for Color {
-    fn is_light_enough(self) -> Color {
-        // Just return a sensible foreground for the app bg
-        if is_light() { Color::Rgb(30, 50, 90) } else { Color::Rgb(180, 200, 230) }
-    }
+// A sensible foreground color to pair with col_app_bg() in the sidebar.
+fn fg_on_app_bg() -> Color {
+    if is_light() { Color::Rgb(30, 50, 90) } else { Color::Rgb(180, 200, 230) }
 }
 

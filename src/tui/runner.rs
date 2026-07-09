@@ -80,6 +80,9 @@ pub fn run(
                             sidebar.token_budget = *budget;
                             sidebar.push_token_sample(*used);
                         }
+                        UiUpdate::PromptBudget(over) => {
+                            status_bar.prompt_budget_over = *over;
+                        }
                         _ => {}
                     }
                     chat.apply_update(update);
@@ -206,7 +209,7 @@ pub fn run(
 }
 
 fn render_approval_modal(cmd: &str, area: Rect, buf: &mut Buffer) {
-    let modal_w = (area.width.min(72)).max(40);
+    let modal_w = area.width.clamp(40, 72);
     let modal_h = 7u16;
     let x = area.x + (area.width.saturating_sub(modal_w)) / 2;
     let y = area.y + (area.height.saturating_sub(modal_h)) / 2;

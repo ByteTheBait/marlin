@@ -16,7 +16,8 @@ pub enum CommandKind {
 pub struct CommandRun {
     #[serde(rename = "type")]
     pub kind: CommandKind,
-    /// Shell command to run. Use {args} for text after the slash command.
+    /// Shell command to run. Use {args} (bare, unquoted) for text after the slash
+    /// command — it is substituted as a single shell-quoted word.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
     /// Prompt template for prompt-type commands. Use {input} for the args.

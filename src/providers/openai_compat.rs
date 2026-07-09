@@ -82,7 +82,7 @@ impl OpenAiCompatProvider {
             } else { endpoint }.into(),
             api_key: api_key.into(),
             model_list: vec![
-                "anthropic/claude-sonnet-4-5".into(),
+                "anthropic/claude-sonnet-5".into(),
                 "openai/gpt-4o".into(),
                 "google/gemini-2.0-flash-001".into(),
                 "meta-llama/llama-4-maverick".into(),

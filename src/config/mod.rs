@@ -50,19 +50,19 @@ impl Default for ModelTiers {
             enabled: false,
             default: ModelTier {
                 provider: "claude".into(),
-                model: "claude-haiku-4-5".into(),
+                model: "claude-haiku-4-5-20251001".into(),
                 backup_provider: String::new(),
                 backup_model: String::new(),
             },
             complex: ModelTier {
                 provider: "claude".into(),
-                model: "claude-sonnet-4-6".into(),
+                model: "claude-sonnet-5".into(),
                 backup_provider: String::new(),
                 backup_model: String::new(),
             },
             rater: ModelTier {
                 provider: "claude".into(),
-                model: "claude-haiku-4-5".into(),
+                model: "claude-haiku-4-5-20251001".into(),
                 backup_provider: String::new(),
                 backup_model: String::new(),
             },
@@ -71,16 +71,13 @@ impl Default for ModelTiers {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AstMode {
+    #[default]
     Off,
     SExpr,
     Harness,
-}
-
-impl Default for AstMode {
-    fn default() -> Self { Self::Off }
 }
 
 impl AstMode {
@@ -94,20 +91,17 @@ impl AstMode {
 }
 
 /// How shell commands from the AI are executed.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxMode {
     /// Commands require explicit /allow approval (default).
+    #[default]
     Off,
     /// All commands allowed; run directly on the host (old "sandbox: true" behaviour).
     Permissive,
     /// Commands run via Microsoft eXecution Containers (MXC) — no outbound network,
     /// only the workdir mounted read-write.
     Mxc,
-}
-
-impl Default for SandboxMode {
-    fn default() -> Self { Self::Off }
 }
 
 impl SandboxMode {
@@ -125,7 +119,7 @@ impl SandboxMode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderConfig {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub api_key: String,
@@ -239,7 +233,7 @@ impl Config {
         providers.insert("claude".into(), ProviderConfig {
             api_key: String::new(),
             endpoint: String::new(),
-            model: "claude-sonnet-4-5".into(),
+            model: "claude-sonnet-5".into(),
         });
         providers.insert("ollama".into(), ProviderConfig {
             api_key: String::new(),
@@ -264,7 +258,7 @@ impl Config {
         providers.insert("openrouter".into(), ProviderConfig {
             api_key: String::new(),
             endpoint: "https://openrouter.ai/api/v1".into(),
-            model: "anthropic/claude-sonnet-4-5".into(),
+            model: "anthropic/claude-sonnet-5".into(),
         });
         providers.insert("custom".into(), ProviderConfig {
             api_key: String::new(),
@@ -274,7 +268,7 @@ impl Config {
 
         Self {
             active_provider: "claude".into(),
-            active_model: "claude-sonnet-4-5".into(),
+            active_model: "claude-sonnet-5".into(),
             providers,
             allowed_commands: vec![],
             system_prompt: String::new(),
@@ -288,16 +282,6 @@ impl Config {
             clean_env: false,
             ast_mode: AstMode::Off,
             model_tiers: None,
-        }
-    }
-}
-
-impl Default for ProviderConfig {
-    fn default() -> Self {
-        Self {
-            api_key: String::new(),
-            endpoint: String::new(),
-            model: String::new(),
         }
     }
 }

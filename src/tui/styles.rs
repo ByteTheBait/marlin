@@ -40,11 +40,11 @@ fn theme_rgb(
 ) -> Color {
     let lock = palette_lock().read().unwrap();
     if is_light() {
-        let c = lock.light.as_ref().and_then(|t| key(t));
+        let c = lock.light.as_ref().and_then(key);
         let [r, g, b] = c.unwrap_or(light_default);
         Color::Rgb(r, g, b)
     } else {
-        let c = lock.dark.as_ref().and_then(|t| key(t));
+        let c = lock.dark.as_ref().and_then(key);
         let [r, g, b] = c.unwrap_or(dark_default);
         Color::Rgb(r, g, b)
     }
@@ -321,6 +321,14 @@ pub fn style_status_ast_harness() -> Style {
     Style::default()
         .fg(Color::Rgb(255, 255, 255))
         .bg(if is_light() { Color::Rgb(130, 30, 140) } else { Color::Rgb(190, 60, 210) })
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Prompt-injection-over-budget badge — amber background, never blocking.
+pub fn style_status_budget_warn() -> Style {
+    Style::default()
+        .fg(Color::Rgb(30, 20, 0))
+        .bg(if is_light() { Color::Rgb(210, 150, 40) } else { Color::Rgb(230, 175, 60) })
         .add_modifier(Modifier::BOLD)
 }
 

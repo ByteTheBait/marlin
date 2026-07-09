@@ -58,39 +58,49 @@ impl ExternalTool {
         }
     }
 
-    /// Execute the tool's shell command with the provided property values.
-    /// Returns `(output, is_error)`.
-    pub fn run(&self, input: &HashMap<String, String>, work_dir: &str, clean_env: bool) -> (String, bool) {
-        // Substitute {name} placeholders from the LLM's input.
+    /// Resolve the shell command by substituting declared property placeholders
+    /// with shell-quoted values from the LLM's input. Only placeholders matching a
+    /// *declared* property name are touched, so unrelated braces in the command
+    /// (e.g. `jq '{name: .x}'`) survive untouched. A declared property the caller
+    /// didn't supply resolves to an empty quoted string.
+    pub fn resolved_command(&self, input: &HashMap<String, String>) -> String {
         let mut cmd = self.run.command.clone();
-        for (k, v) in input {
-            cmd = cmd.replace(&format!("{{{k}}}"), v);
+        for prop in &self.properties {
+            let placeholder = format!("{{{}}}", prop.name);
+            let value = input.get(&prop.name).cloned().unwrap_or_default();
+            cmd = cmd.replace(&placeholder, &super::executor::shell_quote(&value));
         }
-        // Remove any remaining {placeholder} — optional props not supplied by the LLM.
-        let mut cleaned = String::with_capacity(cmd.len());
-        let mut in_brace = false;
-        for c in cmd.chars() {
-            match c {
-                '{' => { in_brace = true; }
-                '}' => { in_brace = false; }
-                _ if !in_brace => cleaned.push(c),
-                _ => {}
-            }
-        }
+        cmd
+    }
 
+    /// Execute an already-resolved shell command (see `resolved_command`).
+    /// Returns `(output, is_error)`.
+    pub fn execute(
+        &self,
+        cmd: &str,
+        work_dir: &str,
+        clean_env: bool,
+        sandbox_mode: &crate::config::SandboxMode,
+    ) -> (String, bool) {
         use std::process::Command;
-        let mut command = Command::new("sh");
-        command.arg("-c").arg(&cleaned).current_dir(work_dir);
-        if clean_env {
-            command.env_clear();
-            for var in &["PATH", "HOME", "USER", "LANG", "LC_ALL",
-                          "CARGO_HOME", "RUSTUP_HOME", "GOPATH"] {
-                if let Ok(val) = std::env::var(var) {
-                    command.env(var, val);
+
+        let output = if *sandbox_mode == crate::config::SandboxMode::Mxc {
+            super::executor::run_in_mxc(cmd, work_dir)
+        } else {
+            let mut command = Command::new("sh");
+            command.arg("-c").arg(cmd).current_dir(work_dir);
+            if clean_env {
+                command.env_clear();
+                for var in super::executor::CLEAN_ENV_VARS {
+                    if let Ok(val) = std::env::var(var) {
+                        command.env(var, val);
+                    }
                 }
             }
-        }
-        match command.output() {
+            command.output()
+        };
+
+        match output {
             Err(e) => (e.to_string(), true),
             Ok(out) => {
                 let text = format!(
@@ -150,4 +160,47 @@ pub fn save_template(marlin_dir: &Path, name: &str) -> Result<PathBuf> {
     let path = tools_dir(marlin_dir).join(filename);
     std::fs::write(&path, toml::to_string_pretty(&tool)?)?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jq_braces_survive_substitution_unmangled() {
+        // Regression test: the old brace-stripping substitution deleted
+        // everything between ANY `{` and `}`, silently gutting jq/awk programs
+        // that aren't a declared placeholder.
+        let tool = ExternalTool {
+            name: "jq_run".into(),
+            description: "run jq".into(),
+            properties: vec![ExternalToolProp {
+                name: "path".into(), ty: "string".into(), description: String::new(), required: true,
+            }],
+            run: ExternalToolRun {
+                kind: "shell".into(),
+                command: "jq '{name: .x}' {path}".into(),
+            },
+        };
+        let mut input = HashMap::new();
+        input.insert("path".to_string(), "data.json".to_string());
+        let cmd = tool.resolved_command(&input);
+        assert_eq!(cmd, "jq '{name: .x}' 'data.json'");
+    }
+
+    #[test]
+    fn declared_placeholder_substitutes_as_quoted_word() {
+        let tool = ExternalTool {
+            name: "greet".into(),
+            description: String::new(),
+            properties: vec![ExternalToolProp {
+                name: "name".into(), ty: "string".into(), description: String::new(), required: true,
+            }],
+            run: ExternalToolRun { kind: "shell".into(), command: "echo {name}".into() },
+        };
+        let mut input = HashMap::new();
+        input.insert("name".to_string(), "a; rm -rf ~".to_string());
+        let cmd = tool.resolved_command(&input);
+        assert_eq!(cmd, "echo 'a; rm -rf ~'");
+    }
 }

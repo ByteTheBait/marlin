@@ -137,7 +137,7 @@ fn read_recent_sessions(marlin_dir: &Path) -> String {
                     for msg in messages.iter().take(30) {
                         if msg.get("role").and_then(|r| r.as_str()) == Some("user") {
                             if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
-                                let snippet = &content[..content.len().min(250)];
+                                let snippet: String = content.chars().take(250).collect();
                                 text.push_str(&format!("User: {snippet}\n"));
                             }
                         }
@@ -148,4 +148,36 @@ fn read_recent_sessions(marlin_dir: &Path) -> String {
         }
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn emoji_prefixed_long_message_does_not_panic() {
+        // Regression test: content.chars().take(250) must not slice mid-UTF-8-char
+        // the way the old `&content[..content.len().min(250)]` byte-slice did.
+        let marlin_dir = std::env::temp_dir().join("marlin_daemon_test_emoji");
+        let sessions_dir = marlin_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        // A multi-byte emoji sitting right at what would be byte offset ~250
+        // when repeated — this is exactly the shape that panicked before the fix.
+        let long_content = format!("🎉{}", "x".repeat(400));
+        let session = serde_json::json!({
+            "messages": [
+                { "role": "user", "content": long_content },
+            ]
+        });
+        std::fs::write(
+            sessions_dir.join("session1.json"),
+            serde_json::to_string(&session).unwrap(),
+        ).unwrap();
+
+        let text = read_recent_sessions(&marlin_dir);
+        assert!(text.starts_with("User: 🎉"));
+
+        let _ = std::fs::remove_dir_all(&marlin_dir);
+    }
 }

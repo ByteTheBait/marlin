@@ -1,3 +1,4 @@
+pub mod budget;
 pub mod context;
 pub mod loop_guard;
 pub mod tasks;
@@ -15,6 +16,7 @@ use crate::history::{
     self, InputHistory, Session, from_session_message, to_session_message,
 };
 use crate::index::{self, Index};
+use crate::preflight;
 use crate::providers::{
     Message, RateLimitState, StreamRequest, ToolCall, ToolCallMsg, registry::Registry,
 };
@@ -44,6 +46,9 @@ pub enum UiUpdate {
     TaskUpdate(Vec<TaskStep>),
     /// Token budget update for the sidebar meter
     TokenUsage { used: usize, budget: usize },
+    /// Base prompt injection (system prompt + tool defs) budget check — informational,
+    /// never blocking. `Some(total_tokens)` when over budget::WARN_THRESHOLD, else `None`.
+    PromptBudget(Option<usize>),
     /// AST mode changed — drives the status bar badge
     AstMode(AstMode),
     /// Skills loaded on startup — TUI uses these for typing suggestions.
@@ -118,6 +123,12 @@ pub struct Engine {
 
     /// Token count at last LLM compaction — prevents immediate re-triggering.
     compact_guard_tokens: usize,
+
+    /// Diagnostics collected at construction time (skill validation issues,
+    /// missing binaries, unparsable config files, stale index) — emitted once
+    /// `run()` has a UI channel to surface them on, since eprintln! during
+    /// startup is invisible once the TUI takes over the terminal.
+    startup_diagnostics: Vec<String>,
 }
 
 impl Engine {
@@ -140,9 +151,11 @@ impl Engine {
 
         // Install built-in skills if not present, then load all.
         skills::install_defaults(&marlin_dir);
-        let loaded_skills = skills::load_all(&marlin_dir);
+        let (loaded_skills, mut startup_diagnostics) = skills::load_all(&marlin_dir);
         let loaded_commands = crate::commands::load_all(&marlin_dir);
         let loaded_external_tools = crate::tools::external::load_all(&marlin_dir);
+
+        startup_diagnostics.extend(preflight::startup(&cfg, &marlin_dir, &work_dir, code_index.as_ref()));
 
         Ok(Self {
             cfg,
@@ -171,6 +184,7 @@ impl Engine {
             req_backup_provider: String::new(),
             req_backup_model: String::new(),
             compact_guard_tokens: 0,
+            startup_diagnostics,
         })
     }
 
@@ -186,6 +200,12 @@ impl Engine {
         })).await;
 
         let _ = ui_tx.send(UiUpdate::SystemMsg("marlin ready  /help for commands".into())).await;
+        if !self.startup_diagnostics.is_empty() {
+            let body = self.startup_diagnostics.join("\n  ");
+            let _ = ui_tx.send(UiUpdate::SystemMsg(
+                format!("preflight startup ({} note(s)) — see /preflight:\n  {body}", self.startup_diagnostics.len())
+            )).await;
+        }
         if self.ast_mode != AstMode::Off {
             let _ = ui_tx.send(UiUpdate::AstMode(self.ast_mode.clone())).await;
         }
@@ -254,19 +274,24 @@ impl Engine {
                     // Broadcast token count immediately so the sidebar isn't stale while waiting.
                     // Prefer exact count from provider API; fall back to heuristic.
                     let system_prompt = self.effective_system_prompt();
+                    let turn_tools = all_tools(&self.ast_mode, &self.skill_tool_list(&text), &self.external_tools);
                     let tok = if let Ok(p) = self.registry.get(&self.req_provider) {
                         let req_for_count = StreamRequest {
                             model: self.req_model.clone(),
                             messages: self.history.clone(),
                             system_prompt: system_prompt.clone(),
                             max_tokens: 1,
-                            tools: all_tools(&self.ast_mode, &self.skills.iter().map(|s| (s.name.clone(), s.description.clone())).collect::<Vec<_>>(), &self.external_tools),
+                            tools: turn_tools.clone(),
                         };
                         p.count_tokens(&req_for_count).await
                             .unwrap_or_else(|| estimate_tokens(&self.history, &system_prompt))
                     } else {
                         estimate_tokens(&self.history, &system_prompt)
                     };
+                    let injection_report = budget::compute(&system_prompt, &turn_tools);
+                    let _ = ui_tx.send(UiUpdate::PromptBudget(
+                        injection_report.over_budget().then_some(injection_report.total)
+                    )).await;
                     let _ = ui_tx.send(UiUpdate::TokenUsage {
                         used: tok,
                         budget: self.token_budget,
@@ -276,7 +301,7 @@ impl Engine {
 
                 Action::SlashCommand(cmd) => {
                     self.input_history.add(&cmd);
-                    if let Some(prompt) = self.handle_slash_command(&cmd, &ui_tx).await {
+                    if let Some(prompt) = self.handle_slash_command(&cmd, &ui_tx, &mut action_rx).await {
                         // Prompt-type user command: inject expanded template and run agentic loop.
                         let content = self.build_message_content(&prompt);
                         self.history.push(Message {
@@ -368,7 +393,7 @@ impl Engine {
                 messages: self.history.clone(),
                 system_prompt: self.effective_system_prompt(),
                 max_tokens: self.cfg.max_tokens,
-                tools: all_tools(&self.ast_mode, &self.skills.iter().map(|s| (s.name.clone(), s.description.clone())).collect::<Vec<_>>(), &self.external_tools),
+                tools: all_tools(&self.ast_mode, &self.skill_tool_list(&self.active_goal), &self.external_tools),
             };
 
             let mut stream = match provider.stream(req).await {
@@ -603,41 +628,17 @@ impl Engine {
                 let query = input_map.get("query").cloned().unwrap_or_default();
 
                 let result = if let Some(skill) = self.skills.iter().find(|s| s.name == skill_name) {
-                    match skill.run.kind {
-                        skills::SkillKind::Shell => {
-                            match skills::executor::skill_command(skill, &query) {
-                                Err(e) => executor::ToolResult { output: e.to_string(), is_error: true },
-                                Ok(cmd) => {
-                                    let cmd_json = serde_json::json!({"command": cmd}).to_string();
-                                    let wd = self.work_dir.clone();
-                                    let clean_env = self.cfg.clean_env;
-                                    let logs_dir = self.marlin_dir.join("logs");
-                                    tokio::task::spawn_blocking(move || {
-                                        executor::execute(
-                                            "run_command",
-                                            &cmd_json,
-                                            &wd,
-                                            &|_| true,  // skills bypass the command allow-list
-                                            None,
-                                            None,
-                                            Some(&logs_dir),
-                                            clean_env,
-                                            crate::config::AstMode::Off,
-                                            &crate::config::SandboxMode::Off, // skills run outside sandbox
-                                            &[],
-                                        )
-                                    }).await.unwrap_or_else(|e| executor::ToolResult {
-                                        output: e.to_string(),
-                                        is_error: true,
-                                    })
-                                }
-                            }
+                    if skill.is_shell() {
+                        self.run_shell_skill(skill, &query).await
+                    } else if skill.is_prompt() {
+                        match skills::executor::expand_prompt(skill, &query) {
+                            Ok(expanded) => executor::ToolResult { output: expanded, is_error: false },
+                            Err(e) => executor::ToolResult { output: e.to_string(), is_error: true },
                         }
-                        skills::SkillKind::Prompt => {
-                            match skills::executor::expand_prompt(skill, &query) {
-                                Ok(expanded) => executor::ToolResult { output: expanded, is_error: false },
-                                Err(e) => executor::ToolResult { output: e.to_string(), is_error: true },
-                            }
+                    } else {
+                        executor::ToolResult {
+                            output: format!("skill '{skill_name}' has neither a shell chunk nor a prompt body"),
+                            is_error: true,
                         }
                     }
                 } else {
@@ -663,9 +664,9 @@ impl Engine {
             let ext_tools = self.external_tools.clone();
 
             let result = tokio::task::spawn_blocking(move || {
-                let search_fn: Option<Box<dyn Fn(&str, usize) -> String>> =
+                let search_fn: Option<Box<executor::SearchFn<'_>>> =
                     idx_clone.map(|idx| {
-                        let f: Box<dyn Fn(&str, usize) -> String> = Box::new(move |q: &str, lim: usize| {
+                        let f: Box<executor::SearchFn<'_>> = Box::new(move |q: &str, lim: usize| {
                             let results = index::search(&idx, q, lim);
                             index::format_results(&results, q)
                         });
@@ -696,7 +697,102 @@ impl Engine {
         results
     }
 
-    /// Returns the set of tool call IDs the user denied.
+    /// Run every one of a skill's resolved chunk commands, in order, through the
+    /// *real* preflight funnel (allow-list + sandbox mode) — chunks don't chain,
+    /// so each runs independently and the first error stops the rest. Used by
+    /// both the LLM tool-call path (execute_tools, above) and the interactive
+    /// `/skill run` path (handle_slash_command, below) so the two can't drift
+    /// out of sync the way they used to.
+    ///
+    /// If the skill also has a prompt body (chunks + body — the qmd format's
+    /// one genuinely new capability), the expanded prose is prepended to the
+    /// combined chunk output so both reach the model together.
+    ///
+    /// A `NeedApproval` verdict (destructive-but-permitted) is treated as
+    /// already cleared here — the LLM tool-call path clears it upstream in
+    /// `run_approval_checks` before `execute_tools` ever runs; interactive
+    /// callers that haven't already prompted the user must call
+    /// `preflight::check` themselves first.
+    async fn run_shell_skill(&self, skill: &Skill, query: &str) -> executor::ToolResult {
+        let cmds = match skills::executor::resolve_chunks(skill, query) {
+            Ok(c) => c,
+            Err(e) => return executor::ToolResult { output: e.to_string(), is_error: true },
+        };
+
+        let mut outputs = Vec::with_capacity(cmds.len());
+        for cmd in cmds {
+            match self.preflight_shell(&cmd) {
+                Err(result) => return result,
+                Ok(_verdict) => {
+                    let result = self.run_shell(cmd).await;
+                    if result.is_error {
+                        return result;
+                    }
+                    outputs.push(result.output);
+                }
+            }
+        }
+
+        let prose = if skill.is_prompt() {
+            skills::executor::expand_prompt(skill, query).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let output = if prose.is_empty() {
+            outputs.join("\n\n")
+        } else {
+            format!("{prose}\n\n{}", outputs.join("\n\n"))
+        };
+        executor::ToolResult { output, is_error: false }
+    }
+
+    /// Preflight-check a resolved shell command against the real allow-list and
+    /// sandbox mode. `Err` means the command is unconditionally denied and
+    /// should never run; `Ok(verdict)` may still be `NeedApproval`.
+    fn preflight_shell(&self, cmd: &str) -> Result<preflight::Verdict, executor::ToolResult> {
+        let inv = preflight::Invocation::shell("run_command", cmd);
+        let verdict = preflight::check(&inv, &self.cfg, &self.allowed_commands);
+        if let preflight::Verdict::Deny(reason) = &verdict {
+            return Err(executor::ToolResult { output: reason.clone(), is_error: true });
+        }
+        Ok(verdict)
+    }
+
+    /// Execute a resolved shell command with the engine's real work_dir,
+    /// allow-list, clean_env, and sandbox mode.
+    async fn run_shell(&self, cmd: String) -> executor::ToolResult {
+        let cmd_json = serde_json::json!({"command": cmd}).to_string();
+        let wd = self.work_dir.clone();
+        let clean_env = self.cfg.clean_env;
+        let logs_dir = self.marlin_dir.join("logs");
+        let allowed = self.allowed_commands.clone();
+        let sandbox = self.cfg.sandbox_mode.allows_all() || self.cfg.skip_permissions;
+        let sandbox_mode = self.cfg.sandbox_mode.clone();
+        tokio::task::spawn_blocking(move || {
+            executor::execute(
+                "run_command",
+                &cmd_json,
+                &wd,
+                &|c: &str| sandbox || policy::is_command_allowed(c, &allowed),
+                None,
+                None,
+                Some(&logs_dir),
+                clean_env,
+                crate::config::AstMode::Off,
+                &sandbox_mode,
+                &[],
+            )
+        }).await.unwrap_or_else(|e| executor::ToolResult {
+            output: e.to_string(),
+            is_error: true,
+        })
+    }
+
+    /// Returns the set of tool call IDs the user denied. This is the single
+    /// interactive-approval funnel: destructive `run_command` calls, destructive
+    /// shell-skill calls (resolved through the same skill_command path
+    /// run_shell_skill uses), and filesystem calls whose path would escape
+    /// work_dir all route through here before execute_tools ever runs.
     async fn run_approval_checks(
         &mut self,
         calls: &[ToolCall],
@@ -705,30 +801,67 @@ impl Engine {
     ) -> HashSet<String> {
         let mut denied = HashSet::new();
         for tc in calls {
-            if tc.name != "run_command" { continue; }
-            let cmd = extract_cmd_str(&tc.input);
-            if !is_destructive_cmd(&cmd) { continue; }
-
-            let _ = ui_tx.send(UiUpdate::AwaitingApproval { cmd }).await;
-
-            // Wait for approval response, ignoring unrelated actions
-            let approved = loop {
-                match action_rx.recv().await {
-                    Some(Action::Approve) => break true,
-                    Some(Action::Deny)    => break false,
-                    Some(Action::CancelStream) => {
-                        self.cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                        break false;
-                    }
-                    None => break false,
-                    _ => {} // ignore other actions while modal is open
+            let reason = match tc.name.as_str() {
+                "run_command" => {
+                    let cmd = extract_cmd_str(&tc.input);
+                    preflight::is_destructive_cmd(&cmd).then(|| format!("destructive command: {cmd}"))
                 }
+                "run_skill" => {
+                    let input_map: std::collections::HashMap<String, String> =
+                        serde_json::from_str(&tc.input).unwrap_or_default();
+                    let skill_name = input_map.get("name").cloned().unwrap_or_default();
+                    let query = input_map.get("query").cloned().unwrap_or_default();
+                    self.skills.iter()
+                        .find(|s| s.name == skill_name && s.is_shell())
+                        .and_then(|skill| skills::executor::resolve_chunks(skill, &query).ok())
+                        .and_then(|cmds| cmds.into_iter().find(|cmd| preflight::is_destructive_cmd(cmd)))
+                        .map(|cmd| format!("destructive skill command: {cmd}"))
+                }
+                "read_file" | "write_file" | "edit_file" | "create_directory" => {
+                    extract_path_field(&tc.input).and_then(|path| {
+                        let resolved = executor::resolve_path(&path, &self.work_dir);
+                        let inv = preflight::Invocation::paths(tc.name.clone(), vec![resolved]);
+                        match preflight::check(&inv, &self.cfg, &self.allowed_commands) {
+                            preflight::Verdict::NeedApproval(reason) => Some(reason),
+                            _ => None,
+                        }
+                    })
+                }
+                _ => None,
             };
-            if !approved {
+
+            let Some(reason) = reason else { continue };
+
+            if !self.await_approval(ui_tx, action_rx, reason).await {
                 denied.insert(tc.id.clone());
             }
         }
         denied
+    }
+
+    /// Send an approval prompt and block until the user responds. Shared by
+    /// `run_approval_checks` (LLM tool-call path) and the interactive
+    /// `/skill run` and user `/command` paths, which have no upstream
+    /// approval gate of their own.
+    async fn await_approval(
+        &mut self,
+        ui_tx: &mpsc::Sender<UiUpdate>,
+        action_rx: &mut mpsc::Receiver<Action>,
+        reason: String,
+    ) -> bool {
+        let _ = ui_tx.send(UiUpdate::AwaitingApproval { cmd: reason }).await;
+        loop {
+            match action_rx.recv().await {
+                Some(Action::Approve) => break true,
+                Some(Action::Deny)    => break false,
+                Some(Action::CancelStream) => {
+                    self.cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    break false;
+                }
+                None => break false,
+                _ => {} // ignore other actions while modal is open
+            }
+        }
     }
 
     /// Run the configured verify_command after a file edit. Returns a Message to inject if
@@ -745,7 +878,7 @@ impl Engine {
             command.arg("-c").arg(&cmd).current_dir(&work_dir);
             if clean_env {
                 command.env_clear();
-                for var in &["PATH", "HOME", "USER", "LANG", "CARGO_HOME", "RUSTUP_HOME"] {
+                for var in executor::CLEAN_ENV_VARS {
                     if let Ok(val) = std::env::var(var) { command.env(var, val); }
                 }
             }
@@ -770,9 +903,9 @@ impl Engine {
                 result.status.code().unwrap_or(-1),
                 snippet
             );
-            let _ = ui_tx.send(UiUpdate::SystemMsg(format!(
-                "[Marlin Verify] ✗ Tests failed — injecting error into context."
-            ))).await;
+            let _ = ui_tx.send(UiUpdate::SystemMsg(
+                "[Marlin Verify] ✗ Tests failed — injecting error into context.".into()
+            )).await;
             Some(Message {
                 role: "user".into(),
                 content: msg,
@@ -958,27 +1091,29 @@ impl Engine {
         skills::daemon::spawn(self.marlin_dir.clone(), provider, model, ui_tx);
     }
 
+    /// Skill names/descriptions to advertise in the `run_skill` tool description
+    /// for this turn. Bounded by trigger-matching against `query` instead of
+    /// listing every installed skill (which grows unbounded with skill count) —
+    /// falls back to names-only (no descriptions) when nothing matches, so the
+    /// model still knows what's available without paying for every description.
+    fn skill_tool_list(&self, query: &str) -> Vec<(String, String)> {
+        let skill_defs: Vec<SkillDef> = self.skills.iter().map(SkillDef::from).collect();
+        let matched = skills::suggest::match_skills(query, &skill_defs);
+        if matched.is_empty() {
+            self.skills.iter().map(|s| (s.name.clone(), String::new())).collect()
+        } else {
+            matched.into_iter().map(|m| (m.name, m.description)).collect()
+        }
+    }
+
     fn effective_system_prompt(&self) -> String {
         let mut s = String::new();
         s.push_str("You are Marlin, an AI coding assistant running in a terminal.\n");
         s.push_str("You help the user write, debug, and understand code.\n\n");
 
-        s.push_str("## Tools\n");
-        s.push_str("You have the following tools and MUST use them to act directly — never tell the user to do something manually that a tool can do:\n");
-        s.push_str("- read_file: read any file. Pass 'function' to extract just one named function — far cheaper for large codebases\n");
-        s.push_str("- write_file: create or overwrite a file\n");
-        s.push_str("- edit_file: replace a specific string in a file (preferred for targeted edits)\n");
-        s.push_str("- run_command: run a shell command\n");
-        s.push_str("- list_directory: list files in a directory\n");
-        s.push_str("- create_directory: create a directory\n");
-        if self.code_index.is_some() {
-            let idx = self.code_index.as_ref().unwrap();
-            s.push_str(&format!(
-                "- search_codebase: search {} indexed files with TF-IDF — use this to find relevant files before reading them\n",
-                idx.file_count
-            ));
-        }
-        s.push('\n');
+        // The tool list itself is duplication: every tool name and description
+        // below is already sent as structured tool defs (see tools::all_tools) —
+        // restating it here cost ~150 tokens on every request for nothing.
         s.push_str("When asked to create a file, write code, edit something, or run a command — DO IT with the appropriate tool. ");
         s.push_str("Do not explain how the user could do it themselves. Do not ask for confirmation before using tools. Just act.\n\n");
 
@@ -1045,7 +1180,12 @@ impl Engine {
 
     /// Handle a slash command. Returns `Some(prompt)` if a prompt-type user command
     /// expanded a template that should be injected into the agentic loop.
-    async fn handle_slash_command(&mut self, raw: &str, ui_tx: &mpsc::Sender<UiUpdate>) -> Option<String> {
+    async fn handle_slash_command(
+        &mut self,
+        raw: &str,
+        ui_tx: &mpsc::Sender<UiUpdate>,
+        action_rx: &mut mpsc::Receiver<Action>,
+    ) -> Option<String> {
         let parts: Vec<&str> = raw.trim().splitn(2, ' ').collect();
         let cmd = parts[0].to_lowercase();
         let args: Vec<&str> = if parts.len() > 1 {
@@ -1194,7 +1334,14 @@ impl Engine {
 
             "/tokens" => {
                 if args.is_empty() {
-                    sys!(format!("Max tokens: {}  (use /tokens <n> to change)", self.cfg.max_tokens));
+                    let system_prompt = self.effective_system_prompt();
+                    let tools = all_tools(&self.ast_mode, &self.skill_tool_list(&self.active_goal), &self.external_tools);
+                    let report = budget::compute(&system_prompt, &tools);
+                    sys!(format!(
+                        "Max output tokens: {}  (use /tokens <n> to change)\n\n\
+                         Base prompt injection (target ~{}t, warning only):\n{}",
+                        self.cfg.max_tokens, budget::WARN_THRESHOLD, report.format()
+                    ));
                     return None;
                 }
                 if let Ok(n) = args[0].parse::<usize>() {
@@ -1757,10 +1904,11 @@ impl Engine {
                 match subcmd {
                     "list" | "ls" => {
                         if self.skills.is_empty() {
-                            sys!("No skills installed. Add TOML files to ~/.marlin/skills/");
+                            sys!("No skills installed. Add .qmd files to ~/.marlin/skills/");
                         } else {
                             let lines: Vec<String> = self.skills.iter().map(|s| {
-                                format!("  {:20} — {}", s.name, s.description)
+                                let tag = if s.format == skills::SkillFormat::Toml { " [.toml, deprecated — /skill migrate]" } else { "" };
+                                format!("  {:20} — {}{tag}", s.name, s.description)
                             }).collect();
                             sys!(format!("Skills ({}):\n{}", self.skills.len(), lines.join("\n")));
                         }
@@ -1778,50 +1926,78 @@ impl Engine {
                             self.active_goal.clone()
                         };
                         if let Some(skill) = self.skills.iter().find(|s| s.name == skill_name).cloned() {
-                            match skill.run.kind {
-                                skills::SkillKind::Shell => {
-                                    sys!(format!("Running skill '{}' with query: {query}", skill.name));
-                                    match skills::executor::skill_command(&skill, &query) {
-                                        Err(e) => err!(format!("Skill error: {e}")),
-                                        Ok(cmd) => {
-                                            let cmd_json = serde_json::json!({"command": cmd}).to_string();
-                                            let wd = self.work_dir.clone();
-                                            let clean_env = self.cfg.clean_env;
-                                            let logs_dir = self.marlin_dir.join("logs");
-                                            let result = tokio::task::spawn_blocking(move || {
-                                                executor::execute(
-                                                    "run_command",
-                                                    &cmd_json,
-                                                    &wd,
-                                                    &|_| true,
-                                                    None,
-                                                    None,
-                                                    Some(&logs_dir),
-                                                    clean_env,
-                                                    crate::config::AstMode::Off,
-                                                    &crate::config::SandboxMode::Off,
-                                                    &[],
-                                                )
-                                            }).await;
-                                            match result {
-                                                Ok(r) if r.is_error => err!(format!("[skill: {skill_name}]\n{}", r.output)),
-                                                Ok(r)               => sys!(format!("[skill: {skill_name}]\n{}", r.output)),
-                                                Err(e)              => err!(format!("Skill task panic: {e}")),
+                            if skill.is_shell() {
+                                match skills::executor::resolve_chunks(&skill, &query) {
+                                    Err(e) => err!(format!("Skill error: {e}")),
+                                    Ok(cmds) => {
+                                        sys!(format!("Running skill '{}' with query: {query}", skill.name));
+                                        let mut outputs = Vec::with_capacity(cmds.len());
+                                        let mut failed = false;
+                                        for cmd in cmds {
+                                            let verdict = match self.preflight_shell(&cmd) {
+                                                Err(result) => {
+                                                    err!(format!("[skill: {skill_name}]\n{}", result.output));
+                                                    failed = true;
+                                                    break;
+                                                }
+                                                Ok(v) => v,
+                                            };
+                                            let proceed = match verdict {
+                                                preflight::Verdict::NeedApproval(reason) => {
+                                                    self.await_approval(ui_tx, action_rx, reason).await
+                                                }
+                                                _ => true,
+                                            };
+                                            if !proceed {
+                                                sys!(format!("[skill: {skill_name}] Denied."));
+                                                failed = true;
+                                                break;
                                             }
+                                            let result = self.run_shell(cmd).await;
+                                            if result.is_error {
+                                                err!(format!("[skill: {skill_name}]\n{}", result.output));
+                                                failed = true;
+                                                break;
+                                            }
+                                            outputs.push(result.output);
+                                        }
+                                        if !failed {
+                                            let prose = if skill.is_prompt() {
+                                                skills::executor::expand_prompt(&skill, &query).unwrap_or_default()
+                                            } else {
+                                                String::new()
+                                            };
+                                            let body = outputs.join("\n\n");
+                                            let out = if prose.is_empty() { body } else { format!("{prose}\n\n{body}") };
+                                            sys!(format!("[skill: {skill_name}]\n{out}"));
                                         }
                                     }
                                 }
-                                skills::SkillKind::Prompt => {
-                                    match skills::executor::expand_prompt(&skill, &query) {
-                                        Ok(prompt) => {
-                                            sys!(format!("[skill: {}] Expanded prompt — copy and send to run:\n\n{prompt}", skill.name));
-                                        }
-                                        Err(e) => err!(format!("Skill error: {e}")),
+                            } else if skill.is_prompt() {
+                                match skills::executor::expand_prompt(&skill, &query) {
+                                    Ok(prompt) => {
+                                        sys!(format!("[skill: {}] Expanded prompt — copy and send to run:\n\n{prompt}", skill.name));
                                     }
+                                    Err(e) => err!(format!("Skill error: {e}")),
                                 }
+                            } else {
+                                err!(format!("skill '{skill_name}' has neither a shell chunk nor a prompt body"));
                             }
                         } else {
                             err!(format!("Unknown skill '{skill_name}'.  Use /skill list."));
+                        }
+                    }
+
+                    "migrate" => {
+                        match skills::migrate_all(&self.marlin_dir) {
+                            Ok(0) => sys!("No .toml skills to migrate."),
+                            Ok(n) => {
+                                sys!(format!("Migrated {n} skill(s) to .qmd."));
+                                let (loaded, diagnostics) = skills::load_all(&self.marlin_dir);
+                                self.skills = loaded;
+                                for d in &diagnostics { err!(d.clone()); }
+                            }
+                            Err(e) => err!(format!("Migration failed: {e}")),
                         }
                     }
 
@@ -1831,16 +2007,16 @@ impl Engine {
                             name: name.to_string(),
                             description: "Describe what this skill does".into(),
                             triggers: vec!["keyword1".into(), "keyword2".into()],
-                            run: skills::SkillRun {
-                                kind: skills::SkillKind::Shell,
-                                command: "echo {query}".into(),
-                                template: String::new(),
-                            },
+                            body: String::new(),
+                            chunks: vec![skills::Chunk { lang: "sh".into(), source: "echo {query}".into() }],
+                            format: skills::SkillFormat::Qmd,
                         };
                         match skills::save_skill(&self.marlin_dir, &skill) {
                             Ok(path) => {
                                 sys!(format!("Skill template created:\n  {}\n\nEdit the file to customise it, then /skill reload.", path.display()));
-                                self.skills = skills::load_all(&self.marlin_dir);
+                                let (loaded, diagnostics) = skills::load_all(&self.marlin_dir);
+                                self.skills = loaded;
+                                for d in &diagnostics { err!(d.clone()); }
                             }
                             Err(e) => err!(format!("Failed to create skill: {e}")),
                         }
@@ -1872,14 +2048,16 @@ impl Engine {
                     }
 
                     "reload" => {
-                        self.skills = skills::load_all(&self.marlin_dir);
+                        let (loaded, diagnostics) = skills::load_all(&self.marlin_dir);
+                        self.skills = loaded;
                         let skill_defs: Vec<SkillDef> = self.skills.iter().map(SkillDef::from).collect();
                         let _ = ui_tx.send(UiUpdate::SkillsLoaded(skill_defs)).await;
+                        for d in &diagnostics { err!(d.clone()); }
                         sys!(format!("Reloaded {} skill(s).", self.skills.len()));
                     }
 
                     _ => {
-                        sys!("Usage: /skill [list|run <name> [query]|new <name>|suggest|reload]");
+                        sys!("Usage: /skill [list|run <name> [query]|new <name>|suggest|reload|migrate]");
                     }
                 }
             }
@@ -1919,6 +2097,31 @@ impl Engine {
                 }
             }
 
+            "/preflight" => {
+                let scope = args.first().copied().unwrap_or("all");
+                let mut lines = Vec::new();
+
+                if scope == "startup" || scope == "all" {
+                    let startup_lines = preflight::startup(
+                        &self.cfg, &self.marlin_dir, &self.work_dir, self.code_index.as_ref(),
+                    );
+                    lines.push(format!("startup: {} note(s)", startup_lines.len()));
+                    lines.extend(startup_lines.into_iter().map(|l| format!("  {l}")));
+                }
+
+                if scope == "skills" || scope == "all" {
+                    let (_loaded, diagnostics) = skills::load_all(&self.marlin_dir);
+                    lines.push(format!("skills: {} note(s)", diagnostics.len()));
+                    lines.extend(diagnostics.into_iter().map(|l| format!("  {l}")));
+                }
+
+                if lines.is_empty() {
+                    sys!("preflight: no issues found.");
+                } else {
+                    sys!(format!("preflight [{scope}]:\n{}", lines.join("\n")));
+                }
+            }
+
             _ => {
                 // Check user-defined commands before reporting unknown.
                 let cmd_name = cmd.trim_start_matches('/');
@@ -1926,24 +2129,29 @@ impl Engine {
                     let args_str = rest.to_string();
                     match ucmd.run.kind {
                         crate::commands::CommandKind::Shell => {
-                            let command = ucmd.run.command.replace("{args}", &args_str);
-                            sys!(format!("Running /{}: {command}", ucmd.name));
-                            let wd = self.work_dir.clone();
-                            let logs_dir = self.marlin_dir.join("logs");
-                            let clean_env = self.cfg.clean_env;
-                            let cmd_json = serde_json::json!({"command": command}).to_string();
-                            let result = tokio::task::spawn_blocking(move || {
-                                executor::execute(
-                                    "run_command", &cmd_json, &wd,
-                                    &|_| true, None, None, Some(&logs_dir),
-                                    clean_env, crate::config::AstMode::Off,
-                                    &crate::config::SandboxMode::Off, &[],
-                                )
-                            }).await;
-                            match result {
-                                Ok(r) if r.is_error => err!(format!("[/{}]\n{}", ucmd.name, r.output)),
-                                Ok(r)               => sys!(format!("[/{}]\n{}", ucmd.name, r.output)),
-                                Err(e)              => err!(format!("Command task panic: {e}")),
+                            let command = ucmd.run.command
+                                .replace("{args}", &executor::shell_quote(&args_str));
+                            match self.preflight_shell(&command) {
+                                Err(result) => err!(format!("[/{}]\n{}", ucmd.name, result.output)),
+                                Ok(verdict) => {
+                                    let proceed = match verdict {
+                                        preflight::Verdict::NeedApproval(reason) => {
+                                            self.await_approval(ui_tx, action_rx, reason).await
+                                        }
+                                        _ => true,
+                                    };
+                                    if proceed {
+                                        sys!(format!("Running /{}: {command}", ucmd.name));
+                                        let result = self.run_shell(command).await;
+                                        if result.is_error {
+                                            err!(format!("[/{}]\n{}", ucmd.name, result.output));
+                                        } else {
+                                            sys!(format!("[/{}]\n{}", ucmd.name, result.output));
+                                        }
+                                    } else {
+                                        sys!(format!("[/{}] Denied.", ucmd.name));
+                                    }
+                                }
                             }
                         }
                         crate::commands::CommandKind::Prompt => {
@@ -1996,18 +2204,10 @@ fn extract_cmd_str(input_json: &str) -> String {
         .unwrap_or_default()
 }
 
-fn is_destructive_cmd(cmd: &str) -> bool {
-    const PATTERNS: &[&str] = &[
-        "rm ", "rm -", "rmdir",
-        "git push", "git reset --hard", "git clean", "git push -f", "git push --force",
-        "kill ", "pkill", "killall",
-        "shutdown", "reboot", "halt", "poweroff",
-        "dd ", "mkfs", "fdisk",
-        "DROP TABLE", "DROP DATABASE", "truncate",
-        ":(){:|:&};:",  // fork bomb
-    ];
-    let lower = cmd.to_lowercase();
-    PATTERNS.iter().any(|p| lower.contains(&p.to_lowercase()))
+fn extract_path_field(input_json: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(input_json)
+        .ok()
+        .and_then(|v| v["path"].as_str().map(String::from))
 }
 
 /// Serialize a slice of messages into a compact text block for the compaction LLM call.
@@ -2087,7 +2287,7 @@ fn help_text() -> String {
         ("/key <provider> <key>", "set API key"),
         ("/endpoint <provider> <url>", "set API endpoint for a provider"),
         ("/system <prompt>", "set additional system prompt"),
-        ("/tokens <n>", "set max output tokens"),
+        ("/tokens [n]", "no args: show prompt injection budget breakdown; <n>: set max output tokens"),
         ("/attach <file>", "attach a file to your next message"),
         ("/detach [file]", "remove attachment(s)"),
         ("/exec <cmd>", "run a shell command (must be /allow-ed first, or /sandbox on)"),
@@ -2113,7 +2313,9 @@ fn help_text() -> String {
         ("/skill new <name>", "create a new skill template"),
         ("/skill suggest", "show skill suggestions from nightly analysis"),
         ("/skill reload", "reload skills from disk"),
+        ("/skill migrate", "rewrite deprecated .toml skills to .qmd"),
         ("/tiers [on|off]", "model tier routing (easy→default, hard→complex with backups)"),
+        ("/preflight [startup|skills|all]", "show startup + skill validation diagnostics"),
     ];
 
     let mut s = "Commands:\n".to_string();

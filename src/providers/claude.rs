@@ -25,8 +25,8 @@ impl Provider for ClaudeProvider {
 
     fn models(&self) -> Vec<String> {
         vec![
-            "claude-opus-4-5".into(),
-            "claude-sonnet-4-5".into(),
+            "claude-opus-4-8".into(),
+            "claude-sonnet-5".into(),
             "claude-haiku-4-5-20251001".into(),
             "claude-3-5-sonnet-20241022".into(),
             "claude-3-5-haiku-20241022".into(),

@@ -36,8 +36,7 @@ pub fn maybe_prune_history(history: &mut Vec<Message>) -> (usize, usize) {
     let mut compressed = 0usize;
 
     // Pass 1: aggressively truncate tool results (usually the bulk of tokens)
-    for i in 0..split_idx {
-        let msg = &mut history[i];
+    for msg in &mut history[0..split_idx] {
         if msg.role == "tool" && msg.content.len() > TOOL_RESULT_CAP {
             let head: String = msg.content.chars().take(TOOL_RESULT_CAP).collect();
             msg.content = format!("{head}\n[… truncated, was {} chars]", msg.content.len());
@@ -48,8 +47,7 @@ pub fn maybe_prune_history(history: &mut Vec<Message>) -> (usize, usize) {
     if estimate_tokens(history, "") < COMPRESS_AT_TOKENS { return (compressed, 0); }
 
     // Pass 2: truncate long user/assistant messages to tail (preserve recent context)
-    for i in 0..split_idx {
-        let msg = &mut history[i];
+    for msg in &mut history[0..split_idx] {
         if msg.role != "tool" && msg.content.len() > CONTENT_TAIL * 2 {
             let tail: String = msg.content
                 .chars().rev().take(CONTENT_TAIL).collect::<String>()
