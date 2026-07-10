@@ -315,6 +315,26 @@ fn default_skills() -> Vec<Skill> {
             chunks: vec![],
             format: SkillFormat::Qmd,
         },
+        Skill {
+            name: "recent_commits".into(),
+            description: "Show and summarize recent git commits (optionally filtered)".into(),
+            triggers: vec![
+                "recent commits".into(), "git log".into(), "git history".into(),
+                "what changed".into(), "commit history".into(),
+            ],
+            // Demonstrates the combined chunk+prose behavior: the chunk runs
+            // first, then this prose plus its output are fed to the model together.
+            body: "The commit log above is from the working directory's git history. \
+                Summarize the overall themes of recent work in a few sentences.".into(),
+            chunks: vec![Chunk {
+                lang: "sh".into(),
+                // {query} arrives already shell-quoted — leave it bare, no extra quotes.
+                // An empty query must NOT be passed as a bare positional arg (git treats
+                // '' as an invalid revision); ${Q:+...} only adds the pathspec when non-empty.
+                source: "Q={query}; git log --oneline -n 20 ${Q:+-- \"$Q\"}".into(),
+            }],
+            format: SkillFormat::Qmd,
+        },
     ]
 }
 

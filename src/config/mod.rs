@@ -386,6 +386,36 @@ pub fn list_themes(marlin_dir: &Path) -> Vec<(String, String)> {
     themes
 }
 
+/// Install one working example named theme on first run — same write-if-missing
+/// pattern as `skills::install_defaults`. Never overwrites a user's file.
+pub fn install_default_themes(marlin_dir: &Path) {
+    let dir = themes_dir(marlin_dir);
+    for theme in default_themes() {
+        let path = dir.join(format!("{}.toml", theme.name));
+        if !path.exists() {
+            if let Ok(data) = toml::to_string_pretty(&theme) {
+                let _ = std::fs::write(path, data);
+            }
+        }
+    }
+}
+
+fn default_themes() -> Vec<ThemeFile> {
+    vec![ThemeFile {
+        name: "nord".into(),
+        description: "Nord color scheme".into(),
+        dark: Some(ThemeColors {
+            bg: Some([46, 52, 64]),
+            assistant: Some([136, 192, 208]),
+            cobalt: Some([94, 129, 172]),
+            steel: Some([76, 86, 106]),
+            user: Some([229, 233, 240]),
+            ..Default::default()
+        }),
+        light: None,
+    }]
+}
+
 // ── Layout config ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

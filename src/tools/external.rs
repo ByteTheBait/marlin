@@ -162,6 +162,39 @@ pub fn save_template(marlin_dir: &Path, name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+// ── Default tools ────────────────────────────────────────────────────────────
+
+/// Install one working example tool on first run — same write-if-missing
+/// pattern as `skills::install_defaults`. Never overwrites a user's file.
+pub fn install_defaults(marlin_dir: &Path) {
+    let dir = tools_dir(marlin_dir);
+    for tool in default_tools() {
+        let path = dir.join(format!("{}.toml", tool.name));
+        if !path.exists() {
+            if let Ok(data) = toml::to_string_pretty(&tool) {
+                let _ = std::fs::write(path, data);
+            }
+        }
+    }
+}
+
+fn default_tools() -> Vec<ExternalTool> {
+    vec![ExternalTool {
+        name: "git_log".into(),
+        description: "Show recent commits touching a given file".into(),
+        properties: vec![ExternalToolProp {
+            name: "path".into(),
+            ty: "string".into(),
+            description: "File path relative to the repo root".into(),
+            required: true,
+        }],
+        run: ExternalToolRun {
+            kind: "shell".into(),
+            command: "git log --oneline -n 10 -- {path}".into(),
+        },
+    }]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

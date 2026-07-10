@@ -108,16 +108,17 @@ Every file touched by an AI edit gets snapshotted first — use `/revert` to res
 
 ## Skills
 
-Skills are reusable operations stored as TOML files in `~/.marlin/skills/`. Three come built in.
+Skills are reusable operations stored as `.qmd` files in `~/.marlin/skills/`. Five come built in.
 
-Shell skills run **outside the sandbox** and bypass the command allow-list — this is intentional so they can reach the web, external APIs, and system tools. Only install skills you trust.
+Shell skills go through the same preflight funnel as every other shell-executing path — the real allow-list, sandbox mode, and destructive-command approval modal (see [Command permissions](#command-permissions)). Only install skills you trust, but a locked-down config (`/sandbox off`, empty allow-list) applies to them too.
 
-| Skill        | Triggers                                  | What it does                            |
-|--------------|-------------------------------------------|-----------------------------------------|
-| `explore`    | explore, structure, list files, tree      | Directory tree (excludes build/hidden)  |
-| `web_search` | search, look up, google, find online      | DuckDuckGo via curl                     |
-| `ripgrep`    | grep, rg, search code                     | `rg` across the working directory       |
-| `make_skill` | create skill, new skill                   | Prompts the AI to write a new skill     |
+| Skill             | Triggers                                  | What it does                                        |
+|-------------------|--------------------------------------------|-----------------------------------------------------|
+| `explore`         | explore, structure, list files, tree      | Directory tree (excludes build/hidden)              |
+| `web_search`      | search, look up, google, find online      | DuckDuckGo via curl                                 |
+| `ripgrep`         | grep, rg, search code                     | `rg` across the working directory                   |
+| `make_skill`      | create skill, new skill                   | Prompts the AI to write a new skill                 |
+| `recent_commits`  | recent commits, git log, what changed     | `git log` + a summary — the chunk+prose combination |
 
 ### Using skills
 
@@ -137,7 +138,7 @@ As you type, Marlin matches your message against skill trigger keywords and show
 
 Drop a `.qmd` file in `~/.marlin/skills/` — YAML frontmatter for metadata, then optional prose, then an optional fenced shell chunk:
 
-```qmd
+````qmd
 ---
 name: gh_issues
 description: List open GitHub issues for this repo
@@ -149,7 +150,7 @@ List the open issues, then summarize them by priority.
 ```{sh}
 gh issue list --limit 20
 ```
-```
+````
 
 Or a prompt-only skill (no fenced chunk — the prose is expanded and fed back to the model instead of executed):
 
@@ -165,7 +166,24 @@ Please explain this git diff clearly:
 {input}
 ```
 
-Use `{query}` (shell chunks) or `{input}` (prompt body) as the placeholder for user-supplied text — it's substituted as a single shell-quoted word in chunks, so leave it bare (`cmd {query}`, not `cmd '{query}'`). A skill can have both a chunk and prose: the chunk(s) run first, then the prose plus their output is fed to the model together. Chunks execute in order; nothing pipes from one into the next.
+Or a skill with both — the chunk(s) run first, then the prose *and* their output are fed back to the model together:
+
+````qmd
+---
+name: check_and_summarize
+description: Run the test suite (optionally filtered) and summarize any failures
+triggers: [check tests, run and summarize, test status]
+---
+
+The test output above is from the working directory. If anything failed,
+explain the likely cause; if it all passed, just say so briefly.
+
+```{sh}
+cargo test {query} 2>&1 | tail -60
+```
+````
+
+Use `{query}` (shell chunks) or `{input}` (prompt body) as the placeholder for user-supplied text — it's substituted as a single shell-quoted word in chunks, so leave it bare (`cmd {query}`, not `cmd '{query}'`). Chunks execute in order; nothing pipes from one into the next.
 
 `.toml` skills (the pre-qmd format) still load but are deprecated — run `/skill migrate` to rewrite them to `.qmd`.
 
@@ -480,24 +498,25 @@ Key directories:
 
 ## Hacking Marlin
 
-Marlin is built to be extended. Three layers, from least to most code:
+Marlin is built to be extended. Three layers, from least to most code. Every config-file category below (skills, commands, tools, providers, named themes) ships one real, working example on first run — write-once, so it never overwrites a file you've since edited or deleted — in addition to the extra examples shown here.
 
-### Skills — TOML, no Rust required
+### Skills — qmd, no Rust required
 
-The fastest way to add new behavior. Drop a `.toml` file in `~/.marlin/skills/`:
+The fastest way to add new behavior. Drop a `.qmd` file in `~/.marlin/skills/`:
 
-```toml
-# ~/.marlin/skills/gh_issues.toml
-name        = "gh_issues"
-description = "List open GitHub issues for this repo"
-triggers    = ["issues", "github", "gh", "open bugs"]
+````qmd
+---
+name: gh_issues
+description: List open GitHub issues for this repo
+triggers: [issues, github, gh, open bugs]
+---
 
-[run]
-type    = "shell"
-command = "gh issue list --limit 20"
+```{sh}
+gh issue list --limit 20
 ```
+````
 
-Restart or run `/skill reload` and the skill appears in autocomplete and as a tool the LLM can call. See the **Skills** section above for the full format.
+Restart or run `/skill reload` and the skill appears in autocomplete and as a tool the LLM can call. See the **Skills** section above for the full format (shell, prompt, and combined chunk+prose examples).
 
 ---
 
@@ -531,7 +550,7 @@ cobalt    = [25,  70,  165]
 steel     = [75,  105, 145]
 ```
 
-**Named themes** — drop `.toml` files into `~/.marlin/themes/` to create selectable themes:
+**Named themes** — drop `.toml` files into `~/.marlin/themes/` to create selectable themes. This exact `nord` theme ships as a working example on first run, so `~/.marlin/themes/nord.toml` already exists and `/theme nord` works out of the box:
 
 ```toml
 # ~/.marlin/themes/nord.toml
@@ -544,6 +563,14 @@ assistant = [136, 192, 208]
 cobalt    = [94,  129, 172]
 steel     = [76,  86,  106]
 user      = [229, 233, 240]
+```
+
+**Minimal partial override** — every field is optional and falls back to the built-in default, so a single-color tweak is a one-liner. This only touches the error color in dark mode; everything else (light mode included) stays default:
+
+```toml
+# ~/.marlin/theme.toml
+[dark]
+error = [255, 90, 90]   # brighter red, easier to spot in a dim terminal
 ```
 
 Switch to it at runtime — no restart needed:
@@ -560,7 +587,7 @@ Style functions live in `src/tui/styles.rs`. All colors route through named sema
 
 ### Custom slash commands — `~/.marlin/commands/`
 
-Drop a `.toml` file into `~/.marlin/commands/` to register a new `/command`:
+Drop a `.toml` file into `~/.marlin/commands/` to register a new `/command`. A working `/status` example (`git status --short`) ships in this directory on first run.
 
 ```toml
 # ~/.marlin/commands/deploy.toml
@@ -585,6 +612,18 @@ type     = "prompt"
 template = "Review this diff carefully and explain every change:\n\n{input}"
 ```
 
+A no-argument shell command works too — `{args}` is just an empty string if nothing follows the command name:
+
+```toml
+# ~/.marlin/commands/status.toml
+name        = "status"
+description = "Quick git + build status"
+
+[run]
+type    = "shell"
+command = "git status --short && echo --- && cargo check --quiet"
+```
+
 After adding or editing a file:
 
 ```
@@ -599,7 +638,7 @@ User commands appear in tab-autocomplete alongside built-in ones. Shell commands
 
 ### Custom LLM tools — `~/.marlin/tools/`
 
-Drop a `.toml` file into `~/.marlin/tools/` to add a new function the model can call:
+Drop a `.toml` file into `~/.marlin/tools/` to add a new function the model can call. A working `git_log` example (below) ships in this directory on first run.
 
 ```toml
 # ~/.marlin/tools/run_tests.toml
@@ -617,7 +656,49 @@ type    = "shell"
 command = "cargo test {filter} 2>&1"
 ```
 
-Property values from the LLM are substituted as `{name}` placeholders. Unfilled optional placeholders are stripped automatically.
+Property values from the LLM are substituted as `{name}` placeholders — one shell-quoted word each. An optional property the model doesn't supply resolves to an empty quoted string (`''`), not a stripped/missing argument, so leave a trailing `{name}` safe to include even when unused.
+
+A tool with a required property and no optional ones — this is the one that ships by default:
+
+```toml
+# ~/.marlin/tools/git_log.toml
+name        = "git_log"
+description = "Show recent commits touching a given file"
+
+[[properties]]
+name        = "path"
+type        = "string"
+description = "File path relative to the repo root"
+required    = true
+
+[run]
+type    = "shell"
+command = "git log --oneline -n 10 -- {path}"
+```
+
+A tool with multiple properties, mixing required and optional:
+
+```toml
+# ~/.marlin/tools/http_get.toml
+name        = "http_get"
+description = "Fetch a URL and print the response body"
+
+[[properties]]
+name        = "url"
+type        = "string"
+description = "URL to fetch"
+required    = true
+
+[[properties]]
+name        = "header"
+type        = "string"
+description = "Optional 'Key: Value' request header"
+required    = false
+
+[run]
+type    = "shell"
+command = "curl -sL -H {header} {url}"
+```
 
 ```
 /tool reload        pick up changes without restarting
@@ -640,6 +721,25 @@ model    = "mistral-large-latest"
 models   = ["mistral-large-latest", "mistral-small-latest", "codestral-latest"]
 ```
 
+A local server needs no key at all — this is how you'd point Marlin at LM Studio's OpenAI-compatible endpoint. This exact file ships by default (`~/.marlin/providers/lmstudio.toml`), so `/provider lmstudio` just works if you have LM Studio (or anything else serving that endpoint) running:
+
+```toml
+# ~/.marlin/providers/lmstudio.toml
+name     = "lmstudio"
+endpoint = "http://localhost:1234/v1"
+model    = "local-model"
+```
+
+`models` is optional too — omit it and `/models` just falls back to the single `model` above:
+
+```toml
+# ~/.marlin/providers/deepseek.toml
+name     = "deepseek"
+endpoint = "https://api.deepseek.com/v1"
+api_key  = "sk-..."
+model    = "deepseek-chat"
+```
+
 Restart Marlin to activate. Once loaded, use `/provider mistral` to switch to it.
 
 ```
@@ -659,6 +759,22 @@ Control sidebar dimensions without recompiling:
 # ~/.marlin/layout.toml
 sidebar_width     = 34   # sidebar column width (default 34)
 min_sidebar_width = 100  # minimum terminal width to show sidebar (default 100)
+```
+
+A wider sidebar for a big monitor, with more room for task lists and the token meter:
+
+```toml
+# ~/.marlin/layout.toml
+sidebar_width     = 48
+min_sidebar_width = 100
+```
+
+Effectively disable the sidebar on narrow terminals (or always, if you set it absurdly high) by raising the minimum width past any terminal you actually use:
+
+```toml
+# ~/.marlin/layout.toml
+sidebar_width     = 34
+min_sidebar_width = 999
 ```
 
 Applied at startup. Delete the file to revert to defaults.

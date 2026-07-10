@@ -70,3 +70,31 @@ pub fn save_template(marlin_dir: &Path, name: &str) -> Result<PathBuf> {
     std::fs::write(&path, toml::to_string_pretty(&p)?)?;
     Ok(path)
 }
+
+// ── Default providers ─────────────────────────────────────────────────────────
+
+/// Install one working example provider on first run — same write-if-missing
+/// pattern as `skills::install_defaults`. Never overwrites a user's file.
+/// Local (no API key needed) so it's genuinely functional out of the box for
+/// anyone running a local OpenAI-compatible server, not just a syntax sample.
+pub fn install_defaults(marlin_dir: &Path) {
+    let dir = providers_dir(marlin_dir);
+    for p in default_providers() {
+        let path = dir.join(format!("{}.toml", p.name));
+        if !path.exists() {
+            if let Ok(data) = toml::to_string_pretty(&p) {
+                let _ = std::fs::write(path, data);
+            }
+        }
+    }
+}
+
+fn default_providers() -> Vec<UserProvider> {
+    vec![UserProvider {
+        name: "lmstudio".into(),
+        endpoint: "http://localhost:1234/v1".into(),
+        api_key: String::new(),
+        model: "local-model".into(),
+        models: vec![],
+    }]
+}

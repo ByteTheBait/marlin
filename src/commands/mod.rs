@@ -90,3 +90,32 @@ pub fn save_command(marlin_dir: &Path, cmd: &UserCommand) -> Result<PathBuf> {
     std::fs::write(&path, data)?;
     Ok(path)
 }
+
+// ── Default commands ──────────────────────────────────────────────────────────
+
+/// Install one working example command on first run — same write-if-missing
+/// pattern as `skills::install_defaults`. Never overwrites a user's file.
+pub fn install_defaults(marlin_dir: &Path) {
+    let dir = commands_dir(marlin_dir);
+    for cmd in default_commands() {
+        let path = dir.join(format!("{}.toml", cmd.name));
+        if !path.exists() {
+            if let Ok(data) = toml::to_string_pretty(&cmd) {
+                let _ = std::fs::write(path, data);
+            }
+        }
+    }
+}
+
+fn default_commands() -> Vec<UserCommand> {
+    vec![UserCommand {
+        name: "status".into(),
+        description: "Quick git status for the working directory".into(),
+        args: String::new(),
+        run: CommandRun {
+            kind: CommandKind::Shell,
+            command: "git status --short".into(),
+            template: String::new(),
+        },
+    }]
+}

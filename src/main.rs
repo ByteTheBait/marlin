@@ -23,6 +23,18 @@ fn main() -> Result<()> {
 
     let mut eng = engine::Engine::new(cfg)?;
 
+    // Print preflight diagnostics to the real terminal before the TUI takes over
+    // the alternate screen — missing binaries, unparsable config files, skill
+    // validation issues, a stale index. Informational only, never blocks startup.
+    let diagnostics = eng.startup_diagnostics();
+    if !diagnostics.is_empty() {
+        eprintln!("marlin: preflight startup ({} note(s)):", diagnostics.len());
+        for line in diagnostics {
+            eprintln!("  {line}");
+        }
+        eprintln!();
+    }
+
     let (action_tx, action_rx) = mpsc::channel::<engine::Action>(64);
     let (ui_tx, ui_rx) = mpsc::channel::<engine::UiUpdate>(256);
 

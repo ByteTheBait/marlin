@@ -134,6 +134,9 @@ pub struct Engine {
 impl Engine {
     pub fn new(cfg: Config) -> Result<Self> {
         let marlin_dir = crate::config::marlin_dir()?;
+        // Install the default provider file before building the registry so it's
+        // picked up on this same startup, not just the next one.
+        crate::providers::user_providers::install_defaults(&marlin_dir);
         let registry = Registry::new(&cfg, Some(&marlin_dir));
         let work_dir = cfg.work_dir.clone();
         let allowed = cfg.allowed_commands.clone();
@@ -149,11 +152,14 @@ impl Engine {
         let req_provider = cfg.active_provider.clone();
         let req_model = cfg.active_model.clone();
 
-        // Install built-in skills if not present, then load all.
+        // Install built-in skills/commands/tools if not present, then load all.
         skills::install_defaults(&marlin_dir);
         let (loaded_skills, mut startup_diagnostics) = skills::load_all(&marlin_dir);
+        crate::commands::install_defaults(&marlin_dir);
         let loaded_commands = crate::commands::load_all(&marlin_dir);
+        crate::tools::external::install_defaults(&marlin_dir);
         let loaded_external_tools = crate::tools::external::load_all(&marlin_dir);
+        crate::config::install_default_themes(&marlin_dir);
 
         startup_diagnostics.extend(preflight::startup(&cfg, &marlin_dir, &work_dir, code_index.as_ref()));
 
@@ -186,6 +192,15 @@ impl Engine {
             compact_guard_tokens: 0,
             startup_diagnostics,
         })
+    }
+
+    /// Preflight startup diagnostics (missing binaries, unparsable config files,
+    /// skill validation issues, stale index, ...), computed once in `new()`.
+    /// Exposed so the CLI entry point can print them to the real terminal before
+    /// the TUI takes over the alternate screen — `run()` also surfaces them as a
+    /// system message once the UI channel exists, so they're not lost either way.
+    pub fn startup_diagnostics(&self) -> &[String] {
+        &self.startup_diagnostics
     }
 
     pub async fn run(
