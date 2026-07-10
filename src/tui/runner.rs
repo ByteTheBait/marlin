@@ -83,6 +83,15 @@ pub fn run(
                         UiUpdate::PromptBudget(over) => {
                             status_bar.prompt_budget_over = *over;
                         }
+                        UiUpdate::SubagentStarted { id, label } => {
+                            sidebar.subagent_started(id.clone(), label.clone());
+                        }
+                        UiUpdate::SubagentToolCall { id, name } => {
+                            sidebar.subagent_tool_call(id, name.clone());
+                        }
+                        UiUpdate::SubagentFinished { id, ok } => {
+                            sidebar.subagent_finished(id, *ok);
+                        }
                         _ => {}
                     }
                     chat.apply_update(update);
@@ -112,6 +121,7 @@ pub fn run(
             token_budget: sidebar.token_budget,
             token_history: sidebar.token_history.clone(),
             tasks: sidebar.tasks.clone(),
+            subagents: sidebar.subagents.clone(),
         };
         let approval_cmd = chat.approval_pending.clone();
 

@@ -1,6 +1,7 @@
 pub mod budget;
 pub mod context;
 pub mod loop_guard;
+pub mod subagent;
 pub mod tasks;
 
 use std::collections::HashSet;
@@ -59,6 +60,12 @@ pub enum UiUpdate {
     TierSelected { score: u8, tier: String },
     /// User-defined commands loaded from ~/.marlin/commands/ — sent to TUI for autocomplete.
     UserCommandsLoaded(Vec<crate::commands::UserCommandDef>),
+    /// A subagent (delegated skill run) started — shown in the sidebar below Tasks.
+    SubagentStarted { id: String, label: String },
+    /// A subagent is about to run one tool call — updates its sidebar status line.
+    SubagentToolCall { id: String, name: String },
+    /// A subagent finished (successfully or not).
+    SubagentFinished { id: String, ok: bool },
 }
 
 #[derive(Debug, Clone)]
@@ -289,7 +296,7 @@ impl Engine {
                     // Broadcast token count immediately so the sidebar isn't stale while waiting.
                     // Prefer exact count from provider API; fall back to heuristic.
                     let system_prompt = self.effective_system_prompt();
-                    let turn_tools = all_tools(&self.ast_mode, &self.skill_tool_list(&text), &self.external_tools);
+                    let turn_tools = all_tools(&self.ast_mode, &self.skill_tool_list(&text), &self.external_tools, self.cfg.skill_subagents);
                     let tok = if let Ok(p) = self.registry.get(&self.req_provider) {
                         let req_for_count = StreamRequest {
                             model: self.req_model.clone(),
@@ -408,7 +415,7 @@ impl Engine {
                 messages: self.history.clone(),
                 system_prompt: self.effective_system_prompt(),
                 max_tokens: self.cfg.max_tokens,
-                tools: all_tools(&self.ast_mode, &self.skill_tool_list(&self.active_goal), &self.external_tools),
+                tools: all_tools(&self.ast_mode, &self.skill_tool_list(&self.active_goal), &self.external_tools, self.cfg.skill_subagents),
             };
 
             let mut stream = match provider.stream(req).await {
@@ -517,7 +524,7 @@ impl Engine {
                 if self.cancel_flag.load(std::sync::atomic::Ordering::SeqCst) { return; }
 
                 // Execute tools (run in blocking thread)
-                let results = self.execute_tools(&tool_calls, &denied).await;
+                let results = self.execute_tools(&tool_calls, &denied, ui_tx, action_rx).await;
 
                 // Track which task step index corresponds to this batch
                 let batch_task_start = self.task_steps.len().saturating_sub(tool_calls.len());
@@ -624,7 +631,13 @@ impl Engine {
         }
     }
 
-    async fn execute_tools(&self, calls: &[ToolCall], denied: &HashSet<String>) -> Vec<executor::ToolResult> {
+    async fn execute_tools(
+        &self,
+        calls: &[ToolCall],
+        denied: &HashSet<String>,
+        ui_tx: &mpsc::Sender<UiUpdate>,
+        action_rx: &mut mpsc::Receiver<Action>,
+    ) -> Vec<executor::ToolResult> {
         let mut results = Vec::new();
         for call in calls {
             if denied.contains(&call.id) {
@@ -642,11 +655,13 @@ impl Engine {
                 let skill_name = input_map.get("name").cloned().unwrap_or_default();
                 let query = input_map.get("query").cloned().unwrap_or_default();
 
-                let result = if let Some(skill) = self.skills.iter().find(|s| s.name == skill_name) {
-                    if skill.is_shell() {
-                        self.run_shell_skill(skill, &query).await
+                let result = if let Some(skill) = self.skills.iter().find(|s| s.name == skill_name).cloned() {
+                    if self.cfg.skill_subagents {
+                        self.run_skill_as_subagent(&skill, &query, ui_tx, action_rx).await
+                    } else if skill.is_shell() {
+                        self.run_shell_skill(&skill, &query).await
                     } else if skill.is_prompt() {
-                        match skills::executor::expand_prompt(skill, &query) {
+                        match skills::executor::expand_prompt(&skill, &query) {
                             Ok(expanded) => executor::ToolResult { output: expanded, is_error: false },
                             Err(e) => executor::ToolResult { output: e.to_string(), is_error: true },
                         }
@@ -761,6 +776,59 @@ impl Engine {
         executor::ToolResult { output, is_error: false }
     }
 
+    /// Delegate a skill invocation to a subagent (see `engine::subagent`) instead
+    /// of running it inline — the current default (`cfg.skill_subagents`).
+    /// Every skill shape goes through this uniformly: shell/combined skills
+    /// instruct the subagent to run the exact resolved command(s) via
+    /// `run_command` (deterministic — the subagent doesn't get to paraphrase
+    /// them), prompt-only skills hand it the expanded template directly. The
+    /// subagent has its own tools and reports back one final summary.
+    async fn run_skill_as_subagent(
+        &self,
+        skill: &Skill,
+        query: &str,
+        ui_tx: &mpsc::Sender<UiUpdate>,
+        action_rx: &mut mpsc::Receiver<Action>,
+    ) -> executor::ToolResult {
+        let instructions = match subagent::build_task(skill, query) {
+            Ok(s) => s,
+            Err(msg) => return executor::ToolResult { output: msg, is_error: true },
+        };
+
+        let (provider_name, model) = self.subagent_model();
+        let provider = match self.registry.get(&provider_name) {
+            Ok(p) => p,
+            Err(e) => return executor::ToolResult { output: e.to_string(), is_error: true },
+        };
+
+        let result = subagent::run(
+            &skill.name,
+            &instructions,
+            provider,
+            &model,
+            &self.cfg,
+            &self.allowed_commands,
+            &self.work_dir,
+            &self.marlin_dir,
+            self.code_index.as_ref(),
+            ui_tx,
+            action_rx,
+            &self.cancel_flag,
+        ).await;
+
+        executor::ToolResult { output: result.output, is_error: result.is_error }
+    }
+
+    /// Provider/model a subagent should use: `model_tiers.default` when
+    /// tiers are configured (regardless of whether difficulty-based routing
+    /// is enabled for the main conversation — this is a separate mechanism),
+    /// else whatever the main conversation is using.
+    fn subagent_model(&self) -> (String, String) {
+        self.cfg.model_tiers.as_ref()
+            .map(|t| (t.default.provider.clone(), t.default.model.clone()))
+            .unwrap_or_else(|| (self.cfg.active_provider.clone(), self.cfg.active_model.clone()))
+    }
+
     /// Preflight-check a resolved shell command against the real allow-list and
     /// sandbox mode. `Err` means the command is unconditionally denied and
     /// should never run; `Ok(verdict)` may still be `NeedApproval`.
@@ -821,7 +889,11 @@ impl Engine {
                     let cmd = extract_cmd_str(&tc.input);
                     preflight::is_destructive_cmd(&cmd).then(|| format!("destructive command: {cmd}"))
                 }
-                "run_skill" => {
+                // Only pre-check here when skills run inline (cfg.skill_subagents off).
+                // When delegated to a subagent, its own tool-call loop (run_one_tool)
+                // does this same preflight+approval per call as it actually runs
+                // commands — checking here too would just double-prompt the user.
+                "run_skill" if !self.cfg.skill_subagents => {
                     let input_map: std::collections::HashMap<String, String> =
                         serde_json::from_str(&tc.input).unwrap_or_default();
                     let skill_name = input_map.get("name").cloned().unwrap_or_default();
@@ -1350,7 +1422,7 @@ impl Engine {
             "/tokens" => {
                 if args.is_empty() {
                     let system_prompt = self.effective_system_prompt();
-                    let tools = all_tools(&self.ast_mode, &self.skill_tool_list(&self.active_goal), &self.external_tools);
+                    let tools = all_tools(&self.ast_mode, &self.skill_tool_list(&self.active_goal), &self.external_tools, self.cfg.skill_subagents);
                     let report = budget::compute(&system_prompt, &tools);
                     sys!(format!(
                         "Max output tokens: {}  (use /tokens <n> to change)\n\n\
@@ -1941,7 +2013,15 @@ impl Engine {
                             self.active_goal.clone()
                         };
                         if let Some(skill) = self.skills.iter().find(|s| s.name == skill_name).cloned() {
-                            if skill.is_shell() {
+                            if self.cfg.skill_subagents {
+                                sys!(format!("Running skill '{}' with query: {query} (subagent)", skill.name));
+                                let result = self.run_skill_as_subagent(&skill, &query, ui_tx, action_rx).await;
+                                if result.is_error {
+                                    err!(format!("[skill: {skill_name}]\n{}", result.output));
+                                } else {
+                                    sys!(format!("[skill: {skill_name}]\n{}", result.output));
+                                }
+                            } else if skill.is_shell() {
                                 match skills::executor::resolve_chunks(&skill, &query) {
                                     Err(e) => err!(format!("Skill error: {e}")),
                                     Ok(cmds) => {
@@ -2108,6 +2188,25 @@ impl Engine {
                             })
                             .unwrap_or_else(|| "not configured (use /tiers on to enable)".into());
                         sys!(format!("Model tiers: {state}\n\nUse /tiers on|off"));
+                    }
+                }
+            }
+
+            "/subagents" => {
+                match args.first().copied() {
+                    Some("on") => {
+                        self.cfg.skill_subagents = true;
+                        let _ = self.cfg.save();
+                        sys!("Skill subagents ON — running a skill delegates to a nested agent loop.");
+                    }
+                    Some("off") => {
+                        self.cfg.skill_subagents = false;
+                        let _ = self.cfg.save();
+                        sys!("Skill subagents OFF — skills run inline again (old direct-execution behavior).");
+                    }
+                    _ => {
+                        let state = if self.cfg.skill_subagents { "on" } else { "off" };
+                        sys!(format!("Skill subagents: {state}  (use /subagents on|off)"));
                     }
                 }
             }
@@ -2330,6 +2429,7 @@ fn help_text() -> String {
         ("/skill reload", "reload skills from disk"),
         ("/skill migrate", "rewrite deprecated .toml skills to .qmd"),
         ("/tiers [on|off]", "model tier routing (easy→default, hard→complex with backups)"),
+        ("/subagents [on|off]", "delegate skill runs to a nested subagent loop (on by default)"),
         ("/preflight [startup|skills|all]", "show startup + skill validation diagnostics"),
     ];
 

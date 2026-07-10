@@ -6,7 +6,12 @@ pub mod policy;
 use crate::config::AstMode;
 use crate::providers::{ToolDef, ToolProp};
 
-pub fn all_tools(ast_mode: &AstMode, skills: &[(String, String)], external: &[external::ExternalTool]) -> Vec<ToolDef> {
+pub fn all_tools(
+    ast_mode: &AstMode,
+    skills: &[(String, String)],
+    external: &[external::ExternalTool],
+    subagents_enabled: bool,
+) -> Vec<ToolDef> {
     let mut tools = vec![
         ToolDef {
             name: "read_file".into(),
@@ -91,12 +96,22 @@ pub fn all_tools(ast_mode: &AstMode, skills: &[(String, String)], external: &[ex
             .map(|(name, desc)| if desc.is_empty() { format!("  - {name}") } else { format!("  - {name}: {desc}") })
             .collect::<Vec<_>>()
             .join("\n");
+        let delegation_note = if subagents_enabled {
+            "Calling this delegates the work to a subagent — a separate agent instance with \
+             its own tools that completes the task independently and reports back one final \
+             summary. You will NOT see its intermediate steps or raw tool output, only that \
+             summary; treat it as a trustworthy report rather than something to re-verify \
+             yourself unless the summary itself looks wrong."
+        } else {
+            "Runs directly in this conversation (subagent delegation is currently off) — you \
+             get the skill's raw output back as the tool result."
+        };
         tools.push(ToolDef {
             name: "run_skill".into(),
             description: format!(
                 "Run a pre-built Marlin skill by name. Use this when a skill matches \
                 the user's request — it's faster and more reliable than writing a \
-                shell command from scratch. Candidate skills for this turn:\n{skill_list}"
+                shell command from scratch. {delegation_note} Candidate skills for this turn:\n{skill_list}"
             ),
             properties: vec![
                 ToolProp {
@@ -216,7 +231,7 @@ mod tests {
         let ten_names: Vec<(String, String)> = (0..10)
             .map(|i| (format!("skill_{i}"), String::new()))
             .collect();
-        let tools = all_tools(&AstMode::Off, &ten_names, &[]);
+        let tools = all_tools(&AstMode::Off, &ten_names, &[], true);
         let desc = run_skill_desc(&tools);
         for i in 0..10 {
             assert!(desc.contains(&format!("skill_{i}")), "missing skill_{i} in: {desc}");
@@ -231,9 +246,21 @@ mod tests {
         // Engine::skill_tool_list path) keeps the description small regardless
         // of how many skills are installed overall.
         let matched = vec![("relevant_skill".to_string(), "does the relevant thing".to_string())];
-        let tools = all_tools(&AstMode::Off, &matched, &[]);
+        let tools = all_tools(&AstMode::Off, &matched, &[], true);
         let desc = run_skill_desc(&tools);
         assert!(desc.contains("relevant_skill: does the relevant thing"));
-        assert!(desc.len() < 300, "run_skill description unexpectedly large: {} chars", desc.len());
+        // Bounded by the fixed delegation-note overhead, not skill count — a
+        // regression here would mean the description started scaling with
+        // something other than the (already-narrowed) matched skill list.
+        assert!(desc.len() < 700, "run_skill description unexpectedly large: {} chars", desc.len());
+    }
+
+    #[test]
+    fn run_skill_description_reflects_subagent_toggle() {
+        let matched = vec![("s".to_string(), "d".to_string())];
+        let on = all_tools(&AstMode::Off, &matched, &[], true);
+        let off = all_tools(&AstMode::Off, &matched, &[], false);
+        assert!(run_skill_desc(&on).contains("delegates the work to a subagent"));
+        assert!(run_skill_desc(&off).contains("Runs directly in this conversation"));
     }
 }

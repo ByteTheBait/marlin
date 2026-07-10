@@ -134,6 +134,32 @@ Shell skills go through the same preflight funnel as every other shell-executing
 
 As you type, Marlin matches your message against skill trigger keywords and shows relevant skills in the suggestion panel — before you even send.
 
+### Skills run as subagents
+
+By default, calling a skill doesn't run inline in the main conversation — it delegates to a **subagent**: a separate nested agent loop with its own message history and its own tools (the core file/shell/search tools, but not `run_skill` itself — no recursive delegation) that completes the task independently and reports back one final summary. The main model sees only that summary, not the subagent's intermediate tool calls or raw output, and its `run_skill` tool description says so explicitly, so it treats the summary as a trustworthy report rather than something to reflexively re-verify.
+
+- Shell and combined (chunk+prose) skills instruct the subagent to run the exact resolved command(s) via `run_command` — deterministically, not paraphrased — then report on the output.
+- Prompt-only skills hand the subagent the expanded template directly and let it act on it (e.g. `make_skill`'s subagent actually calls `write_file` itself, rather than just handing text back for the main model to act on).
+- The subagent's tool calls go through the exact same preflight funnel as everything else (allow-list, sandbox mode, destructive-command approval modal) — delegating doesn't loosen anything.
+- Subagent model: `model_tiers.default` when tiers are configured (a cheap/fast model doing the grunt work, independent of whether difficulty-based routing is enabled for the main conversation), otherwise whatever the main conversation is using.
+- Running subagents (and their current tool call) appear in the sidebar under **Subagents**, below the task list.
+
+This is the first step toward a longer-term direction where the main model acts purely as a manager — delegating all work to subagents rather than doing any of it directly, not just skills.
+
+Toggle it off to go back to the old direct-execution behavior (skills run inline, raw output returned straight to the main model):
+
+```
+/subagents off        skills run inline again
+/subagents on         back to subagent delegation (the default)
+/subagents            show current state
+```
+
+Or set it permanently in `~/.marlin/config.json`:
+
+```json
+"skill_subagents": false
+```
+
 ### Writing a skill
 
 Drop a `.qmd` file in `~/.marlin/skills/` — YAML frontmatter for metadata, then optional prose, then an optional fenced shell chunk:
@@ -339,7 +365,7 @@ AST mode persists across sessions (stored in `~/.marlin/config.json`).
 
 ## Sidebar
 
-On terminals 100+ columns wide, a sidebar appears on the right with two panels:
+On terminals 100+ columns wide, a sidebar appears on the right with three panels:
 
 **Context Budget** — a live token-usage bar (exact counts when using Claude, heuristic otherwise). Turns yellow past 70%, red past 90%. At ~70k tokens Marlin automatically compacts old turns into an LLM summary; mechanical truncation kicks in at ~80k, and oldest turns are dropped at ~95k.
 
@@ -350,6 +376,14 @@ On terminals 100+ columns wide, a sidebar appears on the right with two panels:
 [>] edit_file: auth.rs        ← in progress
 [ ] run_command: cargo test   ← pending
 [!] edit_file: lib.rs         ← failed
+```
+
+**Subagents** — every delegated skill run (see [Skills run as subagents](#skills-run-as-subagents)), with the same status markers plus the tool it's currently running:
+
+```
+[>] recent_commits: run_command   ← running, currently calling run_command
+[x] make_skill                    ← finished successfully
+[!] web_search                    ← finished with an error
 ```
 
 ---

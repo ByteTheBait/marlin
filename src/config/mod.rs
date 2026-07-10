@@ -167,6 +167,16 @@ pub struct Config {
     /// Multi-model tier routing (default/complex/rater with per-tier backups).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_tiers: Option<ModelTiers>,
+    /// Delegate skill invocations to a nested subagent loop instead of running
+    /// them inline. On by default; toggle with `/subagents [on|off]`. When off,
+    /// skills run the old direct way (shell chunks executed as-is, prompt
+    /// bodies expanded and handed straight back to the main model).
+    #[serde(default = "default_skill_subagents")]
+    pub skill_subagents: bool,
+}
+
+fn default_skill_subagents() -> bool {
+    true
 }
 
 fn default_max_tokens() -> usize {
@@ -282,6 +292,7 @@ impl Config {
             clean_env: false,
             ast_mode: AstMode::Off,
             model_tiers: None,
+            skill_subagents: true,
         }
     }
 }
