@@ -1288,6 +1288,15 @@ impl Engine {
         macro_rules! err {
             ($msg:expr) => {{ ui_tx.send(UiUpdate::ErrorMsg($msg.into())).await.ok(); }};
         }
+        macro_rules! save_cfg {
+            () => {{
+                if let Err(e) = self.cfg.save() {
+                    err!(format!(
+                        "Failed to save ~/.marlin/config.json: {e} — this change will be lost on restart"
+                    ));
+                }
+            }};
+        }
 
         match cmd.as_str() {
             "/help" => {
@@ -1348,7 +1357,7 @@ impl Engine {
                             .and_then(|p| if p.model.is_empty() { None } else { Some(p.model.clone()) })
                             .unwrap_or_default();
                         self.cfg.active_model = model.clone();
-                        let _ = self.cfg.save();
+                        save_cfg!();
                         sys!(format!("Switched to provider: {name}  model: {model}"));
                         let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
                             provider: name.to_string(), model,
@@ -1369,7 +1378,7 @@ impl Engine {
                 if let Some(pcfg) = self.cfg.providers.get_mut(&self.cfg.active_provider) {
                     pcfg.model = model.clone();
                 }
-                let _ = self.cfg.save();
+                save_cfg!();
                 sys!(format!("Model set to: {model}"));
                 let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
                     provider: self.cfg.active_provider.clone(),
@@ -1392,7 +1401,7 @@ impl Engine {
                     Ok(true) => {}
                     Ok(false) => {
                         self.cfg.set_key(&provider, key);
-                        let _ = self.cfg.save();
+                        save_cfg!();
                     }
                     Err(e) => {
                         err!(format!("Failed to save API key: {e}"));
@@ -1413,7 +1422,7 @@ impl Engine {
                     Ok(true) => {}
                     Ok(false) => {
                         self.cfg.set_endpoint(&provider, args[1]);
-                        let _ = self.cfg.save();
+                        save_cfg!();
                     }
                     Err(e) => {
                         err!(format!("Failed to save endpoint: {e}"));
@@ -1434,7 +1443,7 @@ impl Engine {
                     return None;
                 }
                 self.cfg.system_prompt = rest.to_string();
-                let _ = self.cfg.save();
+                save_cfg!();
                 sys!("System prompt updated.");
             }
 
@@ -1453,7 +1462,7 @@ impl Engine {
                 if let Ok(n) = args[0].parse::<usize>() {
                     if n > 0 {
                         self.cfg.max_tokens = n;
-                        let _ = self.cfg.save();
+                        save_cfg!();
                         sys!(format!("Max tokens: {n}"));
                     }
                 }
@@ -1560,7 +1569,7 @@ impl Engine {
                 let pattern = rest.to_string();
                 self.allowed_commands.push(pattern.clone());
                 self.cfg.allowed_commands = self.allowed_commands.clone();
-                let _ = self.cfg.save();
+                save_cfg!();
                 sys!(format!("Allowed: {pattern:?}"));
             }
 
@@ -1568,12 +1577,12 @@ impl Engine {
                 match args.first().copied() {
                     Some("off") => {
                         self.cfg.sandbox_mode = SandboxMode::Off;
-                        let _ = self.cfg.save();
+                        save_cfg!();
                         sys!("Sandbox off — shell commands require /allow.");
                     }
                     Some("on") | Some("permissive") => {
                         self.cfg.sandbox_mode = SandboxMode::Permissive;
-                        let _ = self.cfg.save();
+                        save_cfg!();
                         sys!("Sandbox permissive — all commands allowed, running directly on host.");
                     }
                     Some("mxc") => {
@@ -1585,7 +1594,7 @@ impl Engine {
                             ));
                         } else {
                             self.cfg.sandbox_mode = SandboxMode::Mxc;
-                            let _ = self.cfg.save();
+                            save_cfg!();
                             sys!(format!(
                                 "Sandbox mxc — AI commands run via Microsoft eXecution Containers \
                                 ({}, network blocked, only workdir mounted rw).",
@@ -1612,12 +1621,12 @@ impl Engine {
                 match args.first().copied() {
                     Some("skip") => {
                         self.cfg.skip_permissions = true;
-                        let _ = self.cfg.save();
+                        save_cfg!();
                         sys!("Permissions skipped — all operations proceed without checks.");
                     }
                     Some("require") => {
                         self.cfg.skip_permissions = false;
-                        let _ = self.cfg.save();
+                        save_cfg!();
                         sys!("Permissions required — file and command checks enabled.");
                     }
                     _ => {
@@ -1635,11 +1644,11 @@ impl Engine {
                     }
                 } else if rest == "off" || rest == "none" {
                     self.cfg.verify_command = None;
-                    let _ = self.cfg.save();
+                    save_cfg!();
                     sys!("Verify command cleared.");
                 } else {
                     self.cfg.verify_command = Some(rest.to_string());
-                    let _ = self.cfg.save();
+                    save_cfg!();
                     sys!(format!("Verify command set: {rest}"));
                 }
             }
@@ -1659,7 +1668,7 @@ impl Engine {
                     let label = mode.label();
                     self.ast_mode = mode.clone();
                     self.cfg.ast_mode = mode.clone();
-                    let _ = self.cfg.save();
+                    save_cfg!();
                     let _ = ui_tx.send(UiUpdate::AstMode(mode)).await;
                     match label {
                         "off"     => sys!("AST mode off — file reads use raw text."),
@@ -1676,12 +1685,12 @@ impl Engine {
                 match args.first().copied() {
                     Some("on") => {
                         self.cfg.clean_env = true;
-                        let _ = self.cfg.save();
+                        save_cfg!();
                         sys!("Clean-env sandboxing ON — subprocesses get a stripped environment.");
                     }
                     Some("off") => {
                         self.cfg.clean_env = false;
-                        let _ = self.cfg.save();
+                        save_cfg!();
                         sys!("Clean-env sandboxing OFF.");
                     }
                     _ => {
@@ -1696,13 +1705,13 @@ impl Engine {
                     Some("light") => {
                         self.cfg.theme = "light".into();
                         crate::tui::styles::set_light_theme(true);
-                        let _ = self.cfg.save();
+                        save_cfg!();
                         sys!("Theme set to light.");
                     }
                     Some("dark") => {
                         self.cfg.theme = "dark".into();
                         crate::tui::styles::set_light_theme(false);
-                        let _ = self.cfg.save();
+                        save_cfg!();
                         sys!("Theme set to dark.");
                     }
                     Some(name) => {
@@ -1991,7 +2000,7 @@ impl Engine {
                     Ok(m) if m.is_dir() => {
                         self.work_dir = new_dir.clone();
                         self.cfg.work_dir = new_dir.clone();
-                        let _ = self.cfg.save();
+                        save_cfg!();
                         sys!(format!("Directory: {new_dir}"));
                     }
                     _ => err!(format!("Not a directory: {}", args[0])),
@@ -2183,12 +2192,12 @@ impl Engine {
                             self.cfg.model_tiers = Some(crate::config::ModelTiers::default());
                         }
                         self.cfg.model_tiers.as_mut().unwrap().enabled = true;
-                        let _ = self.cfg.save();
+                        save_cfg!();
                         sys!("Model tier routing enabled. Edit ~/.marlin/config.json (model_tiers) to configure.");
                     }
                     Some("off") => {
                         if let Some(t) = self.cfg.model_tiers.as_mut() { t.enabled = false; }
-                        let _ = self.cfg.save();
+                        save_cfg!();
                         sys!("Model tier routing disabled — using active_provider/active_model.");
                     }
                     _ => {
@@ -2215,12 +2224,12 @@ impl Engine {
                 match args.first().copied() {
                     Some("on") => {
                         self.cfg.skill_subagents = true;
-                        let _ = self.cfg.save();
+                        save_cfg!();
                         sys!("Skill subagents ON — running a skill delegates to a nested agent loop.");
                     }
                     Some("off") => {
                         self.cfg.skill_subagents = false;
-                        let _ = self.cfg.save();
+                        save_cfg!();
                         sys!("Skill subagents OFF — skills run inline again (old direct-execution behavior).");
                     }
                     _ => {

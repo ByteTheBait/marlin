@@ -200,16 +200,32 @@ impl Config {
         let mut cfg = Self::defaults();
         if path.exists() {
             let data = std::fs::read_to_string(&path)?;
-            let loaded: Self = serde_json::from_str(&data)?;
-            let mut merged = loaded;
-            for (k, v) in Self::defaults().providers {
-                merged.providers.entry(k).or_insert(v);
+            match serde_json::from_str::<Self>(&data) {
+                Ok(loaded) => {
+                    let mut merged = loaded;
+                    for (k, v) in Self::defaults().providers {
+                        merged.providers.entry(k).or_insert(v);
+                    }
+                    // Migrate legacy sandbox=true → Permissive
+                    if merged.sandbox && merged.sandbox_mode == SandboxMode::Off {
+                        merged.sandbox_mode = SandboxMode::Permissive;
+                    }
+                    cfg = merged;
+                }
+                Err(e) => {
+                    // A corrupt config must not brick startup: preserve the bad
+                    // file for manual recovery (API keys live in it) and fall
+                    // back to defaults.
+                    let backup = path.with_extension("json.corrupt");
+                    std::fs::rename(&path, &backup)?;
+                    eprintln!(
+                        "marlin: {} is corrupt ({e});\n  moved it to {} and starting with default settings",
+                        path.display(),
+                        backup.display()
+                    );
+                    cfg.save()?;
+                }
             }
-            // Migrate legacy sandbox=true → Permissive
-            if merged.sandbox && merged.sandbox_mode == SandboxMode::Off {
-                merged.sandbox_mode = SandboxMode::Permissive;
-            }
-            cfg = merged;
         } else {
             cfg.save()?;
         }
@@ -217,9 +233,12 @@ impl Config {
     }
 
     pub fn save(&self) -> Result<()> {
-        let path = marlin_dir()?.join("config.json");
+        let dir = marlin_dir()?;
         let data = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, data)?;
+        // Write-then-rename so a crash mid-write can't truncate config.json.
+        let tmp = dir.join("config.json.tmp");
+        std::fs::write(&tmp, data)?;
+        std::fs::rename(&tmp, dir.join("config.json"))?;
         Ok(())
     }
 
