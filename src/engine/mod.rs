@@ -1388,8 +1388,17 @@ impl Engine {
                 }
                 let provider = args[0].to_lowercase();
                 let key = args[1];
-                self.cfg.set_key(&provider, key);
-                let _ = self.cfg.save();
+                match crate::providers::user_providers::set_api_key(&self.marlin_dir, &provider, key) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        self.cfg.set_key(&provider, key);
+                        let _ = self.cfg.save();
+                    }
+                    Err(e) => {
+                        err!(format!("Failed to save API key: {e}"));
+                        return None;
+                    }
+                }
                 self.registry = Registry::new(&self.cfg, Some(&self.marlin_dir));
                 sys!(format!("API key saved for {provider}."));
             }
@@ -1399,10 +1408,20 @@ impl Engine {
                     sys!("Usage: /endpoint <provider> <url>");
                     return None;
                 }
-                self.cfg.set_endpoint(args[0], args[1]);
-                let _ = self.cfg.save();
+                let provider = args[0].to_lowercase();
+                match crate::providers::user_providers::set_endpoint(&self.marlin_dir, &provider, args[1]) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        self.cfg.set_endpoint(&provider, args[1]);
+                        let _ = self.cfg.save();
+                    }
+                    Err(e) => {
+                        err!(format!("Failed to save endpoint: {e}"));
+                        return None;
+                    }
+                }
                 self.registry = Registry::new(&self.cfg, Some(&self.marlin_dir));
-                sys!(format!("Endpoint updated for {}: {}", args[0], args[1]));
+                sys!(format!("Endpoint updated for {}: {}", provider, args[1]));
             }
 
             "/system" | "/sys" => {

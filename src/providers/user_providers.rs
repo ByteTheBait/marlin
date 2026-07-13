@@ -57,6 +57,38 @@ pub fn load_all(marlin_dir: &Path) -> Vec<UserProvider> {
     providers
 }
 
+/// Update a field on a user-defined provider's toml file in place, matching
+/// by name (case-insensitive). Returns `false` if no such provider exists —
+/// callers should fall back to built-in config storage in that case.
+fn set_field(marlin_dir: &Path, name: &str, f: impl FnOnce(&mut UserProvider)) -> Result<bool> {
+    let dir = providers_dir(marlin_dir);
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Ok(false) };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") { continue; }
+        let Ok(data) = std::fs::read_to_string(&path) else { continue };
+        let Ok(mut p) = toml::from_str::<UserProvider>(&data) else { continue };
+        if p.name.eq_ignore_ascii_case(name) {
+            f(&mut p);
+            std::fs::write(&path, toml::to_string_pretty(&p)?)?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Store an API key for a user-defined provider. Returns `false` if `name`
+/// doesn't match any provider in `~/.marlin/providers/*.toml`.
+pub fn set_api_key(marlin_dir: &Path, name: &str, key: &str) -> Result<bool> {
+    set_field(marlin_dir, name, |p| p.api_key = key.to_string())
+}
+
+/// Update the endpoint for a user-defined provider. Returns `false` if `name`
+/// doesn't match any provider in `~/.marlin/providers/*.toml`.
+pub fn set_endpoint(marlin_dir: &Path, name: &str, endpoint: &str) -> Result<bool> {
+    set_field(marlin_dir, name, |p| p.endpoint = endpoint.to_string())
+}
+
 pub fn save_template(marlin_dir: &Path, name: &str) -> Result<PathBuf> {
     let p = UserProvider {
         name: name.to_string(),
