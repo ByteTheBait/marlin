@@ -16,6 +16,7 @@ use tui_textarea::TextArea;
 use crate::engine::{Action, UiUpdate};
 use crate::tui::{
     styles::*,
+    widgets::config_menu::{ConfigMenu, ConfigMenuOutcome},
     widgets::suggestions::{CmdDef, SuggestionPanel, all_commands, filter_suggestions, tab_complete},
 };
 
@@ -78,6 +79,9 @@ pub struct ChatView {
     // Approval modal
     pub approval_pending: Option<String>,
 
+    // /config settings menu overlay
+    pub config_menu: Option<ConfigMenu>,
+
     // Scroll
     pub scroll_state: ScrollViewState,
     pub content_height: u16,
@@ -130,6 +134,7 @@ impl ChatView {
             rate_limit_secs: 0,
             rate_limit_total: 0,
             approval_pending: None,
+            config_menu: None,
             scroll_state: ScrollViewState::default(),
             content_height: 0,
             viewport_height: 1,
@@ -237,6 +242,13 @@ impl ChatView {
             UiUpdate::AwaitingApproval { cmd } => {
                 self.approval_pending = Some(cmd);
             }
+            UiUpdate::ConfigState { state, open } => {
+                if let Some(menu) = &mut self.config_menu {
+                    menu.sync(state);
+                } else if open {
+                    self.config_menu = Some(ConfigMenu::new(state));
+                }
+            }
             UiUpdate::SkillsLoaded(defs) => {
                 self.skills = defs;
             }
@@ -309,6 +321,20 @@ impl ChatView {
                 }
                 _ => return None,
             }
+        }
+
+        // Config menu intercepts all input while open
+        if let Some(menu) = &mut self.config_menu {
+            match menu.on_key(key) {
+                ConfigMenuOutcome::Close => {
+                    self.config_menu = None;
+                }
+                ConfigMenuOutcome::Set { key, value } => {
+                    return Some(Action::ConfigSet { key: key.to_string(), value });
+                }
+                ConfigMenuOutcome::None => {}
+            }
+            return None;
         }
 
         // Ctrl+C

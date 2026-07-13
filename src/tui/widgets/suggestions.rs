@@ -17,6 +17,7 @@ pub struct CmdDef {
 pub fn all_commands() -> Vec<CmdDef> {
     let raw = [
         ("/help",      "",                  "show all commands"),
+        ("/config",    "",                  "interactive settings menu"),
         ("/clear",     "",                  "clear chat history"),
         ("/provider",  "<name>",            "switch provider"),
         ("/p",         "<name>",            "switch provider (short)"),

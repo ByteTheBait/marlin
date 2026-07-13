@@ -169,6 +169,11 @@ pub fn run(
                         sidebar_snap.render(sa, buf);
                     }
 
+                    // /config settings menu — rendered on top of chat
+                    if let Some(menu) = &chat.config_menu {
+                        menu.render(chat_area, buf);
+                    }
+
                     // Approval modal — rendered on top of chat
                     if let Some(cmd) = &approval_cmd {
                         render_approval_modal(cmd, chat_area, buf);

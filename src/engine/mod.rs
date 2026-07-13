@@ -66,12 +66,31 @@ pub enum UiUpdate {
     SubagentToolCall { id: String, name: String },
     /// A subagent finished (successfully or not).
     SubagentFinished { id: String, ok: bool },
+    /// Config snapshot for the interactive /config menu. `open` is true when
+    /// the user ran /config; false for refreshes after a ConfigSet applied.
+    ConfigState { state: ConfigState, open: bool },
 }
 
 #[derive(Debug, Clone)]
 pub struct StatusInfo {
     pub provider: String,
     pub model: String,
+}
+
+/// Snapshot of the editable settings shown in the /config menu.
+#[derive(Debug, Clone, Default)]
+pub struct ConfigState {
+    pub provider: String,
+    pub providers: Vec<String>,
+    pub model: String,
+    pub models: Vec<String>,
+    pub theme: String,
+    pub sandbox_mode: String,
+    pub skip_permissions: bool,
+    pub clean_env: bool,
+    pub ast_mode: String,
+    pub skill_subagents: bool,
+    pub max_tokens: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +102,8 @@ pub enum Action {
     Approve,
     /// User denied a destructive command in the modal
     Deny,
+    /// A setting was changed in the /config menu.
+    ConfigSet { key: String, value: String },
     Quit,
 }
 
@@ -260,6 +281,10 @@ impl Engine {
 
                 // Approval actions received outside an agentic loop are no-ops
                 Action::Approve | Action::Deny => {}
+
+                Action::ConfigSet { key, value } => {
+                    self.apply_config_set(&key, &value, &ui_tx).await;
+                }
 
                 Action::SendMessage(text) => {
                     self.input_history.add(&text);
@@ -2239,6 +2264,13 @@ impl Engine {
                 }
             }
 
+            "/config" | "/settings" => {
+                let _ = ui_tx.send(UiUpdate::ConfigState {
+                    state: self.config_state(),
+                    open: true,
+                }).await;
+            }
+
             "/preflight" => {
                 let scope = args.first().copied().unwrap_or("all");
                 let mut lines = Vec::new();
@@ -2308,6 +2340,126 @@ impl Engine {
             }
         }
         None
+    }
+
+    fn config_state(&self) -> ConfigState {
+        let models = self.registry.get(&self.cfg.active_provider)
+            .map(|p| p.models())
+            .unwrap_or_default();
+        ConfigState {
+            provider: self.cfg.active_provider.clone(),
+            providers: self.registry.names(),
+            model: self.cfg.active_model.clone(),
+            models,
+            theme: self.cfg.theme.clone(),
+            sandbox_mode: self.cfg.sandbox_mode.label().into(),
+            skip_permissions: self.cfg.skip_permissions,
+            clean_env: self.cfg.clean_env,
+            ast_mode: self.ast_mode.label().into(),
+            skill_subagents: self.cfg.skill_subagents,
+            max_tokens: self.cfg.max_tokens,
+        }
+    }
+
+    /// Apply one setting change from the /config menu, then echo the refreshed
+    /// snapshot so the menu stays in sync (e.g. the model list after a provider
+    /// switch, or the unchanged sandbox mode when MXC isn't installed).
+    async fn apply_config_set(&mut self, key: &str, value: &str, ui_tx: &mpsc::Sender<UiUpdate>) {
+        match key {
+            "provider" => {
+                if self.registry.get(value).is_err() {
+                    let _ = ui_tx.send(UiUpdate::ErrorMsg(format!("Unknown provider: {value}"))).await;
+                } else {
+                    self.cfg.active_provider = value.to_string();
+                    let model = self.cfg.providers.get(value)
+                        .and_then(|p| if p.model.is_empty() { None } else { Some(p.model.clone()) })
+                        .unwrap_or_default();
+                    self.cfg.active_model = model.clone();
+                    let _ = self.cfg.save();
+                    let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
+                        provider: value.to_string(),
+                        model,
+                    })).await;
+                }
+            }
+            "model" => {
+                self.cfg.active_model = value.to_string();
+                if let Some(pcfg) = self.cfg.providers.get_mut(&self.cfg.active_provider) {
+                    pcfg.model = value.to_string();
+                }
+                let _ = self.cfg.save();
+                let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
+                    provider: self.cfg.active_provider.clone(),
+                    model: value.to_string(),
+                })).await;
+            }
+            "theme" => {
+                if value == "dark" || value == "light" {
+                    self.cfg.theme = value.to_string();
+                    crate::tui::styles::set_light_theme(value == "light");
+                    let _ = self.cfg.save();
+                }
+            }
+            "sandbox" => {
+                let mode = match value {
+                    "off" => Some(SandboxMode::Off),
+                    "permissive" => Some(SandboxMode::Permissive),
+                    "mxc" if executor::detect_mxc() => Some(SandboxMode::Mxc),
+                    "mxc" => {
+                        let _ = ui_tx.send(UiUpdate::ErrorMsg(format!(
+                            "MXC binary ({}) not found in PATH. \
+                            Install from https://github.com/microsoft/mxc and retry.",
+                            executor::mxc_binary_name()
+                        ))).await;
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(mode) = mode {
+                    self.cfg.sandbox_mode = mode;
+                    let _ = self.cfg.save();
+                }
+            }
+            "permissions" => {
+                self.cfg.skip_permissions = value == "skip";
+                let _ = self.cfg.save();
+            }
+            "clean_env" => {
+                self.cfg.clean_env = value == "on";
+                let _ = self.cfg.save();
+            }
+            "ast" => {
+                let mode = match value {
+                    "off" => Some(AstMode::Off),
+                    "sexpr" => Some(AstMode::SExpr),
+                    "harness" => Some(AstMode::Harness),
+                    _ => None,
+                };
+                if let Some(mode) = mode {
+                    self.ast_mode = mode.clone();
+                    self.cfg.ast_mode = mode.clone();
+                    let _ = self.cfg.save();
+                    let _ = ui_tx.send(UiUpdate::AstMode(mode)).await;
+                }
+            }
+            "subagents" => {
+                self.cfg.skill_subagents = value == "on";
+                let _ = self.cfg.save();
+            }
+            "max_tokens" => {
+                if let Ok(n) = value.parse::<usize>() {
+                    if n > 0 {
+                        self.cfg.max_tokens = n;
+                        let _ = self.cfg.save();
+                    }
+                }
+            }
+            _ => {}
+        }
+        let _ = ui_tx.send(UiUpdate::ConfigState {
+            state: self.config_state(),
+            open: false,
+        }).await;
     }
 
     fn is_allowed(&self, cmd: &str) -> bool {
@@ -2421,6 +2573,7 @@ fn tool_short_desc(name: &str, input_json: &str) -> String {
 fn help_text() -> String {
     let cmds = [
         ("/help", "show this help"),
+        ("/config", "open the interactive settings menu"),
         ("/clear", "clear chat history and attachments"),
         ("/provider <name>", "switch provider (claude/ollama/groq/fireworks/moonshot/custom)"),
         ("/model <name>", "switch model"),
