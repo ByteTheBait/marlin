@@ -72,8 +72,46 @@
 
 ---
 
+## Phase 5: Task Planning, Concurrency & Deferred TUI Views ✅ COMPLETE
+
+### 5.1 Task Auto-Generation ✅
+- `Engine::maybe_generate_plan()` asks the already-routed model for a short ordered
+  plan before the tool loop starts
+- Shown as a Pending checklist in the sidebar ("Plan" section, above the granular
+  "Tasks" log); one step resolves to Completed/Failed per tool-call batch
+- Best-effort — a failed/unparsable plan response just leaves it empty; `task_steps`
+  tracking is unaffected either way
+
+### 5.2 Parallel Task Groups ✅
+- `execute_tools` spawns consecutive runs of parallel-safe calls (`read_file`,
+  `list_directory`, `search_codebase`, `ast_skeleton`, `ast_get_node`) onto the
+  blocking pool before awaiting any of them, instead of one at a time
+- Writes, commands, skills, AST mutation, and external tools stay strictly sequential
+- `TaskStep.parallel_group: Option<usize>` — steps that ran together render with a
+  "∥" hint in the sidebar
+
+### 5.3 Deferred TUI Views ✅
+- `/view` and `/open` — read-only scrollable file pane (`ViewerPane`)
+- `/diff-mode` — current file vs. its most recent snapshot, bounded LCS line diff
+  (`DiffPane`, `snapshots::diff_lines`)
+- `/edit` — editable pane (`EditorPane`, tui-textarea-driven), Ctrl+S routes through
+  the same preflight funnel as the LLM's own `write_file` tool call; two-Esc guard
+  before discarding unsaved changes
+- All three render as overlays on top of chat, same pattern as the `/config` menu
+- Note: tui-textarea 0.7.0 pins `ratatui 0.29`, incompatible with this project's
+  `ratatui >=0.30` — `EditorPane` (and ChatView's own input box) hand-roll rendering
+  rather than using tui-textarea's `Widget`/`set_block` API
+
+### Already done before this phase (correcting earlier docs here)
+- **Docker-equivalent sandboxing**: not bollard — `/sandbox mxc` already shells out to
+  Microsoft eXecution Containers (`src/tools/executor.rs`), no outbound network, only
+  the workdir mounted rw
+
 ## Remaining / Future Work
 
-- **Docker sandboxing**: Optional bollard crate integration to run commands in an isolated container
-- **Task auto-generation**: Pre-plan generation via LLM before agentic loop (shows intended steps upfront rather than retrospectively)
-- **Parallel task groups**: `parallel_group: Option<usize>` on TaskStep for concurrent tool visualization
+- Manual interactive verification of `/view`, `/edit`, `/diff-mode`, and the parallel-
+  task sidebar grouping in a real terminal — this environment can't reliably drive
+  TUI keystrokes, so Phase 5 was verified via unit tests + build/clippy/boot-smoke
+  checks only, not by eyeballing the actual rendered panes
+- `/edit` has no horizontal scroll for long lines (clipped, not wrapped)
+- No file-browser behind `/open` — it's currently just an alias for `/view`
