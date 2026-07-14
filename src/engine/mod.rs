@@ -910,6 +910,13 @@ impl Engine {
         ui_tx: &mpsc::Sender<UiUpdate>,
         action_rx: &mut mpsc::Receiver<Action>,
     ) -> HashSet<String> {
+        // `--dangerously-skip-permissions` / `/permissions skip`. The
+        // `run_command` arm below checks `is_destructive_cmd` directly rather
+        // than through `preflight::check` (which already short-circuits on
+        // `skip_permissions`), so it needs its own bypass here too.
+        if self.cfg.skip_permissions {
+            return HashSet::new();
+        }
         let mut denied = HashSet::new();
         for tc in calls {
             let reason = match tc.name.as_str() {

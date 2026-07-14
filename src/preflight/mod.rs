@@ -45,6 +45,17 @@ impl Invocation {
 
 /// Run every invocation through this before it executes.
 pub fn check(inv: &Invocation, cfg: &Config, allowed: &[String]) -> Verdict {
+    // `--dangerously-skip-permissions` / `/permissions skip`: bypass every
+    // check below, including destructive-command and path-escape approval —
+    // not just the allow-list Deny path, which was already implicitly
+    // bypassed via `sandboxed`. This is the single funnel every invocation
+    // passes through, so gating here covers the LLM tool-call path, skill
+    // execution (inline and subagent), and interactive /skill and /command
+    // runs uniformly.
+    if cfg.skip_permissions {
+        return Verdict::Allow;
+    }
+
     for path in &inv.paths {
         if let Some(reason) = path_escape(&inv.tool_name, path, &cfg.work_dir) {
             return Verdict::NeedApproval(reason);
@@ -84,7 +95,7 @@ fn path_escape(tool_name: &str, path: &str, work_dir: &str) -> Option<String> {
     let resolved = executor::resolve_path(path, &work_norm.to_string_lossy());
     let resolved_norm = normalize(Path::new(&resolved));
 
-    if resolved_norm.starts_with(&work_norm) {
+    if resolved_norm.starts_with(&work_norm) || is_always_allowed_tmp(&resolved_norm) {
         None
     } else {
         Some(format!(
@@ -93,6 +104,20 @@ fn path_escape(tool_name: &str, path: &str, work_dir: &str) -> Option<String> {
             work_norm.display()
         ))
     }
+}
+
+/// System scratch directories are always writable without approval — they're
+/// throwaway space, not project state, so flagging them as an "escape" is
+/// just noise. Covers `/tmp` directly and its macOS symlink target
+/// `/private/tmp`, plus the process's actual `std::env::temp_dir()` (which on
+/// macOS is a per-user `/var/folders/.../T` path, not `/tmp` at all).
+fn is_always_allowed_tmp(path: &Path) -> bool {
+    let mut roots = vec![PathBuf::from("/tmp"), PathBuf::from("/private/tmp")];
+    roots.push(std::env::temp_dir());
+    roots.iter().any(|root| {
+        let root_norm = std::fs::canonicalize(root).unwrap_or_else(|_| normalize(root));
+        path.starts_with(&root_norm) || path.starts_with(root)
+    })
 }
 
 /// Lexically normalize a path (collapse `.` / `..`) without requiring it to exist.
@@ -607,6 +632,30 @@ mod tests {
         let cfg = cfg_with(dir.to_str().unwrap());
         let inv = Invocation::paths("write_file", vec!["~/.ssh/authorized_keys".to_string()]);
         assert!(matches!(check(&inv, &cfg, &[]), Verdict::NeedApproval(_)));
+    }
+
+    #[test]
+    fn tmp_path_outside_workdir_is_allowed_without_approval() {
+        let dir = std::env::temp_dir().join("marlin_preflight_test_workdir_unrelated_to_tmp");
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = cfg_with(dir.to_str().unwrap());
+        // Absolute /tmp path, unrelated to work_dir — would normally be an escape.
+        let inv = Invocation::paths("write_file", vec!["/tmp/marlin_scratch_test.txt".to_string()]);
+        assert_eq!(check(&inv, &cfg, &[]), Verdict::Allow);
+    }
+
+    #[test]
+    fn skip_permissions_bypasses_path_escape_and_destructive_command() {
+        let dir = std::env::temp_dir().join("marlin_preflight_test_skip_permissions");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = cfg_with(dir.to_str().unwrap());
+        cfg.skip_permissions = true;
+
+        let path_inv = Invocation::paths("write_file", vec!["~/.ssh/authorized_keys".to_string()]);
+        assert_eq!(check(&path_inv, &cfg, &[]), Verdict::Allow);
+
+        let cmd_inv = Invocation::shell("run_command", "rm -rf ~");
+        assert_eq!(check(&cmd_inv, &cfg, &[]), Verdict::Allow);
     }
 
     // ── validate_skill ────────────────────────────────────────────────────────

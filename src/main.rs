@@ -14,7 +14,25 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 fn main() -> Result<()> {
-    let cfg = config::Config::load()?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        print_help();
+        return Ok(());
+    }
+    let dangerously_skip_permissions = args.iter().any(|a| a == "--dangerously-skip-permissions");
+
+    let mut cfg = config::Config::load()?;
+    if dangerously_skip_permissions {
+        // Session-only override — deliberately not persisted to config.json,
+        // same as Claude Code's own flag of the same name. Bypasses every
+        // approval prompt (destructive commands, path escapes) via the
+        // preflight funnel; see preflight::check.
+        cfg.skip_permissions = true;
+        eprintln!(
+            "marlin: --dangerously-skip-permissions is set — all permission \
+             checks are bypassed for this session."
+        );
+    }
     let marlin_dir = config::marlin_dir()?;
 
     tui::styles::set_light_theme(cfg.theme == "light");
@@ -51,4 +69,16 @@ fn main() -> Result<()> {
     tui::runner::run(action_tx, ui_rx, layout)?;
 
     Ok(())
+}
+
+fn print_help() {
+    println!(
+        "marlin\n\n\
+         Usage: marlin [options]\n\n\
+         Options:\n  \
+         --dangerously-skip-permissions  Skip all permission checks for this session\n                                   \
+         (destructive commands, path escapes) without prompting.\n                                   \
+         Not persisted — set /permissions skip in-app to persist.\n  \
+         -h, --help                      Show this help\n"
+    );
 }
