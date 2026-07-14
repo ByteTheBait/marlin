@@ -51,6 +51,8 @@ pub enum UiUpdate {
     /// Opens the /view or /open read-only file pane with `Ok((resolved_path,
     /// content))`, or reports why it couldn't (missing file, read error) as `Err`.
     OpenViewer(Result<(String, String), String>),
+    /// Opens the /diff-mode pane: current file content vs. its most recent snapshot.
+    OpenDiff { path: String, diff: Vec<snapshots::DiffLine> },
     /// Token budget update for the sidebar meter
     TokenUsage { used: usize, budget: usize },
     /// Base prompt injection (system prompt + tool defs) budget check — informational,
@@ -2154,6 +2156,32 @@ impl Engine {
                 let _ = ui_tx.send(UiUpdate::OpenViewer(result)).await;
             }
 
+            "/diff-mode" => {
+                if args.is_empty() { sys!("Usage: /diff-mode <file>"); return None; }
+                let path = self.resolve_path(args[0]);
+                let snaps = snapshots::list(&self.marlin_dir, &self.work_dir, &path);
+                let Some(latest) = snaps.first() else {
+                    sys!(format!(
+                        "No snapshots for {path} yet — snapshots are taken automatically \
+                        on write_file/edit_file, so there's nothing to diff against until \
+                        it's been edited at least once."
+                    ));
+                    return None;
+                };
+                let old_content = match snapshots::read(&self.marlin_dir, &self.work_dir, &path, &latest.id) {
+                    Ok(c) => c,
+                    Err(e) => { err!(format!("Failed to read snapshot: {e}")); return None; }
+                };
+                let new_content = match std::fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(e) => { err!(e.to_string()); return None; }
+                };
+                match snapshots::diff_lines(&old_content, &new_content) {
+                    Some(diff) => { let _ = ui_tx.send(UiUpdate::OpenDiff { path, diff }).await; }
+                    None => err!("File too large to diff."),
+                }
+            }
+
             "/ls" => {
                 let dir = if args.is_empty() {
                     self.work_dir.clone()
@@ -2830,6 +2858,7 @@ fn help_text() -> String {
         ("/cat <file>", "print file contents"),
         ("/view <file>", "open a scrollable read-only pane for a file"),
         ("/open <file>", "alias for /view"),
+        ("/diff-mode <file>", "show current file vs. its most recent snapshot"),
         ("/ls [dir]", "list directory"),
         ("/cd <dir>", "change working directory"),
         ("/pwd", "show working directory"),

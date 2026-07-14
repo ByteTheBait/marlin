@@ -183,6 +183,11 @@ pub fn run(
                         viewer.render(chat_area, buf);
                     }
 
+                    // /diff-mode pane — rendered on top of chat
+                    if let Some(diff) = &mut chat.diff_pane {
+                        diff.render(chat_area, buf);
+                    }
+
                     // Approval modal — rendered on top of chat
                     if let Some(cmd) = &approval_cmd {
                         render_approval_modal(cmd, chat_area, buf);

@@ -17,6 +17,7 @@ use crate::engine::{Action, UiUpdate};
 use crate::tui::{
     styles::*,
     widgets::config_menu::{ConfigMenu, ConfigMenuOutcome},
+    widgets::diff::{DiffOutcome, DiffPane},
     widgets::suggestions::{CmdDef, SuggestionPanel, all_commands, filter_suggestions, tab_complete},
     widgets::viewer::{ViewerOutcome, ViewerPane},
 };
@@ -86,6 +87,9 @@ pub struct ChatView {
     // /view, /open read-only file preview overlay
     pub viewer: Option<ViewerPane>,
 
+    // /diff-mode overlay
+    pub diff_pane: Option<DiffPane>,
+
     // Scroll
     pub scroll_state: ScrollViewState,
     pub content_height: u16,
@@ -140,6 +144,7 @@ impl ChatView {
             approval_pending: None,
             config_menu: None,
             viewer: None,
+            diff_pane: None,
             scroll_state: ScrollViewState::default(),
             content_height: 0,
             viewport_height: 1,
@@ -260,6 +265,9 @@ impl ChatView {
             UiUpdate::OpenViewer(Err(msg)) => {
                 self.add_error(&msg);
             }
+            UiUpdate::OpenDiff { path, diff } => {
+                self.diff_pane = Some(DiffPane::new(path, diff));
+            }
             UiUpdate::SkillsLoaded(defs) => {
                 self.skills = defs;
             }
@@ -358,6 +366,14 @@ impl ChatView {
         if let Some(viewer) = &mut self.viewer {
             if let ViewerOutcome::Close = viewer.on_key(key) {
                 self.viewer = None;
+            }
+            return None;
+        }
+
+        // Diff pane intercepts all input while open
+        if let Some(diff) = &mut self.diff_pane {
+            if let DiffOutcome::Close = diff.on_key(key) {
+                self.diff_pane = None;
             }
             return None;
         }
