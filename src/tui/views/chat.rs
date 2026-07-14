@@ -188,6 +188,18 @@ impl ChatView {
         self.maybe_scroll_to_bottom();
     }
 
+    /// The viewer/diff/editor overlays are mutually exclusive — `on_key`
+    /// intercepts them in a fixed order (viewer, then diff, then editor)
+    /// regardless of which was opened most recently, so more than one being
+    /// `Some` at once means whichever is checked first silently eats input
+    /// meant for a different, visually-on-top pane. Call before opening any
+    /// of them so only the newest stays open.
+    fn close_overlay_panes(&mut self) {
+        self.viewer = None;
+        self.diff_pane = None;
+        self.editor = None;
+    }
+
     pub fn apply_update(&mut self, update: UiUpdate) {
         match update {
             UiUpdate::StreamChunk(chunk) => {
@@ -265,15 +277,18 @@ impl ChatView {
                 }
             }
             UiUpdate::OpenViewer(Ok((path, content))) => {
+                self.close_overlay_panes();
                 self.viewer = Some(ViewerPane::new(path, content));
             }
             UiUpdate::OpenViewer(Err(msg)) => {
                 self.add_error(&msg);
             }
             UiUpdate::OpenDiff { path, diff } => {
+                self.close_overlay_panes();
                 self.diff_pane = Some(DiffPane::new(path, diff));
             }
             UiUpdate::OpenEditor(Ok((path, content))) => {
+                self.close_overlay_panes();
                 self.editor = Some(EditorPane::new(path, content));
             }
             UiUpdate::OpenEditor(Err(msg)) => {

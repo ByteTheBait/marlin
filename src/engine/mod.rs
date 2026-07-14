@@ -305,6 +305,12 @@ impl Engine {
                     self.cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                     self.active_goal.clear();
                     self.tool_iterations = 0;
+                    // Otherwise any plan steps still Pending when the user cancelled
+                    // linger in the sidebar indefinitely, implying the cancelled task
+                    // is still queued/active.
+                    self.plan_steps.clear();
+                    self.plan_cursor = 0;
+                    let _ = ui_tx.send(UiUpdate::PlanUpdate(vec![])).await;
                     let _ = ui_tx.send(UiUpdate::SystemMsg("Cancelled.".into())).await;
                 }
 
@@ -598,14 +604,16 @@ impl Engine {
                 // Track which task step index corresponds to this batch
                 let batch_task_start = self.task_steps.len().saturating_sub(tool_calls.len());
 
-                for (i, (tc, res)) in tool_calls.iter().zip(results.iter()).enumerate() {
+                for (i, (tc, (res, real_group))) in tool_calls.iter().zip(results.iter()).enumerate() {
                     let _ = ui_tx.send(UiUpdate::ToolResult {
                         name: tc.name.clone(),
                         output: res.output.clone(),
                         is_error: res.is_error,
                     }).await;
 
-                    // Update task step status
+                    // Update task step status, and correct the speculative group id
+                    // (assigned before approval/denial was known — see
+                    // parallel_group_ids) with what actually ran concurrently.
                     let step_idx = batch_task_start + i;
                     if step_idx < self.task_steps.len() {
                         self.task_steps[step_idx].status = if res.is_error {
@@ -613,6 +621,7 @@ impl Engine {
                         } else {
                             TaskStatus::Completed
                         };
+                        self.task_steps[step_idx].parallel_group = *real_group;
                     }
 
                     // File-hash-aware loop guard for edits
@@ -664,7 +673,7 @@ impl Engine {
                 // approximation of "one plan step per loop iteration" rather than
                 // trying to match individual tool calls to plan text.
                 if self.plan_cursor < self.plan_steps.len() {
-                    let batch_failed = results.iter().any(|r| r.is_error);
+                    let batch_failed = results.iter().any(|(r, _)| r.is_error);
                     self.plan_steps[self.plan_cursor].status =
                         if batch_failed { TaskStatus::Failed } else { TaskStatus::Completed };
                     self.plan_cursor += 1;
@@ -673,7 +682,7 @@ impl Engine {
 
                 // Write-Test-Fix: run verify_command after any file edit
                 let had_file_edit = tool_calls.iter().zip(results.iter())
-                    .any(|(tc, r)| (tc.name == "edit_file" || tc.name == "write_file") && !r.is_error);
+                    .any(|(tc, (r, _))| (tc.name == "edit_file" || tc.name == "write_file") && !r.is_error);
                 if had_file_edit {
                     if let Some(verify_result) = self.run_verify_command(ui_tx).await {
                         self.history.push(verify_result);
@@ -721,13 +730,19 @@ impl Engine {
         }
     }
 
+    /// Returns each result paired with the group id it actually ran under —
+    /// `Some(start)` only for calls that were part of a real 2+-call concurrent
+    /// batch, `None` for anything that ran solo (including a parallel-safe call
+    /// that happened to be alone, or one denied out of a batch). Callers should
+    /// use this — not the pre-execution `parallel_group_ids` guess — as the
+    /// source of truth for what actually ran concurrently.
     async fn execute_tools(
         &self,
         calls: &[ToolCall],
         denied: &HashSet<String>,
         ui_tx: &mpsc::Sender<UiUpdate>,
         action_rx: &mut mpsc::Receiver<Action>,
-    ) -> Vec<executor::ToolResult> {
+    ) -> Vec<(executor::ToolResult, Option<usize>)> {
         let mut results = Vec::with_capacity(calls.len());
         let mut i = 0;
         while i < calls.len() {
@@ -735,6 +750,7 @@ impl Engine {
                 let start = i;
                 while i < calls.len() && is_parallel_safe(&calls[i].name) { i += 1; }
                 let batch = &calls[start..i];
+                let group = (batch.len() > 1).then_some(start);
 
                 // Spawn every non-denied call in the batch *before* awaiting any of
                 // them — spawn_blocking starts running on the blocking pool as soon
@@ -745,7 +761,10 @@ impl Engine {
                     .collect();
 
                 for h in handles {
-                    results.push(match h {
+                    // A denied call never actually spawned alongside the others —
+                    // don't claim it ran in the group.
+                    let ran_in_batch = h.is_some();
+                    let result = match h {
                         None => executor::ToolResult {
                             output: "Command denied by user.".to_string(),
                             is_error: true,
@@ -754,7 +773,8 @@ impl Engine {
                             output: e.to_string(),
                             is_error: true,
                         }),
-                    });
+                    };
+                    results.push((result, if ran_in_batch { group } else { None }));
                 }
                 continue;
             }
@@ -763,10 +783,10 @@ impl Engine {
             i += 1;
 
             if denied.contains(&call.id) {
-                results.push(executor::ToolResult {
+                results.push((executor::ToolResult {
                     output: "Command denied by user.".to_string(),
                     is_error: true,
-                });
+                }, None));
                 continue;
             }
 
@@ -796,7 +816,7 @@ impl Engine {
                 } else {
                     executor::ToolResult { output: format!("skill '{skill_name}' not found"), is_error: true }
                 };
-                results.push(result);
+                results.push((result, None));
                 continue;
             }
 
@@ -804,7 +824,7 @@ impl Engine {
                 output: e.to_string(),
                 is_error: true,
             });
-            results.push(result);
+            results.push((result, None));
         }
         results
     }
@@ -1019,10 +1039,15 @@ impl Engine {
         }
         let mut denied = HashSet::new();
         for tc in calls {
-            let reason = match tc.name.as_str() {
+            // `Verdict` (not just an approval-reason string) so a path-based `Deny`
+            // is handled the same way `save_editor_file` handles it — auto-blocked
+            // and reported, not silently treated as allowed — rather than the two
+            // callers of `preflight::check` disagreeing on what Deny means.
+            let verdict = match tc.name.as_str() {
                 "run_command" => {
                     let cmd = extract_cmd_str(&tc.input);
-                    preflight::is_destructive_cmd(&cmd).then(|| format!("destructive command: {cmd}"))
+                    preflight::is_destructive_cmd(&cmd)
+                        .then(|| preflight::Verdict::NeedApproval(format!("destructive command: {cmd}")))
                 }
                 // Only pre-check here when skills run inline (cfg.skill_subagents off).
                 // When delegated to a subagent, its own tool-call loop (run_one_tool)
@@ -1037,25 +1062,29 @@ impl Engine {
                         .find(|s| s.name == skill_name && s.is_shell())
                         .and_then(|skill| skills::executor::resolve_chunks(skill, &query).ok())
                         .and_then(|cmds| cmds.into_iter().find(|cmd| preflight::is_destructive_cmd(cmd)))
-                        .map(|cmd| format!("destructive skill command: {cmd}"))
+                        .map(|cmd| preflight::Verdict::NeedApproval(format!("destructive skill command: {cmd}")))
                 }
                 "read_file" | "write_file" | "edit_file" | "create_directory" => {
-                    extract_path_field(&tc.input).and_then(|path| {
+                    extract_path_field(&tc.input).map(|path| {
                         let resolved = executor::resolve_path(&path, &self.work_dir);
                         let inv = preflight::Invocation::paths(tc.name.clone(), vec![resolved]);
-                        match preflight::check(&inv, &self.cfg, &self.allowed_commands) {
-                            preflight::Verdict::NeedApproval(reason) => Some(reason),
-                            _ => None,
-                        }
+                        preflight::check(&inv, &self.cfg, &self.allowed_commands)
                     })
                 }
                 _ => None,
             };
 
-            let Some(reason) = reason else { continue };
-
-            if !self.await_approval(ui_tx, action_rx, reason).await {
-                denied.insert(tc.id.clone());
+            match verdict {
+                None | Some(preflight::Verdict::Allow) => {}
+                Some(preflight::Verdict::Deny(reason)) => {
+                    let _ = ui_tx.send(UiUpdate::ErrorMsg(format!("Denied: {reason}"))).await;
+                    denied.insert(tc.id.clone());
+                }
+                Some(preflight::Verdict::NeedApproval(reason)) => {
+                    if !self.await_approval(ui_tx, action_rx, reason).await {
+                        denied.insert(tc.id.clone());
+                    }
+                }
             }
         }
         denied
@@ -2195,17 +2224,28 @@ impl Engine {
                     ));
                     return None;
                 };
-                let old_content = match snapshots::read(&self.marlin_dir, &self.work_dir, &path, &latest.id) {
-                    Ok(c) => c,
-                    Err(e) => { err!(format!("Failed to read snapshot: {e}")); return None; }
-                };
-                let new_content = match std::fs::read_to_string(&path) {
-                    Ok(c) => c,
-                    Err(e) => { err!(e.to_string()); return None; }
-                };
-                match snapshots::diff_lines(&old_content, &new_content) {
-                    Some(diff) => { let _ = ui_tx.send(UiUpdate::OpenDiff { path, diff }).await; }
-                    None => err!("File too large to diff."),
+
+                let marlin_dir = self.marlin_dir.clone();
+                let work_dir = self.work_dir.clone();
+                let path_for_task = path.clone();
+                let snap_id = latest.id.clone();
+
+                // Snapshot/file reads plus the O(n·m) LCS diff are real work for
+                // large files — route through the blocking pool like every other
+                // tool's disk/CPU work (see spawn_tool), instead of running inline
+                // on this async task and stalling it for the duration.
+                let outcome = tokio::task::spawn_blocking(move || -> Result<Vec<snapshots::DiffLine>, String> {
+                    let old_content = snapshots::read(&marlin_dir, &work_dir, &path_for_task, &snap_id)
+                        .map_err(|e| format!("Failed to read snapshot: {e}"))?;
+                    let new_content = std::fs::read_to_string(&path_for_task).map_err(|e| e.to_string())?;
+                    snapshots::diff_lines(&old_content, &new_content)
+                        .ok_or_else(|| "File too large to diff.".to_string())
+                }).await;
+
+                match outcome {
+                    Ok(Ok(diff)) => { let _ = ui_tx.send(UiUpdate::OpenDiff { path, diff }).await; }
+                    Ok(Err(e)) => err!(e),
+                    Err(e) => err!(format!("diff task failed: {e}")),
                 }
             }
 
@@ -2764,17 +2804,14 @@ impl Engine {
         policy::is_command_allowed(cmd, &self.allowed_commands)
     }
 
+    /// Delegates to `executor::resolve_path` (the same resolver every tool call
+    /// and snapshot uses) rather than re-deriving the join itself — a separate
+    /// `format!("{work_dir}/{p}")` here previously diverged from it whenever
+    /// `work_dir` had a trailing slash (e.g. after `/cd src/`), producing a
+    /// doubled-slash path that hashed to a different snapshot directory than
+    /// the one snapshots were actually stored under.
     fn resolve_path(&self, p: &str) -> String {
-        if p == "~" {
-            return dirs::home_dir().unwrap_or_default().to_string_lossy().to_string();
-        }
-        if let Some(rest) = p.strip_prefix("~/") {
-            if let Some(home) = dirs::home_dir() {
-                return home.join(rest).to_string_lossy().to_string();
-            }
-        }
-        if Path::new(p).is_absolute() { return p.to_string(); }
-        format!("{}/{}", self.work_dir, p)
+        executor::resolve_path(p, &self.work_dir)
     }
 }
 

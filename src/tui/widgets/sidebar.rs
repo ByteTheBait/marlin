@@ -197,10 +197,13 @@ impl Widget for Sidebar {
                 y += 1;
             }
 
+            // Show the last N steps that fit (matches the Tasks section below) —
+            // showing the first N instead would permanently hide whichever step
+            // is currently InProgress/Failed once the plan overflows the sidebar.
             let available_rows = inner.bottom().saturating_sub(y) as usize;
-            let visible = self.plan.len().min(available_rows);
+            let start = self.plan.len().saturating_sub(available_rows);
 
-            for step in self.plan[..visible].iter() {
+            for step in self.plan[start..].iter() {
                 if y >= inner.bottom() { break; }
 
                 let (marker, marker_style) = match step.status {

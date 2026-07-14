@@ -95,7 +95,7 @@ fn path_escape(tool_name: &str, path: &str, work_dir: &str) -> Option<String> {
     let resolved = executor::resolve_path(path, &work_norm.to_string_lossy());
     let resolved_norm = normalize(Path::new(&resolved));
 
-    if resolved_norm.starts_with(&work_norm) || is_always_allowed_tmp(&resolved_norm) {
+    if resolved_norm.starts_with(&work_norm) || is_always_allowed_tmp(&resolved_norm, &work_norm) {
         None
     } else {
         Some(format!(
@@ -106,17 +106,26 @@ fn path_escape(tool_name: &str, path: &str, work_dir: &str) -> Option<String> {
     }
 }
 
-/// System scratch directories are always writable without approval — they're
-/// throwaway space, not project state, so flagging them as an "escape" is
-/// just noise. Covers `/tmp` directly and its macOS symlink target
-/// `/private/tmp`, plus the process's actual `std::env::temp_dir()` (which on
-/// macOS is a per-user `/var/folders/.../T` path, not `/tmp` at all).
-fn is_always_allowed_tmp(path: &Path) -> bool {
+/// System scratch directories are writable without approval when `work_dir`
+/// itself sits outside them — they're throwaway space, not project state, so
+/// flagging a write there as an "escape" is just noise. Covers `/tmp` directly
+/// and its macOS symlink target `/private/tmp`, plus the process's actual
+/// `std::env::temp_dir()` (which on macOS is a per-user `/var/folders/.../T`
+/// path, not `/tmp` at all).
+///
+/// If `work_dir` is *itself* under one of these roots (a realistic setup for
+/// sandboxed/ephemeral sessions), that root is excluded from the bypass —
+/// otherwise it would swallow the very containment check it's meant to be a
+/// narrow exception to, letting a write escape into a sibling directory (e.g.
+/// another session's scratch space) with zero approval.
+fn is_always_allowed_tmp(path: &Path, work_dir_norm: &Path) -> bool {
     let mut roots = vec![PathBuf::from("/tmp"), PathBuf::from("/private/tmp")];
     roots.push(std::env::temp_dir());
     roots.iter().any(|root| {
         let root_norm = std::fs::canonicalize(root).unwrap_or_else(|_| normalize(root));
-        path.starts_with(&root_norm) || path.starts_with(root)
+        let in_root = path.starts_with(&root_norm) || path.starts_with(root);
+        let work_dir_in_root = work_dir_norm.starts_with(&root_norm) || work_dir_norm.starts_with(root);
+        in_root && !work_dir_in_root
     })
 }
 
@@ -636,12 +645,29 @@ mod tests {
 
     #[test]
     fn tmp_path_outside_workdir_is_allowed_without_approval() {
-        let dir = std::env::temp_dir().join("marlin_preflight_test_workdir_unrelated_to_tmp");
-        std::fs::create_dir_all(&dir).unwrap();
-        let cfg = cfg_with(dir.to_str().unwrap());
+        // work_dir doesn't need to exist on disk — canonicalize() falls back to
+        // lexical normalize() when it can't resolve a path, which is all
+        // path_escape needs. Using a fixed non-tmp path (rather than
+        // env::temp_dir()) keeps this test meaningful in sandboxes where
+        // TMPDIR is itself redirected under /tmp, which would otherwise make
+        // work_dir and the tested path share a root by environmental accident.
+        let cfg = cfg_with("/Users/nonexistent_marlin_test_project");
         // Absolute /tmp path, unrelated to work_dir — would normally be an escape.
         let inv = Invocation::paths("write_file", vec!["/tmp/marlin_scratch_test.txt".to_string()]);
         assert_eq!(check(&inv, &cfg, &[]), Verdict::Allow);
+    }
+
+    #[test]
+    fn tmp_sibling_path_still_needs_approval_when_workdir_is_itself_under_tmp() {
+        let dir = std::env::temp_dir().join("marlin_preflight_test_workdir_itself_in_tmp");
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = cfg_with(dir.to_str().unwrap());
+        // A sibling path under the SAME tmp root as work_dir, but outside work_dir —
+        // must NOT be silently allowed just because it's "under tmp somewhere" (the
+        // regression: work_dir itself lives under a sandboxed session's tmp root).
+        let sibling = dir.parent().unwrap().join("marlin_preflight_test_sibling_secret.txt");
+        let inv = Invocation::paths("write_file", vec![sibling.to_str().unwrap().to_string()]);
+        assert!(matches!(check(&inv, &cfg, &[]), Verdict::NeedApproval(_)));
     }
 
     #[test]

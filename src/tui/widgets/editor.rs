@@ -41,6 +41,10 @@ pub struct EditorPane {
     /// Set after one Esc on a dirty buffer; a second Esc actually closes.
     /// Any other key clears it, so it can't be "armed" from an earlier edit.
     pending_discard: bool,
+    /// Whether the file used CRLF line endings when opened — `str::lines()`
+    /// strips `\r` from every line, so reconstructing with a plain `\n` would
+    /// mark an untouched CRLF file dirty and silently convert it to LF on save.
+    crlf: bool,
     /// Top visible line — adjusted each render to keep the cursor in view.
     scroll_row: usize,
     viewport_height: usize,
@@ -56,6 +60,7 @@ impl EditorPane {
         Self {
             path,
             textarea: TextArea::new(lines),
+            crlf: content.contains("\r\n"),
             original: content,
             pending_discard: false,
             scroll_row: 0,
@@ -63,12 +68,15 @@ impl EditorPane {
         }
     }
 
-    /// Reconstructed buffer content, restoring a trailing newline if the file
-    /// had one when opened (tui-textarea's line list otherwise loses it).
+    /// Reconstructed buffer content, restoring the file's original line-ending
+    /// style (CRLF vs LF) and trailing newline (tui-textarea's line list has
+    /// neither) — otherwise an untouched CRLF file would compare unequal to
+    /// `original` and get silently rewritten to LF on save.
     fn content(&self) -> String {
-        let joined = self.textarea.lines().join("\n");
+        let sep = if self.crlf { "\r\n" } else { "\n" };
+        let joined = self.textarea.lines().join(sep);
         if self.original.ends_with('\n') && !joined.is_empty() {
-            format!("{joined}\n")
+            format!("{joined}{sep}")
         } else {
             joined
         }
@@ -247,5 +255,22 @@ mod tests {
         let p = EditorPane::new("new.txt".into(), String::new());
         assert_eq!(p.content(), "");
         assert!(!p.is_dirty());
+    }
+
+    #[test]
+    fn untouched_crlf_file_round_trips_and_is_not_dirty() {
+        let p = EditorPane::new("f.txt".into(), "a\r\nb\r\nc\r\n".into());
+        assert_eq!(p.content(), "a\r\nb\r\nc\r\n");
+        assert!(!p.is_dirty());
+    }
+
+    #[test]
+    fn edited_crlf_file_saves_with_crlf_preserved() {
+        let mut p = EditorPane::new("f.txt".into(), "a\r\nb\r\n".into());
+        p.on_key(key(KeyCode::Char('!')));
+        match p.on_key(ctrl_s()) {
+            EditorOutcome::Save(content) => assert_eq!(content, "!a\r\nb\r\n"),
+            _ => panic!("expected Save"),
+        }
     }
 }
