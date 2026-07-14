@@ -188,6 +188,11 @@ pub fn run(
                         diff.render(chat_area, buf);
                     }
 
+                    // /edit pane — rendered on top of chat
+                    if let Some(editor) = &mut chat.editor {
+                        editor.render(chat_area, buf);
+                    }
+
                     // Approval modal — rendered on top of chat
                     if let Some(cmd) = &approval_cmd {
                         render_approval_modal(cmd, chat_area, buf);

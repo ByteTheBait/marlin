@@ -18,6 +18,7 @@ use crate::tui::{
     styles::*,
     widgets::config_menu::{ConfigMenu, ConfigMenuOutcome},
     widgets::diff::{DiffOutcome, DiffPane},
+    widgets::editor::{EditorOutcome, EditorPane},
     widgets::suggestions::{CmdDef, SuggestionPanel, all_commands, filter_suggestions, tab_complete},
     widgets::viewer::{ViewerOutcome, ViewerPane},
 };
@@ -90,6 +91,9 @@ pub struct ChatView {
     // /diff-mode overlay
     pub diff_pane: Option<DiffPane>,
 
+    // /edit overlay
+    pub editor: Option<EditorPane>,
+
     // Scroll
     pub scroll_state: ScrollViewState,
     pub content_height: u16,
@@ -145,6 +149,7 @@ impl ChatView {
             config_menu: None,
             viewer: None,
             diff_pane: None,
+            editor: None,
             scroll_state: ScrollViewState::default(),
             content_height: 0,
             viewport_height: 1,
@@ -268,6 +273,19 @@ impl ChatView {
             UiUpdate::OpenDiff { path, diff } => {
                 self.diff_pane = Some(DiffPane::new(path, diff));
             }
+            UiUpdate::OpenEditor(Ok((path, content))) => {
+                self.editor = Some(EditorPane::new(path, content));
+            }
+            UiUpdate::OpenEditor(Err(msg)) => {
+                self.add_error(&msg);
+            }
+            UiUpdate::EditorSaved { path } => {
+                if let Some(editor) = &mut self.editor {
+                    if editor.path == path {
+                        editor.mark_saved();
+                    }
+                }
+            }
             UiUpdate::SkillsLoaded(defs) => {
                 self.skills = defs;
             }
@@ -374,6 +392,19 @@ impl ChatView {
         if let Some(diff) = &mut self.diff_pane {
             if let DiffOutcome::Close = diff.on_key(key) {
                 self.diff_pane = None;
+            }
+            return None;
+        }
+
+        // Editor pane intercepts all input while open
+        if let Some(editor) = &mut self.editor {
+            match editor.on_key(key) {
+                EditorOutcome::Close => self.editor = None,
+                EditorOutcome::Save(content) => {
+                    let path = editor.path.clone();
+                    return Some(Action::SaveEditorFile { path, content });
+                }
+                EditorOutcome::None => {}
             }
             return None;
         }

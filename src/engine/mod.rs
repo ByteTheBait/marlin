@@ -53,6 +53,12 @@ pub enum UiUpdate {
     OpenViewer(Result<(String, String), String>),
     /// Opens the /diff-mode pane: current file content vs. its most recent snapshot.
     OpenDiff { path: String, diff: Vec<snapshots::DiffLine> },
+    /// Opens the /edit pane with `Ok((resolved_path, content))`, or reports why
+    /// it couldn't (missing file, read error) as `Err`.
+    OpenEditor(Result<(String, String), String>),
+    /// A Ctrl+S save from the /edit pane completed — lets the pane clear its
+    /// dirty flag and rebase its "original content" comparison.
+    EditorSaved { path: String },
     /// Token budget update for the sidebar meter
     TokenUsage { used: usize, budget: usize },
     /// Base prompt injection (system prompt + tool defs) budget check — informational,
@@ -115,6 +121,10 @@ pub enum Action {
     Deny,
     /// A setting was changed in the /config menu.
     ConfigSet { key: String, value: String },
+    /// Ctrl+S in the /edit pane — write `content` to `path`, through the same
+    /// preflight funnel (path-escape approval, snapshotting) as the LLM's
+    /// own write_file tool call.
+    SaveEditorFile { path: String, content: String },
     Quit,
 }
 
@@ -303,6 +313,10 @@ impl Engine {
 
                 Action::ConfigSet { key, value } => {
                     self.apply_config_set(&key, &value, &ui_tx).await;
+                }
+
+                Action::SaveEditorFile { path, content } => {
+                    self.save_editor_file(path, content, &ui_tx, &mut action_rx).await;
                 }
 
                 Action::SendMessage(text) => {
@@ -2156,6 +2170,19 @@ impl Engine {
                 let _ = ui_tx.send(UiUpdate::OpenViewer(result)).await;
             }
 
+            "/edit" => {
+                if args.is_empty() { sys!("Usage: /edit <file>"); return None; }
+                let path = self.resolve_path(args[0]);
+                // A missing file opens an empty buffer (Ctrl+S creates it) — anything
+                // else (permission denied, etc.) is a real error to report.
+                let result = match std::fs::read_to_string(&path) {
+                    Ok(content) => Ok((path, content)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((path, String::new())),
+                    Err(e) => Err(e.to_string()),
+                };
+                let _ = ui_tx.send(UiUpdate::OpenEditor(result)).await;
+            }
+
             "/diff-mode" => {
                 if args.is_empty() { sys!("Usage: /diff-mode <file>"); return None; }
                 let path = self.resolve_path(args[0]);
@@ -2687,6 +2714,52 @@ impl Engine {
         }).await;
     }
 
+    /// Ctrl+S in the /edit pane. Goes through the exact same funnel a
+    /// write_file tool call would: preflight path-escape check (approval
+    /// modal if it needs one — `--dangerously-skip-permissions` still
+    /// short-circuits it via `preflight::check`), then the real executor
+    /// (snapshotting, etc.) via `spawn_tool`, not a raw `std::fs::write`.
+    async fn save_editor_file(
+        &mut self,
+        path: String,
+        content: String,
+        ui_tx: &mpsc::Sender<UiUpdate>,
+        action_rx: &mut mpsc::Receiver<Action>,
+    ) {
+        let resolved = executor::resolve_path(&path, &self.work_dir);
+        let inv = preflight::Invocation::paths("write_file", vec![resolved.clone()]);
+
+        let approved = match preflight::check(&inv, &self.cfg, &self.allowed_commands) {
+            preflight::Verdict::Allow => true,
+            preflight::Verdict::NeedApproval(reason) => self.await_approval(ui_tx, action_rx, reason).await,
+            preflight::Verdict::Deny(reason) => {
+                let _ = ui_tx.send(UiUpdate::ErrorMsg(format!("Save denied: {reason}"))).await;
+                false
+            }
+        };
+        if !approved {
+            let _ = ui_tx.send(UiUpdate::SystemMsg(format!("Save cancelled: {resolved}"))).await;
+            return;
+        }
+
+        let input = serde_json::json!({ "path": path, "content": content }).to_string();
+        let call = ToolCall { id: "editor-save".into(), name: "write_file".into(), input };
+        let result = self.spawn_tool(&call).await.unwrap_or_else(|e| executor::ToolResult {
+            output: e.to_string(),
+            is_error: true,
+        });
+
+        if result.is_error {
+            let _ = ui_tx.send(UiUpdate::ErrorMsg(result.output)).await;
+        } else {
+            if let Some(idx) = &mut self.code_index {
+                index::update_file(idx, &resolved);
+            }
+            let _ = ui_tx.send(UiUpdate::SystemMsg(format!("Saved {resolved}"))).await;
+            let _ = ui_tx.send(UiUpdate::EditorSaved { path: resolved }).await;
+        }
+    }
+
     fn is_allowed(&self, cmd: &str) -> bool {
         policy::is_command_allowed(cmd, &self.allowed_commands)
     }
@@ -2859,6 +2932,7 @@ fn help_text() -> String {
         ("/view <file>", "open a scrollable read-only pane for a file"),
         ("/open <file>", "alias for /view"),
         ("/diff-mode <file>", "show current file vs. its most recent snapshot"),
+        ("/edit <file>", "open an editable pane (Ctrl+S save, Esc close)"),
         ("/ls [dir]", "list directory"),
         ("/cd <dir>", "change working directory"),
         ("/pwd", "show working directory"),
