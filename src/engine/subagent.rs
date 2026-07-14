@@ -31,10 +31,12 @@ pub struct SubagentResult {
 }
 
 /// Tools available to a subagent: the core set only. No `run_skill` (never
-/// let a subagent recursively spawn more subagents) and no AST harness tools
-/// (keep the nested loop's tool surface simple and predictable).
+/// let a subagent recursively spawn more subagents), no AST harness tools,
+/// and no MCP tools (keep the nested loop's tool surface simple and
+/// predictable, and its trust boundary equal to or narrower than the main
+/// conversation's).
 fn subagent_tools() -> Vec<crate::providers::ToolDef> {
-    all_tools(&AstMode::Off, &[], &[], false)
+    all_tools(&AstMode::Off, &[], &[], false, &[])
 }
 
 /// Build the task instructions handed to a skill's subagent, per skill shape:

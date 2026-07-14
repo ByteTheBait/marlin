@@ -4,6 +4,7 @@ pub mod extract;
 pub mod policy;
 
 use crate::config::AstMode;
+use crate::mcp;
 use crate::providers::{ToolDef, ToolProp};
 
 pub fn all_tools(
@@ -11,6 +12,7 @@ pub fn all_tools(
     skills: &[(String, String)],
     external: &[external::ExternalTool],
     subagents_enabled: bool,
+    mcp_tools: &[(String, mcp::client::McpTool)],
 ) -> Vec<ToolDef> {
     let mut tools = vec![
         ToolDef {
@@ -212,6 +214,11 @@ pub fn all_tools(
         tools.push(et.to_tool_def());
     }
 
+    // Append tools discovered from configured MCP servers (~/.marlin/mcp/*.json).
+    for (server_name, tool) in mcp_tools {
+        tools.push(mcp::tool_def(server_name, tool));
+    }
+
     tools
 }
 
@@ -231,7 +238,7 @@ mod tests {
         let ten_names: Vec<(String, String)> = (0..10)
             .map(|i| (format!("skill_{i}"), String::new()))
             .collect();
-        let tools = all_tools(&AstMode::Off, &ten_names, &[], true);
+        let tools = all_tools(&AstMode::Off, &ten_names, &[], true, &[]);
         let desc = run_skill_desc(&tools);
         for i in 0..10 {
             assert!(desc.contains(&format!("skill_{i}")), "missing skill_{i} in: {desc}");
@@ -246,7 +253,7 @@ mod tests {
         // Engine::skill_tool_list path) keeps the description small regardless
         // of how many skills are installed overall.
         let matched = vec![("relevant_skill".to_string(), "does the relevant thing".to_string())];
-        let tools = all_tools(&AstMode::Off, &matched, &[], true);
+        let tools = all_tools(&AstMode::Off, &matched, &[], true, &[]);
         let desc = run_skill_desc(&tools);
         assert!(desc.contains("relevant_skill: does the relevant thing"));
         // Bounded by the fixed delegation-note overhead, not skill count — a
@@ -258,8 +265,8 @@ mod tests {
     #[test]
     fn run_skill_description_reflects_subagent_toggle() {
         let matched = vec![("s".to_string(), "d".to_string())];
-        let on = all_tools(&AstMode::Off, &matched, &[], true);
-        let off = all_tools(&AstMode::Off, &matched, &[], false);
+        let on = all_tools(&AstMode::Off, &matched, &[], true, &[]);
+        let off = all_tools(&AstMode::Off, &matched, &[], false, &[]);
         assert!(run_skill_desc(&on).contains("delegates the work to a subagent"));
         assert!(run_skill_desc(&off).contains("Runs directly in this conversation"));
     }

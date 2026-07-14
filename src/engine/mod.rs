@@ -4,7 +4,7 @@ pub mod loop_guard;
 pub mod subagent;
 pub mod tasks;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -17,6 +17,7 @@ use crate::history::{
     self, InputHistory, Session, from_session_message, to_session_message,
 };
 use crate::index::{self, Index};
+use crate::mcp;
 use crate::preflight;
 use crate::providers::{
     Message, RateLimitState, StreamRequest, ToolCall, ToolCallMsg, registry::Registry,
@@ -169,6 +170,14 @@ pub struct Engine {
     user_commands: Vec<crate::commands::UserCommand>,
     /// User-defined LLM tools from ~/.marlin/tools/
     external_tools: Vec<crate::tools::external::ExternalTool>,
+    /// MCP server configs from ~/.marlin/mcp/ (loaded at construction; servers
+    /// are actually spawned in `run()`, since spawning is async).
+    mcp_server_configs: Vec<mcp::McpServerConfig>,
+    /// Live MCP connections, keyed by server name.
+    mcp_clients: HashMap<String, Arc<mcp::client::McpClient>>,
+    /// Tools discovered from `mcp_clients` via `tools/list`, as (server_name, tool)
+    /// pairs — mirrors `external_tools`' role for `tools::all_tools`.
+    mcp_tools: Vec<(String, mcp::client::McpTool)>,
     /// Provider/model selected for the current agentic request (may be tier-routed)
     req_provider: String,
     req_model: String,
@@ -214,6 +223,10 @@ impl Engine {
         let loaded_commands = crate::commands::load_all(&marlin_dir);
         crate::tools::external::install_defaults(&marlin_dir);
         let loaded_external_tools = crate::tools::external::load_all(&marlin_dir);
+        // No install_defaults here — unlike skills/commands/tools there's no safe
+        // offline-runnable default MCP server to ship. Servers themselves are
+        // spawned later in `run()` (async); this just loads the configs.
+        let loaded_mcp_configs = mcp::load_all(&marlin_dir);
         crate::config::install_default_themes(&marlin_dir);
 
         startup_diagnostics.extend(preflight::startup(&cfg, &marlin_dir, &work_dir, code_index.as_ref()));
@@ -242,6 +255,9 @@ impl Engine {
             skills: loaded_skills,
             user_commands: loaded_commands,
             external_tools: loaded_external_tools,
+            mcp_server_configs: loaded_mcp_configs,
+            mcp_clients: HashMap::new(),
+            mcp_tools: Vec::new(),
             req_provider,
             req_model,
             req_backup_provider: String::new(),
@@ -296,6 +312,11 @@ impl Engine {
 
         // Spawn nightly skill-suggestion daemon.
         self.maybe_spawn_daemon(ui_tx.clone());
+
+        // Connect configured MCP servers (~/.marlin/mcp/*.json). Async, so it
+        // couldn't happen in `new()`; best-effort per server — one bad/missing
+        // server reports a message and doesn't block the others or startup.
+        self.connect_mcp_servers(&ui_tx).await;
 
         while let Some(action) = action_rx.recv().await {
             match action {
@@ -364,7 +385,7 @@ impl Engine {
                     // Broadcast token count immediately so the sidebar isn't stale while waiting.
                     // Prefer exact count from provider API; fall back to heuristic.
                     let system_prompt = self.effective_system_prompt();
-                    let turn_tools = all_tools(&self.ast_mode, &self.skill_tool_list(&text), &self.external_tools, self.cfg.skill_subagents);
+                    let turn_tools = all_tools(&self.ast_mode, &self.skill_tool_list(&text), &self.external_tools, self.cfg.skill_subagents, &self.mcp_tools);
                     let tok = if let Ok(p) = self.registry.get(&self.req_provider) {
                         let req_for_count = StreamRequest {
                             model: self.req_model.clone(),
@@ -487,7 +508,7 @@ impl Engine {
                 messages: self.history.clone(),
                 system_prompt: self.effective_system_prompt(),
                 max_tokens: self.cfg.max_tokens,
-                tools: all_tools(&self.ast_mode, &self.skill_tool_list(&self.active_goal), &self.external_tools, self.cfg.skill_subagents),
+                tools: all_tools(&self.ast_mode, &self.skill_tool_list(&self.active_goal), &self.external_tools, self.cfg.skill_subagents, &self.mcp_tools),
             };
 
             let mut stream = match provider.stream(req).await {
@@ -815,6 +836,28 @@ impl Engine {
                     }
                 } else {
                     executor::ToolResult { output: format!("skill '{skill_name}' not found"), is_error: true }
+                };
+                results.push((result, None));
+                continue;
+            }
+
+            // Route mcp__{server}__{tool} calls to the owning MCP connection.
+            // Not treated as parallel-safe (unlike read_file et al.) — an MCP
+            // tool's side effects are opaque to marlin, so batching several
+            // together by default isn't a safe assumption to bake in.
+            if let Some((server, tool_name)) = mcp::parse_tool_name(&call.name) {
+                let result = match self.mcp_clients.get(server) {
+                    Some(client) => {
+                        let args: serde_json::Value = serde_json::from_str(&call.input).unwrap_or_default();
+                        match client.call_tool(tool_name, args).await {
+                            Ok((output, is_error)) => executor::ToolResult { output, is_error },
+                            Err(e) => executor::ToolResult { output: e.to_string(), is_error: true },
+                        }
+                    }
+                    None => executor::ToolResult {
+                        output: format!("mcp server '{server}' is not connected"),
+                        is_error: true,
+                    },
                 };
                 results.push((result, None));
                 continue;
@@ -1395,6 +1438,41 @@ impl Engine {
         skills::daemon::spawn(self.marlin_dir.clone(), provider, model, ui_tx);
     }
 
+    /// Spawn every configured MCP server and fetch its tool list. Best-effort
+    /// per server (a server that fails to spawn or handshake just gets
+    /// reported and skipped, matching skill-validation's fail-soft style) —
+    /// used both at startup and by `/mcp reload`.
+    async fn connect_mcp_servers(&mut self, ui_tx: &mpsc::Sender<UiUpdate>) {
+        self.mcp_clients.clear();
+        self.mcp_tools.clear();
+        for cfg in self.mcp_server_configs.clone() {
+            match mcp::client::McpClient::spawn(&cfg).await {
+                Ok(client) => {
+                    match client.list_tools().await {
+                        Ok(tools) => {
+                            let count = tools.len();
+                            for tool in tools {
+                                self.mcp_tools.push((cfg.name.clone(), tool));
+                            }
+                            self.mcp_clients.insert(cfg.name.clone(), Arc::new(client));
+                            let _ = ui_tx.send(UiUpdate::SystemMsg(
+                                format!("mcp: connected '{}' ({count} tool(s))", cfg.name)
+                            )).await;
+                        }
+                        Err(e) => {
+                            let _ = ui_tx.send(UiUpdate::ErrorMsg(
+                                format!("mcp: '{}' connected but tools/list failed: {e}", cfg.name)
+                            )).await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = ui_tx.send(UiUpdate::ErrorMsg(format!("mcp: '{}' failed to start: {e}", cfg.name))).await;
+                }
+            }
+        }
+    }
+
     /// Skill names/descriptions to advertise in the `run_skill` tool description
     /// for this turn. Bounded by trigger-matching against `query` instead of
     /// listing every installed skill (which grows unbounded with skill count) —
@@ -1668,7 +1746,7 @@ impl Engine {
             "/tokens" => {
                 if args.is_empty() {
                     let system_prompt = self.effective_system_prompt();
-                    let tools = all_tools(&self.ast_mode, &self.skill_tool_list(&self.active_goal), &self.external_tools, self.cfg.skill_subagents);
+                    let tools = all_tools(&self.ast_mode, &self.skill_tool_list(&self.active_goal), &self.external_tools, self.cfg.skill_subagents, &self.mcp_tools);
                     let report = budget::compute(&system_prompt, &tools);
                     sys!(format!(
                         "Max output tokens: {}  (use /tokens <n> to change)\n\n\
@@ -2057,6 +2135,60 @@ impl Engine {
                     _ => {
                         sys!("Usage: /tool [list|new <name>|reload]");
                     }
+                }
+            }
+
+            "/mcp" | "/mcps" => {
+                let subcmd = args.first().copied().unwrap_or("list");
+                let subargs: Vec<&str> = args.get(1..).map(|a| a.to_vec()).unwrap_or_default();
+
+                match subcmd {
+                    "list" | "ls" => {
+                        if self.mcp_server_configs.is_empty() {
+                            sys!("No MCP servers configured. Add JSON files to ~/.marlin/mcp/, or /mcp new <name> <command> [args...].");
+                        } else {
+                            let lines: Vec<String> = self.mcp_server_configs.iter().map(|cfg| {
+                                if self.mcp_clients.contains_key(&cfg.name) {
+                                    let tools: Vec<&str> = self.mcp_tools.iter()
+                                        .filter(|(s, _)| s == &cfg.name)
+                                        .map(|(_, t)| t.name.as_str())
+                                        .collect();
+                                    format!("  {:<20} connected — {}", cfg.name, tools.join(", "))
+                                } else {
+                                    format!("  {:<20} not connected", cfg.name)
+                                }
+                            }).collect();
+                            sys!(format!("MCP servers ({}):\n{}", self.mcp_server_configs.len(), lines.join("\n")));
+                        }
+                    }
+
+                    "new" | "create" => {
+                        if subargs.len() < 2 {
+                            sys!("Usage: /mcp new <name> <command> [args...]");
+                            return None;
+                        }
+                        let name = subargs[0];
+                        let command = subargs[1];
+                        let cmd_args: Vec<String> = subargs[2..].iter().map(|s| s.to_string()).collect();
+                        match mcp::save_template(&self.marlin_dir, name, command, cmd_args) {
+                            Ok(path) => {
+                                sys!(format!("MCP server config created:\n  {}\n\n/mcp reload to connect.", path.display()));
+                                self.mcp_server_configs = mcp::load_all(&self.marlin_dir);
+                            }
+                            Err(e) => err!(format!("Failed to create MCP server config: {e}")),
+                        }
+                    }
+
+                    "reload" => {
+                        self.mcp_server_configs = mcp::load_all(&self.marlin_dir);
+                        self.connect_mcp_servers(ui_tx).await;
+                        sys!(format!(
+                            "Reconnected: {}/{} server(s), {} tool(s) total.",
+                            self.mcp_clients.len(), self.mcp_server_configs.len(), self.mcp_tools.len()
+                        ));
+                    }
+
+                    _ => sys!("Usage: /mcp [list|new <name> <command> [args...]|reload]"),
                 }
             }
 
@@ -2960,6 +3092,8 @@ fn help_text() -> String {
         ("/clean-env [on|off]", "strip subprocess environment for isolation (persists)"),
         ("/theme [dark|light|<name>]", "switch theme; named themes live in ~/.marlin/themes/"),
         ("/command [list|new|reload]", "manage user-defined slash commands (~/.marlin/commands/)"),
+        ("/tool [list|new|reload]", "manage user-defined LLM tools (~/.marlin/tools/)"),
+        ("/mcp [list|new|reload]", "manage MCP server connections (~/.marlin/mcp/)"),
         ("/index [status]", "build (or check) the TF-IDF codebase search index"),
         ("/search <query>", "search the index and show ranked results with snippets"),
         ("/revert <file> [n]", "list file snapshots or restore one"),

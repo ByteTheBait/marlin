@@ -3,6 +3,7 @@ mod config;
 mod engine;
 mod history;
 mod index;
+mod mcp;
 mod preflight;
 mod providers;
 mod skills;

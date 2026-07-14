@@ -59,6 +59,7 @@ pub fn all_commands() -> Vec<CmdDef> {
         ("/animate",   "[on|off]",          "toggle typewriter animation for AI responses"),
         ("/command",   "[list|new|reload]",  "manage user-defined slash commands (~/.marlin/commands/)"),
         ("/tool",      "[list|new|reload]",  "manage user-defined LLM tools (~/.marlin/tools/)"),
+        ("/mcp",       "[list|new|reload]",  "manage MCP server connections (~/.marlin/mcp/)"),
         ("/provider",  "[list|new <name>|<name>]", "list/create user providers or switch provider"),
     ];
     raw.iter().map(|(c, a, d)| CmdDef {

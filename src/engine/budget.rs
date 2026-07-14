@@ -80,7 +80,7 @@ mod tests {
             When asked to create a file, write code, edit something, or run a command — DO IT with the appropriate tool. \
             Do not explain how the user could do it themselves. Do not ask for confirmation before using tools. Just act.\n\n\
             Working directory: /home/user/project\n\n";
-        let tools = all_tools(&AstMode::Off, &[], &[], false);
+        let tools = all_tools(&AstMode::Off, &[], &[], false, &[]);
         let report = compute(system_prompt, &tools);
         assert!(
             !report.over_budget(),
