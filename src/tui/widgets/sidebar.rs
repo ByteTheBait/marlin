@@ -266,7 +266,14 @@ impl Widget for Sidebar {
                     TaskStatus::Pending    => (" ", style_system()),
                 };
 
-                let max_desc = inner.width.saturating_sub(4) as usize;
+                // Steps that ran concurrently (see Engine::execute_tools' parallel-safe
+                // batching) get a "∥" hint before the bracket instead of a leading
+                // space, so a group reads as "these ran together" at a glance.
+                let (lead, max_desc) = if step.parallel_group.is_some() {
+                    ("∥", inner.width.saturating_sub(5) as usize)
+                } else {
+                    (" ", inner.width.saturating_sub(4) as usize)
+                };
                 let desc = if step.description.chars().count() > max_desc {
                     step.description.chars().take(max_desc.saturating_sub(1)).collect::<String>() + "…"
                 } else {
@@ -274,6 +281,7 @@ impl Widget for Sidebar {
                 };
 
                 let line = Line::from(vec![
+                    Span::styled(lead, style_separator()),
                     Span::styled("[", style_separator()),
                     Span::styled(marker, marker_style),
                     Span::styled("] ", style_separator()),

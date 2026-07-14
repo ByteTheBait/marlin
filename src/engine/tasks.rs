@@ -13,25 +13,30 @@ pub struct TaskStep {
     pub status: TaskStatus,
     #[allow(dead_code)]
     pub tool_name: Option<String>,
+    /// Set when this step ran concurrently with other steps sharing the same
+    /// id (see `Engine::execute_tools`'s parallel-safe batching) — `None` for
+    /// steps that ran sequentially/solo.
+    pub parallel_group: Option<usize>,
 }
 
 impl TaskStep {
     #[allow(dead_code)]
     pub fn goal(desc: impl Into<String>) -> Self {
-        Self { description: desc.into(), status: TaskStatus::InProgress, tool_name: None }
+        Self { description: desc.into(), status: TaskStatus::InProgress, tool_name: None, parallel_group: None }
     }
 
     /// Upfront plan step, shown Pending in the sidebar until the matching
     /// batch of tool calls completes (see `Engine::maybe_generate_plan`).
     pub fn planned(desc: impl Into<String>) -> Self {
-        Self { description: desc.into(), status: TaskStatus::Pending, tool_name: None }
+        Self { description: desc.into(), status: TaskStatus::Pending, tool_name: None, parallel_group: None }
     }
 
-    pub fn tool_pending(name: &str, desc: impl Into<String>) -> Self {
+    pub fn tool_pending(name: &str, desc: impl Into<String>, parallel_group: Option<usize>) -> Self {
         Self {
             description: desc.into(),
             status: TaskStatus::InProgress,
             tool_name: Some(name.to_string()),
+            parallel_group,
         }
     }
 

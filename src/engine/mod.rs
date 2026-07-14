@@ -555,14 +555,17 @@ impl Engine {
                     is_error: false,
                 });
 
-                // Notify TUI of each tool call and add to task list
-                for tc in &tool_calls {
+                // Notify TUI of each tool call and add to task list. Calls in a run of
+                // 2+ consecutive parallel-safe tools share a group id (see
+                // `parallel_group_ids`) so the sidebar can show they ran together.
+                let groups = parallel_group_ids(&tool_calls);
+                for (tc, group) in tool_calls.iter().zip(groups.iter()) {
                     let _ = ui_tx.send(UiUpdate::ToolCall {
                         name: tc.name.clone(),
                         input: tc.input.clone(),
                     }).await;
                     let desc = tool_short_desc(&tc.name, &tc.input);
-                    self.task_steps.push(TaskStep::tool_pending(&tc.name, desc));
+                    self.task_steps.push(TaskStep::tool_pending(&tc.name, desc, *group));
                 }
                 let _ = ui_tx.send(UiUpdate::TaskUpdate(self.task_steps.clone())).await;
 
@@ -706,8 +709,40 @@ impl Engine {
         ui_tx: &mpsc::Sender<UiUpdate>,
         action_rx: &mut mpsc::Receiver<Action>,
     ) -> Vec<executor::ToolResult> {
-        let mut results = Vec::new();
-        for call in calls {
+        let mut results = Vec::with_capacity(calls.len());
+        let mut i = 0;
+        while i < calls.len() {
+            if is_parallel_safe(&calls[i].name) {
+                let start = i;
+                while i < calls.len() && is_parallel_safe(&calls[i].name) { i += 1; }
+                let batch = &calls[start..i];
+
+                // Spawn every non-denied call in the batch *before* awaiting any of
+                // them — spawn_blocking starts running on the blocking pool as soon
+                // as it's called, so this is what actually makes them run
+                // concurrently rather than one-at-a-time.
+                let handles: Vec<Option<tokio::task::JoinHandle<executor::ToolResult>>> = batch.iter()
+                    .map(|c| (!denied.contains(&c.id)).then(|| self.spawn_tool(c)))
+                    .collect();
+
+                for h in handles {
+                    results.push(match h {
+                        None => executor::ToolResult {
+                            output: "Command denied by user.".to_string(),
+                            is_error: true,
+                        },
+                        Some(handle) => handle.await.unwrap_or_else(|e| executor::ToolResult {
+                            output: e.to_string(),
+                            is_error: true,
+                        }),
+                    });
+                }
+                continue;
+            }
+
+            let call = &calls[i];
+            i += 1;
+
             if denied.contains(&call.id) {
                 results.push(executor::ToolResult {
                     output: "Command denied by user.".to_string(),
@@ -746,53 +781,59 @@ impl Engine {
                 continue;
             }
 
-            let name = call.name.clone();
-            let input = call.input.clone();
-            let work_dir = self.work_dir.clone();
-            let allowed = self.allowed_commands.clone();
-            let marlin_dir = self.marlin_dir.clone();
-            let wd2 = work_dir.clone();
-            let logs_dir = marlin_dir.join("logs");
-            let sandbox = self.cfg.sandbox_mode.allows_all() || self.cfg.skip_permissions;
-            let clean_env = self.cfg.clean_env;
-            let ast_mode = self.ast_mode.clone();
-            let sandbox_mode = self.cfg.sandbox_mode.clone();
-
-            let idx_clone = self.code_index.clone();
-            let ext_tools = self.external_tools.clone();
-
-            let result = tokio::task::spawn_blocking(move || {
-                let search_fn: Option<Box<executor::SearchFn<'_>>> =
-                    idx_clone.map(|idx| {
-                        let f: Box<executor::SearchFn<'_>> = Box::new(move |q: &str, lim: usize| {
-                            let results = index::search(&idx, q, lim);
-                            index::format_results(&results, q)
-                        });
-                        f
-                    });
-                executor::execute(
-                    &name,
-                    &input,
-                    &work_dir,
-                    &|cmd| sandbox || policy::is_command_allowed(cmd, &allowed),
-                    search_fn.as_deref(),
-                    Some(&|abs_path: &str, tool: &str| {
-                        snapshots::take(&marlin_dir, &wd2, abs_path, tool);
-                    }),
-                    Some(&logs_dir),
-                    clean_env,
-                    ast_mode,
-                    &sandbox_mode,
-                    &ext_tools,
-                )
-            }).await.unwrap_or_else(|e| executor::ToolResult {
+            let result = self.spawn_tool(call).await.unwrap_or_else(|e| executor::ToolResult {
                 output: e.to_string(),
                 is_error: true,
             });
-
             results.push(result);
         }
         results
+    }
+
+    /// Build (but don't await) the blocking-pool task that actually runs one
+    /// tool call. Split out of `execute_tools` so a parallel-safe batch can
+    /// spawn several of these before awaiting any of them.
+    fn spawn_tool(&self, call: &ToolCall) -> tokio::task::JoinHandle<executor::ToolResult> {
+        let name = call.name.clone();
+        let input = call.input.clone();
+        let work_dir = self.work_dir.clone();
+        let allowed = self.allowed_commands.clone();
+        let marlin_dir = self.marlin_dir.clone();
+        let wd2 = work_dir.clone();
+        let logs_dir = marlin_dir.join("logs");
+        let sandbox = self.cfg.sandbox_mode.allows_all() || self.cfg.skip_permissions;
+        let clean_env = self.cfg.clean_env;
+        let ast_mode = self.ast_mode.clone();
+        let sandbox_mode = self.cfg.sandbox_mode.clone();
+
+        let idx_clone = self.code_index.clone();
+        let ext_tools = self.external_tools.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let search_fn: Option<Box<executor::SearchFn<'_>>> =
+                idx_clone.map(|idx| {
+                    let f: Box<executor::SearchFn<'_>> = Box::new(move |q: &str, lim: usize| {
+                        let results = index::search(&idx, q, lim);
+                        index::format_results(&results, q)
+                    });
+                    f
+                });
+            executor::execute(
+                &name,
+                &input,
+                &work_dir,
+                &|cmd| sandbox || policy::is_command_allowed(cmd, &allowed),
+                search_fn.as_deref(),
+                Some(&|abs_path: &str, tool: &str| {
+                    snapshots::take(&marlin_dir, &wd2, abs_path, tool);
+                }),
+                Some(&logs_dir),
+                clean_env,
+                ast_mode,
+                &sandbox_mode,
+                &ext_tools,
+            )
+        })
     }
 
     /// Run every one of a skill's resolved chunk commands, in order, through the
@@ -2676,6 +2717,37 @@ fn compact_serialize(messages: &[Message]) -> String {
     out
 }
 
+/// Tools with no side effects and no ordering dependency on each other or on
+/// prior tool calls in the same turn — safe to run concurrently when the
+/// model requests several in one turn. Everything else (writes, commands,
+/// skills, AST mutation, external tools) stays strictly sequential.
+fn is_parallel_safe(name: &str) -> bool {
+    matches!(name, "read_file" | "list_directory" | "search_codebase" | "ast_skeleton" | "ast_get_node")
+}
+
+/// Assigns a shared group id (the run's starting index) to every call in a
+/// run of 2+ consecutive parallel-safe calls, for the sidebar's grouped
+/// display; solo calls (parallel-safe or not) get `None`. Name-based only —
+/// doesn't know about `denied`, so it's an approximation of the batching
+/// `execute_tools` actually performs (which also excludes denied calls from
+/// concurrent execution), good enough for a cosmetic "these ran together" hint.
+fn parallel_group_ids(calls: &[ToolCall]) -> Vec<Option<usize>> {
+    let mut ids = vec![None; calls.len()];
+    let mut i = 0;
+    while i < calls.len() {
+        if is_parallel_safe(&calls[i].name) {
+            let start = i;
+            while i < calls.len() && is_parallel_safe(&calls[i].name) { i += 1; }
+            if i - start > 1 {
+                for id in ids[start..i].iter_mut() { *id = Some(start); }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    ids
+}
+
 fn tool_short_desc(name: &str, input_json: &str) -> String {
     let v = serde_json::from_str::<serde_json::Value>(input_json).unwrap_or_default();
     match name {
@@ -2762,4 +2834,58 @@ fn help_text() -> String {
         s.push_str(&format!("  {}{}{}\n", cmd, " ".repeat(pad.max(1)), desc));
     }
     s
+}
+
+#[cfg(test)]
+mod parallel_batching_tests {
+    use super::*;
+
+    fn call(name: &str) -> ToolCall {
+        ToolCall { id: format!("id-{name}-{}", name.len()), name: name.to_string(), input: "{}".into() }
+    }
+
+    #[test]
+    fn is_parallel_safe_covers_only_read_only_tools() {
+        assert!(is_parallel_safe("read_file"));
+        assert!(is_parallel_safe("list_directory"));
+        assert!(is_parallel_safe("search_codebase"));
+        assert!(is_parallel_safe("ast_skeleton"));
+        assert!(is_parallel_safe("ast_get_node"));
+
+        assert!(!is_parallel_safe("write_file"));
+        assert!(!is_parallel_safe("edit_file"));
+        assert!(!is_parallel_safe("run_command"));
+        assert!(!is_parallel_safe("create_directory"));
+        assert!(!is_parallel_safe("ast_mutate"));
+        assert!(!is_parallel_safe("run_skill"));
+    }
+
+    #[test]
+    fn consecutive_safe_calls_share_a_group() {
+        let calls = vec![call("read_file"), call("list_directory"), call("search_codebase")];
+        let groups = parallel_group_ids(&calls);
+        assert_eq!(groups, vec![Some(0), Some(0), Some(0)]);
+    }
+
+    #[test]
+    fn solo_safe_call_gets_no_group() {
+        let calls = vec![call("write_file"), call("read_file"), call("run_command")];
+        let groups = parallel_group_ids(&calls);
+        assert_eq!(groups, vec![None, None, None]);
+    }
+
+    #[test]
+    fn mixed_batch_only_groups_the_consecutive_safe_run() {
+        // write, [read, list], run_command, [search, ast_skeleton]
+        let calls = vec![
+            call("write_file"),
+            call("read_file"),
+            call("list_directory"),
+            call("run_command"),
+            call("search_codebase"),
+            call("ast_skeleton"),
+        ];
+        let groups = parallel_group_ids(&calls);
+        assert_eq!(groups, vec![None, Some(1), Some(1), None, Some(4), Some(4)]);
+    }
 }
