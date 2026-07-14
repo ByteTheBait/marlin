@@ -13,6 +13,27 @@ MARLIN_REPO="https://github.com/Pkill-MyDaemons/marlin"
 AST_REPO="https://github.com/pkill-mydaemons/ast-compiler"
 MXC_REPO="https://github.com/microsoft/mxc"
 
+SKIP_AST=false
+SKIP_MXC=false
+for arg in "$@"; do
+    case "$arg" in
+        --no-install-ast) SKIP_AST=true ;;
+        --no-install-mxc) SKIP_MXC=true ;;
+        -h|--help)
+            cat <<EOF
+Usage: install.sh [options]
+
+Options:
+  --no-install-ast   Skip cloning/installing ast-compiler (disables AST mode)
+  --no-install-mxc   Skip cloning/building mxc (disables /sandbox mxc)
+  -h, --help         Show this help
+EOF
+            exit 0
+            ;;
+        *) die "Unknown option: $arg (see --help)" ;;
+    esac
+done
+
 WORK_DIR="$(mktemp -d)"
 trap 'info "Cleaning up source..."; rm -rf "$WORK_DIR"' EXIT
 
@@ -76,7 +97,11 @@ install_ast_compiler() {
     fi
 }
 
-install_ast_compiler
+if [ "$SKIP_AST" = true ]; then
+    info "Skipping ast-compiler (--no-install-ast)."
+else
+    install_ast_compiler
+fi
 
 # ── mxc (optional sandboxing) ─────────────────────────────────────────────────
 install_mxc() {
@@ -138,7 +163,11 @@ install_mxc() {
     success "mxc installed → $BIN_DIR/$dest_name"
 }
 
-install_mxc
+if [ "$SKIP_MXC" = true ]; then
+    info "Skipping mxc (--no-install-mxc)."
+else
+    install_mxc
+fi
 
 # ── clean up Rust if we installed it ─────────────────────────────────────────
 if [ "$INSTALLED_RUST" = true ]; then

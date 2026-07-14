@@ -127,6 +127,11 @@ pub struct ProviderConfig {
     pub endpoint: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
+    /// Custom model designations previously used with this provider (most
+    /// recent first), so switching away and back doesn't require re-typing
+    /// e.g. "qwen/qwen3.5-35b" on groq. Capped at 12 entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,6 +257,16 @@ impl Config {
         entry.endpoint = endpoint.to_string();
     }
 
+    /// Record a model designation as used with `provider` so it resurfaces in
+    /// the /config menu's model list after switching away and back.
+    pub fn remember_model(&mut self, provider: &str, model: &str) {
+        if model.is_empty() { return; }
+        let entry = self.providers.entry(provider.to_string()).or_default();
+        entry.extra_models.retain(|m| m != model);
+        entry.extra_models.insert(0, model.to_string());
+        entry.extra_models.truncate(12);
+    }
+
     pub fn defaults() -> Self {
         let wd = std::env::current_dir()
             .unwrap_or_default()
@@ -263,36 +278,43 @@ impl Config {
             api_key: String::new(),
             endpoint: String::new(),
             model: "claude-sonnet-5".into(),
+            extra_models: vec![],
         });
         providers.insert("ollama".into(), ProviderConfig {
             api_key: String::new(),
             endpoint: "http://localhost:11434".into(),
             model: "llama3".into(),
+            extra_models: vec![],
         });
         providers.insert("fireworks".into(), ProviderConfig {
             api_key: String::new(),
             endpoint: "https://api.fireworks.ai/inference/v1".into(),
             model: "accounts/fireworks/models/llama-v3-70b-instruct".into(),
+            extra_models: vec![],
         });
         providers.insert("moonshot".into(), ProviderConfig {
             api_key: String::new(),
             endpoint: "https://api.moonshot.cn/v1".into(),
             model: "moonshot-v1-8k".into(),
+            extra_models: vec![],
         });
         providers.insert("groq".into(), ProviderConfig {
             api_key: String::new(),
             endpoint: "https://api.groq.com/openai/v1".into(),
             model: "llama-3.3-70b-versatile".into(),
+            extra_models: vec![],
         });
         providers.insert("openrouter".into(), ProviderConfig {
             api_key: String::new(),
             endpoint: "https://openrouter.ai/api/v1".into(),
             model: "anthropic/claude-sonnet-5".into(),
+            extra_models: vec![],
         });
         providers.insert("custom".into(), ProviderConfig {
             api_key: String::new(),
             endpoint: "http://localhost:8080/v1".into(),
             model: "default".into(),
+            extra_models: vec![],
         });
 
         Self {

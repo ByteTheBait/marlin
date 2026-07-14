@@ -82,6 +82,9 @@ pub struct StatusInfo {
 pub struct ConfigState {
     pub provider: String,
     pub providers: Vec<String>,
+    /// Raw API key for `provider` — always kept in sync so the /config menu's
+    /// API key field tracks whichever provider is currently selected.
+    pub api_key: String,
     pub model: String,
     pub models: Vec<String>,
     pub theme: String,
@@ -1403,6 +1406,7 @@ impl Engine {
                 if let Some(pcfg) = self.cfg.providers.get_mut(&self.cfg.active_provider) {
                     pcfg.model = model.clone();
                 }
+                self.cfg.remember_model(&self.cfg.active_provider.clone(), &model);
                 save_cfg!();
                 sys!(format!("Model set to: {model}"));
                 let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
@@ -2342,13 +2346,36 @@ impl Engine {
         None
     }
 
+    /// Raw API key for the active provider — checks built-in/cfg-backed
+    /// storage first, then falls back to a user-defined provider's toml.
+    fn provider_api_key(&self) -> String {
+        if let Some(pc) = self.cfg.providers.get(&self.cfg.active_provider) {
+            if !pc.api_key.is_empty() {
+                return pc.api_key.clone();
+            }
+        }
+        crate::providers::user_providers::load_all(&self.marlin_dir)
+            .into_iter()
+            .find(|p| p.name.eq_ignore_ascii_case(&self.cfg.active_provider))
+            .map(|p| p.api_key)
+            .unwrap_or_default()
+    }
+
     fn config_state(&self) -> ConfigState {
-        let models = self.registry.get(&self.cfg.active_provider)
+        let mut models = self.registry.get(&self.cfg.active_provider)
             .map(|p| p.models())
             .unwrap_or_default();
+        if let Some(pc) = self.cfg.providers.get(&self.cfg.active_provider) {
+            for m in &pc.extra_models {
+                if !models.contains(m) {
+                    models.push(m.clone());
+                }
+            }
+        }
         ConfigState {
             provider: self.cfg.active_provider.clone(),
             providers: self.registry.names(),
+            api_key: self.provider_api_key(),
             model: self.cfg.active_model.clone(),
             models,
             theme: self.cfg.theme.clone(),
@@ -2387,11 +2414,26 @@ impl Engine {
                 if let Some(pcfg) = self.cfg.providers.get_mut(&self.cfg.active_provider) {
                     pcfg.model = value.to_string();
                 }
+                self.cfg.remember_model(&self.cfg.active_provider.clone(), value);
                 let _ = self.cfg.save();
                 let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
                     provider: self.cfg.active_provider.clone(),
                     model: value.to_string(),
                 })).await;
+            }
+            "api_key" => {
+                let provider = self.cfg.active_provider.clone();
+                match crate::providers::user_providers::set_api_key(&self.marlin_dir, &provider, value) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        self.cfg.set_key(&provider, value);
+                        let _ = self.cfg.save();
+                    }
+                    Err(e) => {
+                        let _ = ui_tx.send(UiUpdate::ErrorMsg(format!("Failed to save API key: {e}"))).await;
+                    }
+                }
+                self.registry = Registry::new(&self.cfg, Some(&self.marlin_dir));
             }
             "theme" => {
                 if value == "dark" || value == "light" {

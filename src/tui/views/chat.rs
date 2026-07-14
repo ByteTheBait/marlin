@@ -246,7 +246,7 @@ impl ChatView {
                 if let Some(menu) = &mut self.config_menu {
                     menu.sync(state);
                 } else if open {
-                    self.config_menu = Some(ConfigMenu::new(state));
+                    self.config_menu = Some(ConfigMenu::new(state, self.typewriter_enabled));
                 }
             }
             UiUpdate::SkillsLoaded(defs) => {
@@ -330,6 +330,12 @@ impl ChatView {
                     self.config_menu = None;
                 }
                 ConfigMenuOutcome::Set { key, value } => {
+                    if key == "animate" {
+                        // TUI-local toggle — no engine round-trip needed.
+                        self.typewriter_enabled = value == "on";
+                        self.typewriter_pos = 0;
+                        return None;
+                    }
                     return Some(Action::ConfigSet { key: key.to_string(), value });
                 }
                 ConfigMenuOutcome::None => {}
