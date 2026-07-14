@@ -271,7 +271,7 @@ impl ChatView {
             }
             // TaskUpdate, TokenUsage, AstMode, PromptBudget, and Subagent* are
             // consumed by the runner/sidebar.
-            UiUpdate::TaskUpdate(_) | UiUpdate::TokenUsage { .. } | UiUpdate::AstMode(_)
+            UiUpdate::TaskUpdate(_) | UiUpdate::PlanUpdate(_) | UiUpdate::TokenUsage { .. } | UiUpdate::AstMode(_)
                 | UiUpdate::PromptBudget(_) | UiUpdate::SubagentStarted { .. }
                 | UiUpdate::SubagentToolCall { .. } | UiUpdate::SubagentFinished { .. } => {}
             UiUpdate::IndexBuilt => {}

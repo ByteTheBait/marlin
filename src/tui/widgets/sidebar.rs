@@ -36,6 +36,9 @@ pub struct Sidebar {
     pub token_budget: usize,
     pub token_history: Vec<usize>,
     pub tasks: Vec<TaskStep>,
+    /// Upfront plan (see `Engine::maybe_generate_plan`) — rendered above `tasks`
+    /// when non-empty; a coarse ordered checklist, not a replacement for it.
+    pub plan: Vec<TaskStep>,
     pub subagents: Vec<SubagentEntry>,
 }
 
@@ -46,6 +49,7 @@ impl Sidebar {
             token_budget: 100_000,
             token_history: Vec::new(),
             tasks: vec![],
+            plan: vec![],
             subagents: vec![],
         }
     }
@@ -183,6 +187,55 @@ impl Widget for Sidebar {
             let span = Span::styled(div, style_separator());
             buf.set_span(inner.x, y, &span, inner.width);
             y += 1;
+        }
+
+        // ── Plan section (upfront checklist, only shown once one exists) ────
+        if !self.plan.is_empty() {
+            if y < inner.bottom() {
+                let span = Span::styled("Plan", style_system().add_modifier(Modifier::BOLD));
+                buf.set_span(inner.x, y, &span, inner.width);
+                y += 1;
+            }
+
+            let available_rows = inner.bottom().saturating_sub(y) as usize;
+            let visible = self.plan.len().min(available_rows);
+
+            for step in self.plan[..visible].iter() {
+                if y >= inner.bottom() { break; }
+
+                let (marker, marker_style) = match step.status {
+                    TaskStatus::Completed  => ("x", style_success()),
+                    TaskStatus::Failed     => ("!", style_error()),
+                    TaskStatus::InProgress => (">", style_prompt_active()),
+                    TaskStatus::Pending    => (" ", style_system()),
+                };
+
+                let max_desc = inner.width.saturating_sub(4) as usize;
+                let desc = if step.description.chars().count() > max_desc {
+                    step.description.chars().take(max_desc.saturating_sub(1)).collect::<String>() + "…"
+                } else {
+                    step.description.clone()
+                };
+
+                let line = Line::from(vec![
+                    Span::styled("[", style_separator()),
+                    Span::styled(marker, marker_style),
+                    Span::styled("] ", style_separator()),
+                    Span::styled(desc, style_inline_text()),
+                ]);
+                Paragraph::new(line).render(
+                    Rect { x: inner.x, y, width: inner.width, height: 1 },
+                    buf,
+                );
+                y += 1;
+            }
+
+            if y < inner.bottom() {
+                let div: String = "─".repeat(inner.width as usize);
+                let span = Span::styled(div, style_separator());
+                buf.set_span(inner.x, y, &span, inner.width);
+                y += 1;
+            }
         }
 
         // ── Task list section ──────────────────────────────────────────────

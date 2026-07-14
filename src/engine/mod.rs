@@ -45,6 +45,9 @@ pub enum UiUpdate {
     AwaitingApproval { cmd: String },
     /// Updated task list for the sidebar
     TaskUpdate(Vec<TaskStep>),
+    /// Upfront plan for the sidebar — coarse ordered checklist, separate from
+    /// the granular `TaskUpdate` log.
+    PlanUpdate(Vec<TaskStep>),
     /// Token budget update for the sidebar meter
     TokenUsage { used: usize, budget: usize },
     /// Base prompt injection (system prompt + tool defs) budget check — informational,
@@ -134,6 +137,12 @@ pub struct Engine {
 
     /// Live task list for the sidebar
     task_steps: Vec<TaskStep>,
+    /// Upfront plan generated before the tool loop starts (see `maybe_generate_plan`).
+    /// Separate from `task_steps`: this is a coarse, ordered checklist shown above
+    /// the granular tool-call log, not a replacement for it.
+    plan_steps: Vec<TaskStep>,
+    /// Index of the next `plan_steps` entry to resolve as tool-call batches complete.
+    plan_cursor: usize,
     /// Approximate token budget ceiling (from config or 100k default)
     token_budget: usize,
     /// AST-driven context mode
@@ -211,6 +220,8 @@ impl Engine {
             loop_guard: LoopGuard::new(),
             cancel_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             task_steps: vec![],
+            plan_steps: vec![],
+            plan_cursor: 0,
             token_budget: 100_000,
             ast_mode,
             skills: loaded_skills,
@@ -315,11 +326,15 @@ impl Engine {
                     self.active_goal = text.clone();
                     self.tool_iterations = 0;
                     self.task_steps.clear();
+                    self.plan_steps.clear();
+                    self.plan_cursor = 0;
+                    let _ = ui_tx.send(UiUpdate::PlanUpdate(vec![])).await;
                     self.loop_guard.reset();
                     self.cancel_flag.store(false, std::sync::atomic::Ordering::SeqCst);
 
                     // Select model tier based on difficulty score (if tiers enabled).
                     self.rate_and_route(&text, &ui_tx).await;
+                    self.maybe_generate_plan(&text, &ui_tx).await;
 
                     // Broadcast token count immediately so the sidebar isn't stale while waiting.
                     // Prefer exact count from provider API; fall back to heuristic.
@@ -366,9 +381,13 @@ impl Engine {
                         self.active_goal = prompt.clone();
                         self.tool_iterations = 0;
                         self.task_steps.clear();
+                        self.plan_steps.clear();
+                        self.plan_cursor = 0;
+                        let _ = ui_tx.send(UiUpdate::PlanUpdate(vec![])).await;
                         self.loop_guard.reset();
                         self.cancel_flag.store(false, std::sync::atomic::Ordering::SeqCst);
                         self.rate_and_route(&prompt, &ui_tx).await;
+                        self.maybe_generate_plan(&prompt, &ui_tx).await;
                         self.agentic_loop(&ui_tx, &mut action_rx).await;
                     }
                 }
@@ -619,6 +638,17 @@ impl Engine {
 
                 let _ = ui_tx.send(UiUpdate::TaskUpdate(self.task_steps.clone())).await;
 
+                // Advance the upfront plan by one step per tool-call batch — a rough
+                // approximation of "one plan step per loop iteration" rather than
+                // trying to match individual tool calls to plan text.
+                if self.plan_cursor < self.plan_steps.len() {
+                    let batch_failed = results.iter().any(|r| r.is_error);
+                    self.plan_steps[self.plan_cursor].status =
+                        if batch_failed { TaskStatus::Failed } else { TaskStatus::Completed };
+                    self.plan_cursor += 1;
+                    let _ = ui_tx.send(UiUpdate::PlanUpdate(self.plan_steps.clone())).await;
+                }
+
                 // Write-Test-Fix: run verify_command after any file edit
                 let had_file_edit = tool_calls.iter().zip(results.iter())
                     .any(|(tc, r)| (tc.name == "edit_file" || tc.name == "write_file") && !r.is_error);
@@ -652,6 +682,16 @@ impl Engine {
                 self.tool_iterations = 0;
                 self.active_goal.clear();
                 self.save_session();
+
+                // Any plan steps left un-resolved (model finished early, or the
+                // plan overestimated how many turns the task needed) are done.
+                if self.plan_cursor < self.plan_steps.len() {
+                    for step in &mut self.plan_steps[self.plan_cursor..] {
+                        step.status = TaskStatus::Completed;
+                    }
+                    self.plan_cursor = self.plan_steps.len();
+                    let _ = ui_tx.send(UiUpdate::PlanUpdate(self.plan_steps.clone())).await;
+                }
 
                 let _ = ui_tx.send(UiUpdate::GoalComplete { tool_count }).await;
                 break;
@@ -1202,6 +1242,59 @@ impl Engine {
             }
         }
         text.trim().parse::<u8>().unwrap_or(50).clamp(1, 100)
+    }
+
+    /// Ask the already-routed model (see `rate_and_route`) for a short upfront
+    /// plan before the tool loop starts, so the sidebar can show intended steps
+    /// rather than only a retrospective log. Best-effort: any failure to reach
+    /// the provider or parse a usable plan just leaves `plan_steps` empty —
+    /// the granular `task_steps` log works exactly as before regardless.
+    async fn maybe_generate_plan(&mut self, message: &str, ui_tx: &mpsc::Sender<UiUpdate>) {
+        self.plan_steps.clear();
+        self.plan_cursor = 0;
+
+        let Ok(provider) = self.registry.get(&self.req_provider) else { return };
+        let req = StreamRequest {
+            model: self.req_model.clone(),
+            messages: vec![Message {
+                role: "user".into(),
+                content: format!(
+                    "Break the following coding task into 2-6 short, concrete, ordered \
+                    steps (imperative mood, under 8 words each). Reply with ONLY the \
+                    steps, one per line, no numbering or bullets, no other text. If the \
+                    task genuinely needs just one step, reply with one line.\n\nTask: {message}"
+                ),
+                tool_calls: vec![],
+                tool_use_id: String::new(),
+                tool_call_id: String::new(),
+                is_error: false,
+            }],
+            system_prompt: String::new(),
+            max_tokens: 200,
+            tools: vec![],
+        };
+
+        let mut text = String::new();
+        if let Ok(mut stream) = provider.stream(req).await {
+            while let Some(chunk) = stream.recv().await {
+                text.push_str(&chunk.content);
+                if chunk.done { break; }
+            }
+        }
+
+        let steps: Vec<TaskStep> = text
+            .lines()
+            .map(|l| l.trim().trim_start_matches(['-', '*', '•']).trim())
+            .map(|l| l.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ')').trim())
+            .filter(|l| !l.is_empty())
+            .take(8)
+            .map(TaskStep::planned)
+            .collect();
+
+        if !steps.is_empty() {
+            self.plan_steps = steps;
+            let _ = ui_tx.send(UiUpdate::PlanUpdate(self.plan_steps.clone())).await;
+        }
     }
 
     // ── Nightly daemon ────────────────────────────────────────────────────────

@@ -75,6 +75,9 @@ pub fn run(
                         UiUpdate::TaskUpdate(steps) => {
                             sidebar.tasks = steps.clone();
                         }
+                        UiUpdate::PlanUpdate(steps) => {
+                            sidebar.plan = steps.clone();
+                        }
                         UiUpdate::TokenUsage { used, budget } => {
                             sidebar.token_used = *used;
                             sidebar.token_budget = *budget;
@@ -121,6 +124,7 @@ pub fn run(
             token_budget: sidebar.token_budget,
             token_history: sidebar.token_history.clone(),
             tasks: sidebar.tasks.clone(),
+            plan: sidebar.plan.clone(),
             subagents: sidebar.subagents.clone(),
         };
         let approval_cmd = chat.approval_pending.clone();

@@ -21,6 +21,12 @@ impl TaskStep {
         Self { description: desc.into(), status: TaskStatus::InProgress, tool_name: None }
     }
 
+    /// Upfront plan step, shown Pending in the sidebar until the matching
+    /// batch of tool calls completes (see `Engine::maybe_generate_plan`).
+    pub fn planned(desc: impl Into<String>) -> Self {
+        Self { description: desc.into(), status: TaskStatus::Pending, tool_name: None }
+    }
+
     pub fn tool_pending(name: &str, desc: impl Into<String>) -> Self {
         Self {
             description: desc.into(),
