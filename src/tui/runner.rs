@@ -178,6 +178,11 @@ pub fn run(
                         menu.render(chat_area, buf);
                     }
 
+                    // /view, /open file pane — rendered on top of chat
+                    if let Some(viewer) = &mut chat.viewer {
+                        viewer.render(chat_area, buf);
+                    }
+
                     // Approval modal — rendered on top of chat
                     if let Some(cmd) = &approval_cmd {
                         render_approval_modal(cmd, chat_area, buf);

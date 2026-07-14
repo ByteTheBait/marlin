@@ -48,6 +48,9 @@ pub enum UiUpdate {
     /// Upfront plan for the sidebar — coarse ordered checklist, separate from
     /// the granular `TaskUpdate` log.
     PlanUpdate(Vec<TaskStep>),
+    /// Opens the /view or /open read-only file pane with `Ok((resolved_path,
+    /// content))`, or reports why it couldn't (missing file, read error) as `Err`.
+    OpenViewer(Result<(String, String), String>),
     /// Token budget update for the sidebar meter
     TokenUsage { used: usize, budget: usize },
     /// Base prompt injection (system prompt + tool defs) budget check — informational,
@@ -2140,6 +2143,17 @@ impl Engine {
                 }
             }
 
+            // /open is an alias for /view — both just open the read-only file
+            // pane; there's no separate file-browser behind /open (yet).
+            "/view" | "/open" => {
+                if args.is_empty() { sys!(format!("Usage: {cmd} <file>")); return None; }
+                let path = self.resolve_path(args[0]);
+                let result = std::fs::read_to_string(&path)
+                    .map(|content| (path, content))
+                    .map_err(|e| e.to_string());
+                let _ = ui_tx.send(UiUpdate::OpenViewer(result)).await;
+            }
+
             "/ls" => {
                 let dir = if args.is_empty() {
                     self.work_dir.clone()
@@ -2814,6 +2828,8 @@ fn help_text() -> String {
         ("/resume", "resume the most recent saved session"),
         ("/history [n|clear]", "list saved sessions, load one by number, or clear all"),
         ("/cat <file>", "print file contents"),
+        ("/view <file>", "open a scrollable read-only pane for a file"),
+        ("/open <file>", "alias for /view"),
         ("/ls [dir]", "list directory"),
         ("/cd <dir>", "change working directory"),
         ("/pwd", "show working directory"),

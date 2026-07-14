@@ -18,6 +18,7 @@ use crate::tui::{
     styles::*,
     widgets::config_menu::{ConfigMenu, ConfigMenuOutcome},
     widgets::suggestions::{CmdDef, SuggestionPanel, all_commands, filter_suggestions, tab_complete},
+    widgets::viewer::{ViewerOutcome, ViewerPane},
 };
 
 // ── Chat entry ───────────────────────────────────────────────────────────────
@@ -82,6 +83,9 @@ pub struct ChatView {
     // /config settings menu overlay
     pub config_menu: Option<ConfigMenu>,
 
+    // /view, /open read-only file preview overlay
+    pub viewer: Option<ViewerPane>,
+
     // Scroll
     pub scroll_state: ScrollViewState,
     pub content_height: u16,
@@ -135,6 +139,7 @@ impl ChatView {
             rate_limit_total: 0,
             approval_pending: None,
             config_menu: None,
+            viewer: None,
             scroll_state: ScrollViewState::default(),
             content_height: 0,
             viewport_height: 1,
@@ -249,6 +254,12 @@ impl ChatView {
                     self.config_menu = Some(ConfigMenu::new(state, self.typewriter_enabled));
                 }
             }
+            UiUpdate::OpenViewer(Ok((path, content))) => {
+                self.viewer = Some(ViewerPane::new(path, content));
+            }
+            UiUpdate::OpenViewer(Err(msg)) => {
+                self.add_error(&msg);
+            }
             UiUpdate::SkillsLoaded(defs) => {
                 self.skills = defs;
             }
@@ -339,6 +350,14 @@ impl ChatView {
                     return Some(Action::ConfigSet { key: key.to_string(), value });
                 }
                 ConfigMenuOutcome::None => {}
+            }
+            return None;
+        }
+
+        // Viewer pane intercepts all input while open
+        if let Some(viewer) = &mut self.viewer {
+            if let ViewerOutcome::Close = viewer.on_key(key) {
+                self.viewer = None;
             }
             return None;
         }
