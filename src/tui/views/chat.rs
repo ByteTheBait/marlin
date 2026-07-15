@@ -79,6 +79,11 @@ pub struct ChatView {
     pub rate_limit_secs: u32,
     pub rate_limit_total: u32,
 
+    /// Set after a Ctrl+C/Esc that had nothing to cancel (model idle) — a
+    /// second consecutive one quits, like Ctrl+Q. Any other key disarms it,
+    /// so it only fires on two presses in a row.
+    quit_armed: bool,
+
     // Approval modal
     pub approval_pending: Option<String>,
 
@@ -145,6 +150,7 @@ impl ChatView {
             rate_limited: false,
             rate_limit_secs: 0,
             rate_limit_total: 0,
+            quit_armed: false,
             approval_pending: None,
             config_menu: None,
             viewer: None,
@@ -424,8 +430,13 @@ impl ChatView {
             return None;
         }
 
-        // Ctrl+C
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        // Ctrl+C / Esc — cancel a running stream. Pressed again with nothing
+        // running, it quits (same as Ctrl+Q) instead of doing nothing; any
+        // other key disarms that "press again to quit" state so it only
+        // fires on two presses in a row, not two presses minutes apart.
+        let is_cancel_key = key.code == KeyCode::Esc
+            || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL));
+        if is_cancel_key {
             if self.rate_limited || self.streaming {
                 self.rate_limited = false;
                 self.streaming = false;
@@ -433,11 +444,18 @@ impl ChatView {
                 self.typewriter_pos = 0;
                 self.active_goal.clear();
                 self.tool_iterations = 0;
+                self.quit_armed = false;
                 self.add_system("Cancelled.");
                 return Some(Action::CancelStream);
             }
+            if self.quit_armed {
+                return Some(Action::Quit);
+            }
+            self.quit_armed = true;
+            self.add_system("Nothing to cancel — press Ctrl+C or Esc again to quit.");
             return None;
         }
+        self.quit_armed = false;
 
         // Tab autocomplete
         if key.code == KeyCode::Tab {
@@ -1270,5 +1288,59 @@ fn tool_display_name(raw: &str) -> &'static str {
         "ast_get_node"     => "Node",
         "ast_mutate"       => "Mutate",
         _                  => "Tool",
+    }
+}
+
+#[cfg(test)]
+mod cancel_quit_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl_c() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn esc_twice_with_nothing_running_quits() {
+        let mut chat = ChatView::new(80, 24);
+        assert!(chat.on_key(key(KeyCode::Esc)).is_none());
+        assert!(matches!(chat.on_key(key(KeyCode::Esc)), Some(Action::Quit)));
+    }
+
+    #[test]
+    fn ctrl_c_twice_with_nothing_running_quits() {
+        let mut chat = ChatView::new(80, 24);
+        assert!(chat.on_key(ctrl_c()).is_none());
+        assert!(matches!(chat.on_key(ctrl_c()), Some(Action::Quit)));
+    }
+
+    #[test]
+    fn mixing_esc_and_ctrl_c_still_counts_as_two_in_a_row() {
+        let mut chat = ChatView::new(80, 24);
+        assert!(chat.on_key(ctrl_c()).is_none());
+        assert!(matches!(chat.on_key(key(KeyCode::Esc)), Some(Action::Quit)));
+    }
+
+    #[test]
+    fn an_unrelated_key_in_between_disarms_quit() {
+        let mut chat = ChatView::new(80, 24);
+        assert!(chat.on_key(ctrl_c()).is_none());
+        chat.on_key(key(KeyCode::Char('a')));
+        // Second Ctrl+C now only re-arms — it should NOT quit immediately.
+        assert!(chat.on_key(ctrl_c()).is_none());
+    }
+
+    #[test]
+    fn cancel_while_streaming_cancels_instead_of_arming_quit() {
+        let mut chat = ChatView::new(80, 24);
+        chat.streaming = true;
+        assert!(matches!(chat.on_key(ctrl_c()), Some(Action::CancelStream)));
+        // Streaming is now off; a second Ctrl+C should just arm quit, not fire it.
+        assert!(chat.on_key(ctrl_c()).is_none());
+        assert!(matches!(chat.on_key(ctrl_c()), Some(Action::Quit)));
     }
 }
