@@ -2,7 +2,7 @@ use std::io;
 use std::time::Duration;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind},
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -36,7 +36,9 @@ pub fn run(
 ) -> io::Result<()> {
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    // Without this, a scroll wheel event never reaches the app at all — the
+    // terminal emulator just scrolls its own native scrollback buffer instead.
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -232,13 +234,28 @@ pub fn run(
                     status_bar.width = w;
                     chat.resize(w, h.saturating_sub(1));
                 }
+                Event::Mouse(mouse) => {
+                    if let View::Splash(_) = &view {
+                        continue;
+                    }
+                    let scrolled = match mouse.kind {
+                        MouseEventKind::ScrollUp => Some(true),
+                        MouseEventKind::ScrollDown => Some(false),
+                        _ => None,
+                    };
+                    if let Some(up) = scrolled {
+                        if let Some(action) = chat.on_mouse_scroll(up) {
+                            let _ = action_tx.blocking_send(action);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
     }
 
     terminal::disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     Ok(())
 }
 

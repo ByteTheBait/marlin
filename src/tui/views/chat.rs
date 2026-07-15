@@ -350,6 +350,47 @@ impl ChatView {
         // Calling this just keeps the at_bottom flag set; the position is applied at render time.
     }
 
+    /// Shared by the ↑/↓ viewport-scroll fallback (see `on_key`) and mouse
+    /// wheel scrolling — `steps` units in one direction, updating `at_bottom`
+    /// the same way either input source needs it to.
+    fn scroll_viewport(&mut self, up: bool, steps: u16) {
+        if up {
+            self.at_bottom = false;
+            for _ in 0..steps {
+                self.scroll_state.scroll_up();
+            }
+        } else {
+            for _ in 0..steps {
+                self.scroll_state.scroll_down();
+            }
+            let max = self.content_height.saturating_sub(self.viewport_height);
+            self.at_bottom = self.scroll_state.offset().y >= max;
+        }
+    }
+
+    /// Mouse wheel scroll. Overlay panes (config menu, /view, /diff-mode,
+    /// /edit) and the approval modal already intercept ↑/↓ themselves inside
+    /// `on_key` before input-history logic ever runs, so a wheel notch is
+    /// safe to forward there as a synthetic key. In the base chat state it
+    /// scrolls the viewport directly instead, since a literal ↑/↓ *keypress*
+    /// there can mean "navigate input history" depending on cursor/history
+    /// state — a wheel notch should always mean "scroll", never that.
+    pub fn on_mouse_scroll(&mut self, up: bool) -> Option<Action> {
+        let overlay_open = self.approval_pending.is_some()
+            || self.config_menu.is_some()
+            || self.viewer.is_some()
+            || self.diff_pane.is_some()
+            || self.editor.is_some();
+
+        if overlay_open {
+            let code = if up { crossterm::event::KeyCode::Up } else { crossterm::event::KeyCode::Down };
+            return self.on_key(crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE));
+        }
+
+        self.scroll_viewport(up, 3);
+        None
+    }
+
     fn update_suggestions(&mut self) {
         let val = self.textarea.lines().first().cloned().unwrap_or_default();
         let defs = &self.suggestions_defs;
@@ -503,18 +544,11 @@ impl ChatView {
 
         // Viewport scroll
         if key.code == KeyCode::Up {
-            self.at_bottom = false;
-            self.scroll_state.scroll_up();
-            self.scroll_state.scroll_up();
-            self.scroll_state.scroll_up();
+            self.scroll_viewport(true, 3);
             return None;
         }
         if key.code == KeyCode::Down {
-            self.scroll_state.scroll_down();
-            self.scroll_state.scroll_down();
-            self.scroll_state.scroll_down();
-            let max = self.content_height.saturating_sub(self.viewport_height);
-            self.at_bottom = self.scroll_state.offset().y >= max;
+            self.scroll_viewport(false, 3);
             return None;
         }
         if key.code == KeyCode::PageUp {
@@ -1342,5 +1376,38 @@ mod cancel_quit_tests {
         // Streaming is now off; a second Ctrl+C should just arm quit, not fire it.
         assert!(chat.on_key(ctrl_c()).is_none());
         assert!(matches!(chat.on_key(ctrl_c()), Some(Action::Quit)));
+    }
+
+    #[test]
+    fn mouse_scroll_up_in_base_state_scrolls_viewport() {
+        let mut chat = ChatView::new(80, 24);
+        chat.at_bottom = true;
+        assert!(chat.on_mouse_scroll(true).is_none());
+        assert!(!chat.at_bottom);
+    }
+
+    #[test]
+    fn mouse_scroll_in_base_state_never_triggers_input_history_nav() {
+        let mut chat = ChatView::new(80, 24);
+        chat.input_history = vec!["previous command".to_string()];
+        chat.history_idx = -1;
+        // Preconditions for a literal ↑ keypress to trigger history-nav are
+        // met (empty single-line textarea, history available) — a wheel
+        // notch must scroll the viewport instead, never touch input history.
+        chat.on_mouse_scroll(true);
+        assert_eq!(chat.history_idx, -1);
+        assert!(chat.textarea.lines().first().map(String::as_str).unwrap_or("").is_empty());
+    }
+
+    #[test]
+    fn mouse_scroll_routes_through_overlay_when_one_is_open() {
+        let mut chat = ChatView::new(80, 24);
+        chat.viewer = Some(ViewerPane::new(
+            "f.txt".into(), (1..=50).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n"),
+        ));
+        // Routed into the viewer pane's own on_key (Up/Down), not viewport
+        // scroll or input-history nav — ViewerOutcome::None means no Action.
+        assert!(chat.on_mouse_scroll(false).is_none());
+        assert!(chat.viewer.is_some(), "scrolling shouldn't close the pane");
     }
 }
