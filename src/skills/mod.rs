@@ -237,10 +237,19 @@ fn default_skills() -> Vec<Skill> {
             // skills::executor::resolve_chunks) and assigned to Q rather than
             // interpolated directly into the URL literal, so injected quotes
             // in the query can't break out of the double-quoted curl arg.
+            //
+            // --proto/--proto-redir pin both the initial request and any
+            // redirect target to https, so a redirect can't be steered at
+            // file:// or a plain-http internal/metadata address (most of
+            // which don't speak TLS). --max-time and --max-filesize bound
+            // how long we wait and how much a malicious/misbehaving server
+            // can make curl buffer.
             chunks: vec![Chunk {
                 lang: "sh".into(),
                 source: concat!(
-                    r#"Q={query}; curl -sL "https://html.duckduckgo.com/html/?q=$Q" "#,
+                    r#"Q={query}; curl -sL --proto '=https' --proto-redir '=https' "#,
+                    r#"--max-time 15 --max-filesize 2000000 "#,
+                    r#""https://html.duckduckgo.com/html/?q=$Q" "#,
                     r#"| grep -oP '(?<=class="result__snippet">)[^<]+' "#,
                     r#"| head -10 "#,
                     r#"| sed 's/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&#x27;/'"'"'/g'"#,
