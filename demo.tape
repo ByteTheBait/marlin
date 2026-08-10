@@ -2,8 +2,8 @@ Output assets/demo.gif
 
 Set Shell "zsh"
 Set FontSize 14
-Set Width 1400
-Set Height 780
+Set Width 2800
+Set Height 1560
 Set Padding 28
 Set TypingSpeed 55ms
 Set PlaybackSpeed 1.0
@@ -42,19 +42,14 @@ Sleep 100ms
 Type " "
 
 Type "on"
-
+Enter
+Type "/provider ollama-cloud" Enter
 Sleep 500ms
 
-Enter
-Type "/animate on"
-Sleep 100ms
-Enter
-Sleep 750ms
-
-# ── ask something real (Groq / qwen3-32b will respond) ───────────────────────
+# ── ask something real (deepseek will respond) ───────────────────────
 Type "explore this directory and list files"
 Enter
-Sleep 20s
+Sleep 10s
 
 # ── graceful exit ─────────────────────────────────────────────────────────────
 Ctrl+Q
