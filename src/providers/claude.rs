@@ -52,7 +52,7 @@ impl Provider for ClaudeProvider {
             body["tools"] = serde_json::json!(tools);
         }
 
-        let resp = reqwest::Client::new()
+        let resp = super::http_client()
             .post("https://api.anthropic.com/v1/messages/count_tokens")
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
@@ -75,7 +75,7 @@ impl Provider for ClaudeProvider {
         let body = build_claude_request(&req);
         let body_bytes = serde_json::to_vec(&body)?;
 
-        let client = reqwest::Client::new();
+        let client = super::http_client();
         let resp = client
             .post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", &self.api_key)
@@ -124,6 +124,10 @@ impl Provider for ClaudeProvider {
 
         tokio::spawn(async move {
             let mut buf = String::new();
+            // Guards against a malicious/misbehaving endpoint sending an
+            // unterminated line forever, which would otherwise grow `buf`
+            // without bound while we wait for a '\n'.
+            const MAX_LINE_BUF: usize = 4 * 1024 * 1024;
 
             // Pending tool calls being accumulated from the stream
             struct PendingTool {
@@ -151,6 +155,18 @@ impl Provider for ClaudeProvider {
                 };
 
                 buf.push_str(&String::from_utf8_lossy(&chunk));
+
+                if buf.len() > MAX_LINE_BUF {
+                    let _ = tx.send(StreamChunk {
+                        content: String::new(),
+                        done: false,
+                        error: Some(anyhow!("claude: response line exceeded {MAX_LINE_BUF} bytes without a newline, aborting stream")),
+                        tool_calls: vec![],
+                        retry_after: 0,
+                        rate_limit: None,
+                    }).await;
+                    return;
+                }
 
                 // Process complete SSE lines
                 loop {

@@ -4,12 +4,27 @@ pub mod registry;
 pub mod ratelimit;
 pub mod user_providers;
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+
+/// Shared HTTP client for provider API calls.
+///
+/// `connect_timeout` bounds the TCP/TLS handshake; `read_timeout` fires only
+/// when a read stalls (it resets on every chunk received), so a long but
+/// actively-streaming completion is never cut short by it. Neither uses the
+/// blanket `timeout()`, which caps the *entire* request including body read
+/// and would kill legitimate long streaming responses.
+pub fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .read_timeout(Duration::from_secs(30))
+        .build()
+        .unwrap_or_default()
+}
 
 // ── wire types ──────────────────────────────────────────────────────────────
 
