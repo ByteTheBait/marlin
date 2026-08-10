@@ -178,6 +178,11 @@ pub struct Config {
     /// bodies expanded and handed straight back to the main model).
     #[serde(default = "default_skill_subagents")]
     pub skill_subagents: bool,
+    /// Approximate context-window budget the sidebar meter and compaction
+    /// trigger against — distinct from `max_tokens` (the per-response output
+    /// cap). Set with `/budget <n>`.
+    #[serde(default = "default_token_budget")]
+    pub token_budget: usize,
 }
 
 fn default_skill_subagents() -> bool {
@@ -186,6 +191,10 @@ fn default_skill_subagents() -> bool {
 
 fn default_max_tokens() -> usize {
     4096
+}
+
+fn default_token_budget() -> usize {
+    100_000
 }
 
 fn default_theme() -> String {
@@ -215,6 +224,13 @@ impl Config {
                     if merged.sandbox && merged.sandbox_mode == SandboxMode::Off {
                         merged.sandbox_mode = SandboxMode::Permissive;
                     }
+                    // config.json is a single global file shared across every
+                    // directory marlin is launched from. work_dir must reflect
+                    // where *this* process actually started, not wherever the
+                    // last session happened to /cd to — otherwise launching
+                    // from a different project silently inherits the previous
+                    // project's directory.
+                    merged.work_dir = cfg.work_dir;
                     cfg = merged;
                 }
                 Err(e) => {
@@ -334,6 +350,7 @@ impl Config {
             ast_mode: AstMode::Off,
             model_tiers: None,
             skill_subagents: true,
+            token_budget: default_token_budget(),
         }
     }
 }

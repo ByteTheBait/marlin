@@ -144,6 +144,7 @@ pub struct Engine {
 
     active_goal: String,
     tool_iterations: usize,
+    stall_nudges: usize,
     attachments: Vec<(String, String)>, // (filename, content)
     allowed_commands: Vec<String>,
 
@@ -215,6 +216,7 @@ impl Engine {
         let ast_mode = cfg.ast_mode.clone();
         let req_provider = cfg.active_provider.clone();
         let req_model = cfg.active_model.clone();
+        let token_budget = cfg.token_budget;
 
         // Install built-in skills/commands/tools if not present, then load all.
         skills::install_defaults(&marlin_dir);
@@ -242,6 +244,7 @@ impl Engine {
             input_history,
             active_goal: String::new(),
             tool_iterations: 0,
+            stall_nudges: 0,
             attachments: vec![],
             allowed_commands: allowed,
             rate_limit_state: None,
@@ -250,7 +253,7 @@ impl Engine {
             task_steps: vec![],
             plan_steps: vec![],
             plan_cursor: 0,
-            token_budget: 100_000,
+            token_budget,
             ast_mode,
             skills: loaded_skills,
             user_commands: loaded_commands,
@@ -326,6 +329,7 @@ impl Engine {
                     self.cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                     self.active_goal.clear();
                     self.tool_iterations = 0;
+                    self.stall_nudges = 0;
                     // Otherwise any plan steps still Pending when the user cancelled
                     // linger in the sidebar indefinitely, implying the cancelled task
                     // is still queued/active.
@@ -371,6 +375,7 @@ impl Engine {
                     self.attachments.clear();
                     self.active_goal = text.clone();
                     self.tool_iterations = 0;
+                    self.stall_nudges = 0;
                     self.task_steps.clear();
                     self.plan_steps.clear();
                     self.plan_cursor = 0;
@@ -426,6 +431,7 @@ impl Engine {
                         self.attachments.clear();
                         self.active_goal = prompt.clone();
                         self.tool_iterations = 0;
+                        self.stall_nudges = 0;
                         self.task_steps.clear();
                         self.plan_steps.clear();
                         self.plan_cursor = 0;
@@ -711,10 +717,46 @@ impl Engine {
                 }
 
                 self.tool_iterations += 1;
+
+                if let Some(done_call) = tool_calls.iter().find(|tc| tc.name == "mark_complete") {
+                    let summary = extract_summary_field(&done_call.input);
+                    if !summary.is_empty() {
+                        let _ = ui_tx.send(UiUpdate::StreamChunk(summary)).await;
+                    }
+                    self.finish_turn(ui_tx).await;
+                    break;
+                }
                 // Continue loop
             } else {
-                // Goal complete
+                // Goal complete — unless the model stopped mid-promise (see
+                // `looks_like_unfinished_stall`), in which case nudge it to
+                // actually follow through instead of reporting done.
+                const MAX_STALL_NUDGES: usize = 2;
                 let text = text_buf.trim().to_string();
+
+                if !text.is_empty() && looks_like_unfinished_stall(&text) && self.stall_nudges < MAX_STALL_NUDGES {
+                    self.stall_nudges += 1;
+                    self.history.push(Message {
+                        role: "assistant".into(),
+                        content: text,
+                        tool_calls: vec![],
+                        tool_use_id: String::new(),
+                        tool_call_id: String::new(),
+                        is_error: false,
+                    });
+                    self.history.push(Message {
+                        role: "user".into(),
+                        content: "You said you would do that but made no tool call. Either make \
+                            the tool call now to actually do it, or say plainly that you're done \
+                            or blocked.".into(),
+                        tool_calls: vec![],
+                        tool_use_id: String::new(),
+                        tool_call_id: String::new(),
+                        is_error: false,
+                    });
+                    continue;
+                }
+
                 if !text.is_empty() {
                     self.history.push(Message {
                         role: "assistant".into(),
@@ -730,25 +772,34 @@ impl Engine {
                     )).await;
                 }
 
-                let tool_count = self.tool_iterations;
-                self.tool_iterations = 0;
-                self.active_goal.clear();
-                self.save_session();
-
-                // Any plan steps left un-resolved (model finished early, or the
-                // plan overestimated how many turns the task needed) are done.
-                if self.plan_cursor < self.plan_steps.len() {
-                    for step in &mut self.plan_steps[self.plan_cursor..] {
-                        step.status = TaskStatus::Completed;
-                    }
-                    self.plan_cursor = self.plan_steps.len();
-                    let _ = ui_tx.send(UiUpdate::PlanUpdate(self.plan_steps.clone())).await;
-                }
-
-                let _ = ui_tx.send(UiUpdate::GoalComplete { tool_count }).await;
+                self.finish_turn(ui_tx).await;
                 break;
             }
         }
+    }
+
+    /// Ends the current turn: resets iteration/stall counters, clears the
+    /// active goal, persists the session, marks any leftover plan steps
+    /// done, and tells the TUI the goal is complete. Shared by the
+    /// plain-text-completion path and the explicit `mark_complete` tool call.
+    async fn finish_turn(&mut self, ui_tx: &mpsc::Sender<UiUpdate>) {
+        let tool_count = self.tool_iterations;
+        self.tool_iterations = 0;
+        self.stall_nudges = 0;
+        self.active_goal.clear();
+        self.save_session();
+
+        // Any plan steps left un-resolved (model finished early, or the
+        // plan overestimated how many turns the task needed) are done.
+        if self.plan_cursor < self.plan_steps.len() {
+            for step in &mut self.plan_steps[self.plan_cursor..] {
+                step.status = TaskStatus::Completed;
+            }
+            self.plan_cursor = self.plan_steps.len();
+            let _ = ui_tx.send(UiUpdate::PlanUpdate(self.plan_steps.clone())).await;
+        }
+
+        let _ = ui_tx.send(UiUpdate::GoalComplete { tool_count }).await;
     }
 
     /// Returns each result paired with the group id it actually ran under —
@@ -808,6 +859,15 @@ impl Engine {
                     output: "Command denied by user.".to_string(),
                     is_error: true,
                 }, None));
+                continue;
+            }
+
+            // mark_complete is a pure signal, not a real action — short-circuit
+            // before spawn_tool/preflight so it never touches the filesystem or
+            // approval funnel. The agentic loop below checks for it after this
+            // batch finishes and ends the turn instead of continuing.
+            if call.name == "mark_complete" {
+                results.push((executor::ToolResult { output: "Acknowledged.".into(), is_error: false }, None));
                 continue;
             }
 
@@ -1506,7 +1566,11 @@ impl Engine {
             s.push_str(&self.active_goal);
             s.push('\n');
             s.push_str("\nWork toward this goal using tools. Keep calling tools until the task is fully complete.\n");
-            s.push_str("Only produce a plain text response (with no tool calls) when the goal is achieved or you need user input.\n");
+            s.push_str("When — and only when — every part of the goal is actually done, call the mark_complete tool \
+                (alone, with no other tool calls in that turn) with a short summary. Do not just say you're done or \
+                describe what you're about to do in plain text and stop; if you catch yourself writing \"let me now...\" \
+                or \"I'll...\", make that tool call instead. Plain text with no tool call is only for asking the user \
+                a question or reporting you're permanently blocked.\n");
             s.push_str(&format!("Progress so far: {} tool calls made.\n", self.tool_iterations));
         }
 
@@ -1784,6 +1848,30 @@ impl Engine {
                         save_cfg!();
                         sys!(format!("Max tokens: {n}"));
                     }
+                }
+            }
+
+            "/budget" => {
+                if args.is_empty() {
+                    sys!(format!(
+                        "Context budget: {} tokens (sidebar meter ceiling; use /budget <n> to change)",
+                        self.token_budget
+                    ));
+                    return None;
+                }
+                if let Ok(n) = args[0].parse::<usize>() {
+                    if n > 0 {
+                        self.token_budget = n;
+                        self.cfg.token_budget = n;
+                        save_cfg!();
+                        let _ = ui_tx.send(UiUpdate::TokenUsage {
+                            used: estimate_tokens(&self.history, &self.effective_system_prompt()),
+                            budget: self.token_budget,
+                        }).await;
+                        sys!(format!("Context budget: {n} tokens"));
+                    }
+                } else {
+                    err!("Usage: /budget <n>");
                 }
             }
 
@@ -3027,6 +3115,13 @@ fn extract_path_field(input_json: &str) -> Option<String> {
         .and_then(|v| v["path"].as_str().map(String::from))
 }
 
+fn extract_summary_field(input_json: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(input_json)
+        .ok()
+        .and_then(|v| v["summary"].as_str().map(String::from))
+        .unwrap_or_default()
+}
+
 /// Serialize a slice of messages into a compact text block for the compaction LLM call.
 /// Handles tool-call messages (content is often empty) by including the call list.
 fn compact_serialize(messages: &[Message]) -> String {
@@ -3055,6 +3150,30 @@ fn compact_serialize(messages: &[Message]) -> String {
         }
     }
     out
+}
+
+/// Catches the common failure mode where the model announces an action
+/// ("Let me add docstrings to those functions.") but ends its turn with no
+/// tool calls at all, so the announced work never happens and the turn is
+/// reported as complete anyway. Heuristic: the trailing sentence of a
+/// tool-call-free response reads as a promise of imminent action rather than
+/// a completed/blocked report. Deliberately conservative (checked only
+/// against the last sentence) to avoid flagging retrospective phrasing like
+/// "I let the test run" or a plan summary that happens to contain "I'll".
+fn looks_like_unfinished_stall(text: &str) -> bool {
+    let last_sentence = text
+        .rsplit(['.', '!', '?', '\n'])
+        .find(|s| !s.trim().is_empty())
+        .unwrap_or(text)
+        .trim()
+        .to_lowercase();
+
+    const STALL_PHRASES: &[&str] = &[
+        "let me ", "let's ", "i'll ", "i will ", "i'm going to ", "i am going to ",
+        "now i'll ", "now i will ", "next i'll ", "next, i'll ", "next i will ",
+        "going to now ", "i'll now ", "i will now ",
+    ];
+    STALL_PHRASES.iter().any(|p| last_sentence.starts_with(p))
 }
 
 /// Tools with no side effects and no ordering dependency on each other or on
@@ -3137,6 +3256,7 @@ fn help_text() -> String {
         ("/endpoint <provider> <url>", "set API endpoint for a provider"),
         ("/system <prompt>", "set additional system prompt"),
         ("/tokens [n]", "no args: show prompt injection budget breakdown; <n>: set max output tokens"),
+        ("/budget [n]", "no args: show context budget; <n>: set sidebar meter ceiling (persists)"),
         ("/attach <file>", "attach a file to your next message"),
         ("/detach [file]", "remove attachment(s)"),
         ("/exec <cmd>", "run a shell command (must be /allow-ed first, or /sandbox on)"),

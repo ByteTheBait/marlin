@@ -99,6 +99,17 @@ pub fn all_tools(
             ],
             required: vec!["query".into()],
         },
+        ToolDef {
+            name: "mark_complete".into(),
+            description: "Call this — alone, with no other tool calls in the same turn — when \
+                the goal is fully achieved (every requested change actually made, not just \
+                described) or you're permanently blocked. This is the only way to end the turn \
+                as done; plain text alone is not recognized as completion.".into(),
+            properties: vec![
+                ToolProp { name: "summary".into(), ty: "string".into(), description: "One or two sentences: what was accomplished, or if blocked, what's blocking you and what you need from the user.".into() },
+            ],
+            required: vec!["summary".into()],
+        },
     ];
 
     // Inject skill tools when skills are loaded. `skills` is expected to already

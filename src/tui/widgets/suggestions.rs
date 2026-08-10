@@ -30,6 +30,7 @@ pub fn all_commands() -> Vec<CmdDef> {
         ("/system",    "<prompt>",          "set additional system prompt"),
         ("/sys",       "<prompt>",          "set system prompt (short)"),
         ("/tokens",    "[n]",               "get/set max output tokens"),
+        ("/budget",    "[n]",               "get/set context budget (sidebar meter ceiling)"),
         ("/attach",    "<file>",            "attach file to next message"),
         ("/a",         "<file>",            "attach file (short)"),
         ("/detach",    "[file]",            "remove attachment(s)"),

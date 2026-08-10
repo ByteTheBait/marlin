@@ -225,6 +225,10 @@ pub fn style_inline_bold() -> Style {
     Style::default().fg(col_user()).add_modifier(Modifier::BOLD)
 }
 
+pub fn style_inline_italic() -> Style {
+    style_inline_text().add_modifier(Modifier::ITALIC)
+}
+
 pub fn style_inline_code() -> Style {
     style_code_block()
 }
