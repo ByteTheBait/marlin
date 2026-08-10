@@ -225,7 +225,7 @@ async fn run_one_tool(
             let cmd = extract_cmd(&tc.input);
             preflight::check(&preflight::Invocation::shell("run_command", cmd), cfg, allowed)
         }
-        "read_file" | "write_file" | "edit_file" | "create_directory" => {
+        "read_file" | "write_file" | "edit_file" | "notebook_edit" | "create_directory" => {
             match extract_path(&tc.input) {
                 Some(path) => {
                     let resolved = executor::resolve_path(&path, work_dir);

@@ -646,7 +646,7 @@ impl Engine {
                     }
 
                     // File-hash-aware loop guard for edits
-                    let intercept = if tc.name == "edit_file" || tc.name == "write_file" {
+                    let intercept = if tc.name == "edit_file" || tc.name == "write_file" || tc.name == "notebook_edit" {
                         if let Some(path) = extract_file_path(&tc.input, &self.work_dir) {
                             let content = std::fs::read(&path).unwrap_or_default();
                             self.loop_guard.check_file_edit(&path, &content, res.is_error)
@@ -679,7 +679,7 @@ impl Engine {
                     }
 
                     // Keep index fresh after writes
-                    if (tc.name == "write_file" || tc.name == "edit_file") && !res.is_error {
+                    if (tc.name == "write_file" || tc.name == "edit_file" || tc.name == "notebook_edit") && !res.is_error {
                         if let Some(path) = extract_file_path(&tc.input, &self.work_dir) {
                             if let Some(idx) = &mut self.code_index {
                                 index::update_file(idx, &path);
@@ -703,7 +703,7 @@ impl Engine {
 
                 // Write-Test-Fix: run verify_command after any file edit
                 let had_file_edit = tool_calls.iter().zip(results.iter())
-                    .any(|(tc, (r, _))| (tc.name == "edit_file" || tc.name == "write_file") && !r.is_error);
+                    .any(|(tc, (r, _))| (tc.name == "edit_file" || tc.name == "write_file" || tc.name == "notebook_edit") && !r.is_error);
                 if had_file_edit {
                     if let Some(verify_result) = self.run_verify_command(ui_tx).await {
                         self.history.push(verify_result);
@@ -1107,7 +1107,7 @@ impl Engine {
                         .and_then(|cmds| cmds.into_iter().find(|cmd| preflight::is_destructive_cmd(cmd)))
                         .map(|cmd| preflight::Verdict::NeedApproval(format!("destructive skill command: {cmd}")))
                 }
-                "read_file" | "write_file" | "edit_file" | "create_directory" => {
+                "read_file" | "write_file" | "edit_file" | "notebook_edit" | "create_directory" => {
                     extract_path_field(&tc.input).map(|path| {
                         let resolved = executor::resolve_path(&path, &self.work_dir);
                         let inv = preflight::Invocation::paths(tc.name.clone(), vec![resolved]);
@@ -3035,7 +3035,7 @@ fn parallel_group_ids(calls: &[ToolCall]) -> Vec<Option<usize>> {
 fn tool_short_desc(name: &str, input_json: &str) -> String {
     let v = serde_json::from_str::<serde_json::Value>(input_json).unwrap_or_default();
     match name {
-        "read_file" | "write_file" | "edit_file" => {
+        "read_file" | "write_file" | "edit_file" | "notebook_edit" => {
             let path = v["path"].as_str().unwrap_or("?");
             let basename = Path::new(path).file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -3144,6 +3144,7 @@ mod parallel_batching_tests {
 
         assert!(!is_parallel_safe("write_file"));
         assert!(!is_parallel_safe("edit_file"));
+        assert!(!is_parallel_safe("notebook_edit"));
         assert!(!is_parallel_safe("run_command"));
         assert!(!is_parallel_safe("create_directory"));
         assert!(!is_parallel_safe("ast_mutate"));

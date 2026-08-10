@@ -167,6 +167,31 @@ pub fn execute(
             ToolResult::ok(format!("edited {path}"))
         }
 
+        "notebook_edit" => {
+            let path = resolve(input.get("path").map(String::as_str).unwrap_or(""));
+            let cell_id = input.get("cell_id").map(String::as_str).unwrap_or("");
+            let cell_type = input.get("cell_type").map(String::as_str).unwrap_or("");
+            let edit_mode_raw = input.get("edit_mode").map(String::as_str).unwrap_or("");
+            let edit_mode = if edit_mode_raw.is_empty() { "replace" } else { edit_mode_raw };
+            let new_source = input.get("new_source").map(String::as_str).unwrap_or("");
+
+            let data = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) => return ToolResult::err(e.to_string()),
+            };
+            let (msg, updated) = match build_notebook_edit(&data, cell_id, cell_type, edit_mode, new_source) {
+                Ok(v) => v,
+                Err(e) => return ToolResult::err(e),
+            };
+            if let Some(snap) = snapshot_fn {
+                snap(&path, "notebook_edit");
+            }
+            if let Err(e) = std::fs::write(&path, updated.as_bytes()) {
+                return ToolResult::err(e.to_string());
+            }
+            ToolResult::ok(format!("{msg} → {path}"))
+        }
+
         "run_command" => {
             let cmd = input.get("command").map(String::as_str).unwrap_or("");
             if !is_allowed(cmd) {
@@ -509,6 +534,128 @@ fn harness_run(args: &[&str]) -> Result<String, String> {
     }
 }
 
+// ── Notebook (.ipynb) helpers ────────────────────────────────────────────────
+
+/// Apply a replace/insert/delete edit to a parsed notebook's `cells` array and
+/// return `(summary message, re-serialized notebook JSON)` — never writes to
+/// disk itself, so the caller can snapshot the file right before overwriting it,
+/// same as `edit_file`.
+fn build_notebook_edit(
+    notebook_json: &str,
+    cell_id: &str,
+    cell_type: &str,
+    edit_mode: &str,
+    new_source: &str,
+) -> Result<(String, String), String> {
+    let mut nb: serde_json::Value = serde_json::from_str(notebook_json)
+        .map_err(|e| format!("invalid notebook JSON: {e}"))?;
+
+    let msg = {
+        let cells = nb.get_mut("cells")
+            .and_then(|c| c.as_array_mut())
+            .ok_or_else(|| "notebook has no 'cells' array".to_string())?;
+
+        match edit_mode {
+            "delete" => {
+                let id = require_cell_id(cell_id, "delete")?;
+                let idx = find_cell_index(cells, id)
+                    .ok_or_else(|| format!("no cell with id {id:?}"))?;
+                cells.remove(idx);
+                format!("deleted cell {id} ({} cells remain)", cells.len())
+            }
+            "insert" => {
+                if cell_type != "code" && cell_type != "markdown" {
+                    return Err("cell_type must be 'code' or 'markdown' for edit_mode=insert".into());
+                }
+                let insert_at = if cell_id.is_empty() {
+                    0
+                } else {
+                    find_cell_index(cells, cell_id)
+                        .ok_or_else(|| format!("no cell with id {cell_id:?}"))? + 1
+                };
+                let new_id = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+                let mut new_cell = serde_json::json!({
+                    "cell_type": cell_type,
+                    "metadata": {},
+                    "source": source_lines(new_source),
+                    "id": new_id,
+                });
+                if cell_type == "code" {
+                    new_cell["execution_count"] = serde_json::Value::Null;
+                    new_cell["outputs"] = serde_json::Value::Array(vec![]);
+                }
+                cells.insert(insert_at, new_cell);
+                format!("inserted {cell_type} cell {new_id} at position {insert_at}")
+            }
+            "replace" => {
+                let id = require_cell_id(cell_id, "replace")?;
+                let idx = find_cell_index(cells, id)
+                    .ok_or_else(|| format!("no cell with id {id:?}"))?;
+                let cell = &mut cells[idx];
+                cell["source"] = serde_json::Value::Array(source_lines(new_source));
+                let target_type = if cell_type.is_empty() {
+                    cell["cell_type"].as_str().unwrap_or("code").to_string()
+                } else {
+                    cell_type.to_string()
+                };
+                if cell["cell_type"].as_str() != Some(target_type.as_str()) {
+                    cell["cell_type"] = serde_json::Value::String(target_type.clone());
+                }
+                if target_type == "code" {
+                    cell["execution_count"] = serde_json::Value::Null;
+                    cell["outputs"] = serde_json::Value::Array(vec![]);
+                } else if let Some(obj) = cell.as_object_mut() {
+                    obj.remove("execution_count");
+                    obj.remove("outputs");
+                }
+                format!("replaced cell {id}")
+            }
+            other => return Err(format!(
+                "unknown edit_mode {other:?} — valid: replace, insert, delete"
+            )),
+        }
+    };
+
+    let out = serde_json::to_string_pretty(&nb).map_err(|e| e.to_string())?;
+    Ok((msg, out))
+}
+
+fn require_cell_id<'a>(cell_id: &'a str, mode: &str) -> Result<&'a str, String> {
+    if cell_id.is_empty() {
+        Err(format!("cell_id is required for edit_mode={mode}"))
+    } else {
+        Ok(cell_id)
+    }
+}
+
+/// Match by the cell's `id` field first; falls back to treating `cell_id` as a
+/// 0-based index for notebooks predating nbformat 4.5 cell ids.
+fn find_cell_index(cells: &[serde_json::Value], cell_id: &str) -> Option<usize> {
+    cells.iter().position(|c| c.get("id").and_then(|v| v.as_str()) == Some(cell_id))
+        .or_else(|| cell_id.parse::<usize>().ok().filter(|&i| i < cells.len()))
+}
+
+/// Split into nbformat's line-array source representation: every line but the
+/// last keeps its trailing `\n`, matching how Jupyter itself stores `source`.
+fn source_lines(s: &str) -> Vec<serde_json::Value> {
+    if s.is_empty() {
+        return vec![];
+    }
+    let mut out = Vec::new();
+    let mut start = 0;
+    let bytes = s.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'\n' {
+            out.push(serde_json::Value::String(s[start..=i].to_string()));
+            start = i + 1;
+        }
+    }
+    if start < s.len() {
+        out.push(serde_json::Value::String(s[start..].to_string()));
+    }
+    out
+}
+
 // ── Misc helpers ─────────────────────────────────────────────────────────────
 
 fn spill_to_log(content: &str, logs_dir: Option<&Path>) -> Option<String> {
@@ -550,4 +697,133 @@ pub(crate) fn resolve_path(p: &str, work_dir: &str) -> String {
     }
     if Path::new(p).is_absolute() { return p.to_string(); }
     Path::new(work_dir).join(p).to_string_lossy().to_string()
+}
+
+#[cfg(test)]
+mod notebook_edit_tests {
+    use super::*;
+
+    fn sample_notebook() -> String {
+        serde_json::json!({
+            "cells": [
+                {"cell_type": "markdown", "metadata": {}, "id": "a1", "source": ["# Title\n"]},
+                {"cell_type": "code", "metadata": {}, "id": "b2", "execution_count": 3,
+                 "outputs": ["stale"], "source": ["print(1)\n", "print(2)"]},
+            ],
+            "metadata": {},
+            "nbformat": 4,
+            "nbformat_minor": 5,
+        }).to_string()
+    }
+
+    fn cells(json: &str) -> Vec<serde_json::Value> {
+        serde_json::from_str::<serde_json::Value>(json).unwrap()["cells"].as_array().unwrap().clone()
+    }
+
+    #[test]
+    fn replace_updates_source_and_clears_stale_execution_state() {
+        let (msg, out) = build_notebook_edit(&sample_notebook(), "b2", "", "replace", "print(3)\n").unwrap();
+        assert!(msg.contains("replaced cell b2"));
+        let cs = cells(&out);
+        assert_eq!(cs[1]["source"], serde_json::json!(["print(3)\n"]));
+        assert_eq!(cs[1]["execution_count"], serde_json::Value::Null);
+        assert_eq!(cs[1]["outputs"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn replace_can_change_cell_type_and_drops_code_only_fields() {
+        let (_, out) = build_notebook_edit(&sample_notebook(), "b2", "markdown", "replace", "notes").unwrap();
+        let cs = cells(&out);
+        assert_eq!(cs[1]["cell_type"], "markdown");
+        assert!(cs[1].get("execution_count").is_none());
+        assert!(cs[1].get("outputs").is_none());
+    }
+
+    #[test]
+    fn replace_without_cell_id_errors() {
+        assert!(build_notebook_edit(&sample_notebook(), "", "", "replace", "x").is_err());
+    }
+
+    #[test]
+    fn replace_unknown_cell_id_errors() {
+        assert!(build_notebook_edit(&sample_notebook(), "nope", "", "replace", "x").is_err());
+    }
+
+    #[test]
+    fn insert_requires_a_valid_cell_type() {
+        assert!(build_notebook_edit(&sample_notebook(), "a1", "", "insert", "x").is_err());
+        assert!(build_notebook_edit(&sample_notebook(), "a1", "raw", "insert", "x").is_err());
+    }
+
+    #[test]
+    fn insert_after_given_cell_id() {
+        let (msg, out) = build_notebook_edit(&sample_notebook(), "a1", "code", "insert", "print(0)").unwrap();
+        assert!(msg.contains("inserted code cell"));
+        let cs = cells(&out);
+        assert_eq!(cs.len(), 3);
+        assert_eq!(cs[1]["cell_type"], "code");
+        assert_eq!(cs[1]["source"], serde_json::json!(["print(0)"]));
+        assert_eq!(cs[2]["id"], "b2");
+    }
+
+    #[test]
+    fn insert_without_cell_id_goes_to_the_start() {
+        let (_, out) = build_notebook_edit(&sample_notebook(), "", "markdown", "insert", "intro").unwrap();
+        let cs = cells(&out);
+        assert_eq!(cs.len(), 3);
+        assert_eq!(cs[0]["cell_type"], "markdown");
+        assert_eq!(cs[0]["source"], serde_json::json!(["intro"]));
+        assert_eq!(cs[1]["id"], "a1");
+    }
+
+    #[test]
+    fn delete_removes_the_matching_cell() {
+        let (msg, out) = build_notebook_edit(&sample_notebook(), "a1", "", "delete", "").unwrap();
+        assert!(msg.contains("deleted cell a1"));
+        let cs = cells(&out);
+        assert_eq!(cs.len(), 1);
+        assert_eq!(cs[0]["id"], "b2");
+    }
+
+    #[test]
+    fn delete_without_cell_id_errors() {
+        assert!(build_notebook_edit(&sample_notebook(), "", "", "delete", "").is_err());
+    }
+
+    #[test]
+    fn unknown_edit_mode_errors() {
+        assert!(build_notebook_edit(&sample_notebook(), "b2", "", "bogus", "x").is_err());
+    }
+
+    #[test]
+    fn malformed_json_errors() {
+        assert!(build_notebook_edit("not json", "b2", "", "replace", "x").is_err());
+    }
+
+    #[test]
+    fn falls_back_to_index_when_cells_have_no_id() {
+        let nb = serde_json::json!({
+            "cells": [
+                {"cell_type": "code", "metadata": {}, "source": ["a = 1"]},
+                {"cell_type": "code", "metadata": {}, "source": ["b = 2"]},
+            ],
+        }).to_string();
+        let (_, out) = build_notebook_edit(&nb, "1", "", "replace", "b = 3").unwrap();
+        let cs = cells(&out);
+        assert_eq!(cs[1]["source"], serde_json::json!(["b = 3"]));
+        assert_eq!(cs[0]["source"], serde_json::json!(["a = 1"]));
+    }
+
+    #[test]
+    fn source_lines_preserves_trailing_newline_semantics() {
+        assert_eq!(source_lines(""), Vec::<serde_json::Value>::new());
+        assert_eq!(
+            source_lines("a\nb"),
+            vec![serde_json::json!("a\n"), serde_json::json!("b")]
+        );
+        assert_eq!(
+            source_lines("a\nb\n"),
+            vec![serde_json::json!("a\n"), serde_json::json!("b\n")]
+        );
+    }
 }

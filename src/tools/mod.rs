@@ -54,6 +54,18 @@ pub fn all_tools(
             required: vec!["path".into(), "old_string".into(), "new_string".into()],
         },
         ToolDef {
+            name: "notebook_edit".into(),
+            description: "Replace, insert, or delete a single cell in a Jupyter notebook (.ipynb file).".into(),
+            properties: vec![
+                ToolProp { name: "path".into(), ty: "string".into(), description: "Path to the .ipynb file, relative to working directory or absolute.".into() },
+                ToolProp { name: "cell_id".into(), ty: "string".into(), description: "id of the target cell. Required for edit_mode=replace and edit_mode=delete. For edit_mode=insert, the new cell is inserted after this cell, or at the start of the notebook if omitted.".into() },
+                ToolProp { name: "cell_type".into(), ty: "string".into(), description: "One of: code, markdown. Required for edit_mode=insert; if omitted for replace, the existing cell's type is kept.".into() },
+                ToolProp { name: "edit_mode".into(), ty: "string".into(), description: "One of: replace, insert, delete. Defaults to replace.".into() },
+                ToolProp { name: "new_source".into(), ty: "string".into(), description: "New source for the cell. Not used for edit_mode=delete.".into() },
+            ],
+            required: vec!["path".into(), "new_source".into()],
+        },
+        ToolDef {
             name: "run_command".into(),
             description: "Run a shell command in the working directory and return combined stdout/stderr.".into(),
             properties: vec![
