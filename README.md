@@ -17,7 +17,7 @@ Built in Rust on [Ratatui](https://ratatui.rs) with animated transitions via [ta
 ## Install
 
 ```sh
-git clone https://github.com/Pkill-MyDaemons/marlin
+git clone https://github.com/ByteTheBait/marlin
 cd marlin
 cargo build --release
 # optionally link to PATH
@@ -28,14 +28,14 @@ Alternatively, run the install.sh script that bundles marlin, ast-compiler, and 
 ```sh
 # Cautious install
 
-curl -fsSL https://raw.githubusercontent.com/Pkill-MyDaemons/marlin/main/install.sh -o install.sh # Pulls the file and stores it in a local one
+curl -fsSL https://raw.githubusercontent.com/ByteTheBait/marlin/main/install.sh -o install.sh # Pulls the file and stores it in a local one
 vim install.sh # If you would like to see what content the file contains
 ./install.sh # Run it
 
 
 # Or you can run it directly
 
-curl -fsSL https://raw.githubusercontent.com/Pkill-MyDaemons/marlin/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ByteTheBait/marlin/main/install.sh | bash
 
 ```
 
