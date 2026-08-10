@@ -1,0 +1,313 @@
+use std::time::Instant;
+
+use chrono::Local;
+use tachyonfx::{fx, Effect, EffectTimer, Interpolation};
+use tui_scrollview::ScrollViewState;
+use tui_textarea::TextArea;
+
+use crate::engine::UiUpdate;
+use crate::tui::widgets::config_menu::ConfigMenu;
+use crate::tui::widgets::diff::DiffPane;
+use crate::tui::widgets::editor::EditorPane;
+use crate::tui::widgets::suggestions::{CmdDef, all_commands};
+use crate::tui::widgets::viewer::ViewerPane;
+
+use super::entry::{ChatEntry, EntryRole};
+
+// ── Chat state ───────────────────────────────────────────────────────────────
+
+pub struct ChatView {
+    pub entries: Vec<ChatEntry>,
+
+    // Input
+    pub textarea: TextArea<'static>,
+    pub input_history: Vec<String>,
+    pub history_idx: i32,
+    pub history_draft: String,
+    pub suggestions_defs: Vec<CmdDef>,
+    pub suggestions: Vec<usize>, // indices into suggestions_defs
+
+    // Streaming
+    pub streaming: bool,
+    pub stream_buf: String,
+    pub tool_iterations: usize,
+    pub active_goal: String,
+    pub current_tool: String,
+
+    // Rate-limit
+    pub rate_limited: bool,
+    pub rate_limit_secs: u32,
+    pub rate_limit_total: u32,
+
+    /// Set after a Ctrl+C/Esc that had nothing to cancel (model idle) — a
+    /// second consecutive one quits, like Ctrl+Q. Any other key disarms it,
+    /// so it only fires on two presses in a row.
+    pub(super) quit_armed: bool,
+
+    // Approval modal
+    pub approval_pending: Option<String>,
+
+    // /config settings menu overlay
+    pub config_menu: Option<ConfigMenu>,
+
+    // /view, /open read-only file preview overlay
+    pub viewer: Option<ViewerPane>,
+
+    // /diff-mode overlay
+    pub diff_pane: Option<DiffPane>,
+
+    // /edit overlay
+    pub editor: Option<EditorPane>,
+
+    // Scroll
+    pub scroll_state: ScrollViewState,
+    pub content_height: u16,
+    pub viewport_height: u16,
+    pub at_bottom: bool,
+
+    pub width: u16,
+    pub height: u16,
+    pub provider: String,
+    pub model: String,
+    pub frame: u64,
+    pub(super) last_frame_time: Instant,
+    pub(super) bubble_effect: Effect,
+
+    // Skill suggestions
+    pub skills: Vec<crate::skills::SkillDef>,
+    pub skill_hints: Vec<crate::tui::widgets::suggestions::SkillHint>,
+    /// Skill matches sent by the engine for the last message.
+    pub last_skill_matches: Vec<(String, String)>,
+
+    // Typewriter animation
+    pub typewriter_enabled: bool,
+    pub(super) typewriter_pos: usize,
+
+    /// Number of built-in slash commands — used to safely append/remove user commands.
+    builtin_cmd_count: usize,
+}
+
+impl ChatView {
+    pub fn new(width: u16, height: u16) -> Self {
+        let mut ta = TextArea::default();
+        ta.set_placeholder_text("Message Marlin... (Enter to send, Ctrl+J for newline)");
+
+        let builtin_cmds = all_commands();
+        let builtin_count = builtin_cmds.len();
+        Self {
+            entries: vec![],
+            textarea: ta,
+            input_history: vec![],
+            history_idx: -1,
+            history_draft: String::new(),
+            suggestions_defs: builtin_cmds,
+            suggestions: vec![],
+            streaming: false,
+            stream_buf: String::new(),
+            tool_iterations: 0,
+            active_goal: String::new(),
+            current_tool: String::new(),
+            rate_limited: false,
+            rate_limit_secs: 0,
+            rate_limit_total: 0,
+            quit_armed: false,
+            approval_pending: None,
+            config_menu: None,
+            viewer: None,
+            diff_pane: None,
+            editor: None,
+            scroll_state: ScrollViewState::default(),
+            content_height: 0,
+            viewport_height: 1,
+            at_bottom: true,
+            width,
+            height,
+            provider: String::new(),
+            model: String::new(),
+            frame: 0,
+            last_frame_time: Instant::now(),
+            bubble_effect: fx::repeating(fx::ping_pong(fx::hsl_shift_fg(
+                [28.0, 0.0, 0.0],
+                EffectTimer::from_ms(900, Interpolation::SineInOut),
+            ))),
+            skills: vec![],
+            skill_hints: vec![],
+            last_skill_matches: vec![],
+            typewriter_enabled: false,
+            typewriter_pos: 0,
+            builtin_cmd_count: builtin_count,
+        }
+    }
+
+    pub fn resize(&mut self, width: u16, height: u16) {
+        self.width = width;
+        self.height = height;
+    }
+
+    pub fn add_system(&mut self, text: &str) {
+        self.entries.push(ChatEntry::system(text));
+        self.maybe_scroll_to_bottom();
+    }
+
+    pub fn add_error(&mut self, text: &str) {
+        self.entries.push(ChatEntry::error(text));
+        self.maybe_scroll_to_bottom();
+    }
+
+    /// The viewer/diff/editor overlays are mutually exclusive — `on_key`
+    /// intercepts them in a fixed order (viewer, then diff, then editor)
+    /// regardless of which was opened most recently, so more than one being
+    /// `Some` at once means whichever is checked first silently eats input
+    /// meant for a different, visually-on-top pane. Call before opening any
+    /// of them so only the newest stays open.
+    pub(super) fn close_overlay_panes(&mut self) {
+        self.viewer = None;
+        self.diff_pane = None;
+        self.editor = None;
+    }
+
+    pub fn apply_update(&mut self, update: UiUpdate) {
+        match update {
+            UiUpdate::StreamChunk(chunk) => {
+                if !self.streaming {
+                    self.typewriter_pos = 0;
+                }
+                self.streaming = true;
+                self.stream_buf.push_str(&chunk);
+                self.maybe_scroll_to_bottom();
+            }
+            UiUpdate::ToolCall { name, input } => {
+                self.current_tool = name.clone();
+                self.tool_iterations += 1;
+                self.entries.push(ChatEntry {
+                    role: EntryRole::ToolCall,
+                    content: input,
+                    tool_name: name,
+                    time: Local::now(),
+                });
+                self.maybe_scroll_to_bottom();
+            }
+            UiUpdate::ToolResult { name, output, is_error } => {
+                self.entries.push(ChatEntry {
+                    role: EntryRole::ToolResult { is_error },
+                    content: output,
+                    tool_name: name,
+                    time: Local::now(),
+                });
+                self.maybe_scroll_to_bottom();
+            }
+            UiUpdate::SystemMsg(msg) => {
+                self.add_system(&msg);
+            }
+            UiUpdate::ErrorMsg(msg) => {
+                self.add_error(&msg);
+            }
+            UiUpdate::RateLimited { secs } => {
+                self.rate_limited = true;
+                self.rate_limit_secs = secs;
+                self.rate_limit_total = secs;
+                self.streaming = false;
+                self.add_system(&format!("Rate limited. Resuming automatically in {secs}s..."));
+            }
+            UiUpdate::GoalComplete { tool_count } => {
+                self.streaming = false;
+                self.current_tool = String::new();
+                self.typewriter_pos = 0;
+                if !self.stream_buf.is_empty() {
+                    let text = std::mem::take(&mut self.stream_buf);
+                    self.entries.push(ChatEntry {
+                        role: EntryRole::Assistant,
+                        content: text,
+                        tool_name: String::new(),
+                        time: Local::now(),
+                    });
+                }
+                if tool_count > 0 {
+                    self.add_system(&format!("Goal complete. ({tool_count} tool calls)"));
+                }
+                self.active_goal.clear();
+                self.tool_iterations = 0;
+                self.maybe_scroll_to_bottom();
+            }
+            UiUpdate::StatusUpdate(info) => {
+                self.provider = info.provider;
+                self.model = info.model;
+            }
+            UiUpdate::AwaitingApproval { cmd } => {
+                self.approval_pending = Some(cmd);
+            }
+            UiUpdate::ConfigState { state, open } => {
+                if let Some(menu) = &mut self.config_menu {
+                    menu.sync(state);
+                } else if open {
+                    self.config_menu = Some(ConfigMenu::new(state, self.typewriter_enabled));
+                }
+            }
+            UiUpdate::OpenViewer(Ok((path, content))) => {
+                self.close_overlay_panes();
+                self.viewer = Some(ViewerPane::new(path, content));
+            }
+            UiUpdate::OpenViewer(Err(msg)) => {
+                self.add_error(&msg);
+            }
+            UiUpdate::OpenDiff { path, diff } => {
+                self.close_overlay_panes();
+                self.diff_pane = Some(DiffPane::new(path, diff));
+            }
+            UiUpdate::OpenEditor(Ok((path, content))) => {
+                self.close_overlay_panes();
+                self.editor = Some(EditorPane::new(path, content));
+            }
+            UiUpdate::OpenEditor(Err(msg)) => {
+                self.add_error(&msg);
+            }
+            UiUpdate::EditorSaved { path } => {
+                if let Some(editor) = &mut self.editor {
+                    if editor.path == path {
+                        editor.mark_saved();
+                    }
+                }
+            }
+            UiUpdate::SkillsLoaded(defs) => {
+                self.skills = defs;
+            }
+            UiUpdate::SkillMatches(matches) => {
+                self.last_skill_matches = matches;
+            }
+            UiUpdate::TierSelected { score, tier } => {
+                self.add_system(&format!("difficulty {score}/100 → {tier} tier"));
+            }
+            UiUpdate::UserCommandsLoaded(defs) => {
+                // Keep only built-in commands, then append loaded user commands.
+                self.suggestions_defs.truncate(self.builtin_cmd_count);
+                for d in defs {
+                    self.suggestions_defs.push(CmdDef {
+                        cmd: format!("/{}", d.name),
+                        args: d.args,
+                        desc: d.description,
+                    });
+                }
+            }
+            // TaskUpdate, TokenUsage, AstMode, PromptBudget, and Subagent* are
+            // consumed by the runner/sidebar.
+            UiUpdate::TaskUpdate(_) | UiUpdate::PlanUpdate(_) | UiUpdate::TokenUsage { .. } | UiUpdate::AstMode(_)
+                | UiUpdate::PromptBudget(_) | UiUpdate::SubagentStarted { .. }
+                | UiUpdate::SubagentToolCall { .. } | UiUpdate::SubagentFinished { .. } => {}
+            UiUpdate::IndexBuilt => {}
+        }
+    }
+
+    pub fn tick_rate_limit(&mut self) -> bool {
+        if !self.rate_limited || self.rate_limit_secs == 0 { return false; }
+        self.rate_limit_secs -= 1;
+        if self.rate_limit_secs == 0 {
+            self.rate_limited = false;
+        }
+        true
+    }
+
+    pub(super) fn maybe_scroll_to_bottom(&mut self) {
+        // The scroll_state is driven to the bottom inside render_viewport when at_bottom is true.
+        // Calling this just keeps the at_bottom flag set; the position is applied at render time.
+    }
+}

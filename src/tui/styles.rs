@@ -336,6 +336,10 @@ pub fn style_user_text() -> Style {
     Style::default().fg(col_user())
 }
 
+pub fn style_thinking() -> Style {
+    Style::default().fg(col_system()).add_modifier(Modifier::ITALIC | Modifier::DIM)
+}
+
 pub fn col_app_bg() -> Color {
     theme_rgb([8, 12, 24], [252, 253, 255], |t| t.bg)
 }
