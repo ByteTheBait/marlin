@@ -29,10 +29,39 @@ enum FieldKind {
 
 struct MenuItem {
     key: &'static str,
-    label: &'static str,
+    label: String,
     kind: FieldKind,
     options: Vec<String>,
     current: String,
+}
+
+/// Step within the "New provider" wizard — gathers name, URL, model, and API
+/// key one at a time (each a separate Enter-to-confirm text entry on the same
+/// row) before creating the provider in one shot.
+#[derive(Clone, Copy, PartialEq)]
+enum NewProviderField {
+    Name,
+    Endpoint,
+    Model,
+    ApiKey,
+}
+
+impl NewProviderField {
+    fn label(&self) -> &'static str {
+        match self {
+            NewProviderField::Name => "New: name",
+            NewProviderField::Endpoint => "New: URL",
+            NewProviderField::Model => "New: model",
+            NewProviderField::ApiKey => "New: key",
+        }
+    }
+}
+
+struct NewProviderWizard {
+    field: NewProviderField,
+    name: String,
+    endpoint: String,
+    model: String,
 }
 
 /// Interactive settings overlay opened with /config. Cycle rows are changed
@@ -49,13 +78,17 @@ pub struct ConfigMenu {
     animate: bool,
     editing: bool,
     edit_buf: String,
+    /// Set while stepping through the "New provider" row's name/URL/model/key
+    /// sequence; `None` for ordinary single-value text rows (e.g. API key).
+    new_provider: Option<NewProviderWizard>,
 }
 
-const MAX_TOKEN_PRESETS: [usize; 6] = [1024, 2048, 4096, 8192, 16384, 32768];
+const MAX_TOKEN_PRESETS: [usize; 10] =
+    [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288];
 
 impl ConfigMenu {
     pub fn new(state: ConfigState, animate: bool) -> Self {
-        Self { state, selected: 0, animate, editing: false, edit_buf: String::new() }
+        Self { state, selected: 0, animate, editing: false, edit_buf: String::new(), new_provider: None }
     }
 
     /// Replace the snapshot (engine refresh) without losing cursor position.
@@ -88,80 +121,91 @@ impl ConfigMenu {
             tokens.sort_unstable();
         }
         let onoff = |b: bool| if b { "on" } else { "off" }.to_string();
+        let (np_label, np_current) = match &self.new_provider {
+            Some(w) => (w.field.label().to_string(), String::new()),
+            None => ("New provider".to_string(), "(name, enter)".to_string()),
+        };
         vec![
             MenuItem {
                 key: "provider",
-                label: "Provider",
+                label: "Provider".into(),
                 kind: FieldKind::Cycle,
                 options: s.providers.clone(),
                 current: s.provider.clone(),
             },
             MenuItem {
+                key: "new_provider",
+                label: np_label,
+                kind: FieldKind::Text,
+                options: vec![],
+                current: np_current,
+            },
+            MenuItem {
                 key: "api_key",
-                label: "API key",
+                label: "API key".into(),
                 kind: FieldKind::Text,
                 options: vec![],
                 current: Self::mask_key(&s.api_key),
             },
             MenuItem {
                 key: "model",
-                label: "Model",
+                label: "Model".into(),
                 kind: FieldKind::Cycle,
                 options: models,
                 current: s.model.clone(),
             },
             MenuItem {
                 key: "theme",
-                label: "Theme",
+                label: "Theme".into(),
                 kind: FieldKind::Cycle,
                 options: vec!["dark".into(), "light".into()],
                 current: s.theme.clone(),
             },
             MenuItem {
                 key: "sandbox",
-                label: "Sandbox",
+                label: "Sandbox".into(),
                 kind: FieldKind::Cycle,
                 options: vec!["off".into(), "permissive".into(), "mxc".into()],
                 current: s.sandbox_mode.clone(),
             },
             MenuItem {
                 key: "permissions",
-                label: "Permissions",
+                label: "Permissions".into(),
                 kind: FieldKind::Cycle,
                 options: vec!["require".into(), "skip".into()],
                 current: if s.skip_permissions { "skip" } else { "require" }.into(),
             },
             MenuItem {
                 key: "clean_env",
-                label: "Clean env",
+                label: "Clean env".into(),
                 kind: FieldKind::Cycle,
                 options: vec!["off".into(), "on".into()],
                 current: onoff(s.clean_env),
             },
             MenuItem {
                 key: "ast",
-                label: "AST mode",
+                label: "AST mode".into(),
                 kind: FieldKind::Cycle,
                 options: vec!["off".into(), "sexpr".into(), "harness".into()],
                 current: s.ast_mode.clone(),
             },
             MenuItem {
                 key: "subagents",
-                label: "Skill subagents",
+                label: "Skill subagents".into(),
                 kind: FieldKind::Cycle,
                 options: vec!["off".into(), "on".into()],
                 current: onoff(s.skill_subagents),
             },
             MenuItem {
                 key: "animate",
-                label: "Animate",
+                label: "Animate".into(),
                 kind: FieldKind::Cycle,
                 options: vec!["off".into(), "on".into()],
                 current: onoff(self.animate),
             },
             MenuItem {
                 key: "max_tokens",
-                label: "Max tokens",
+                label: "Max tokens".into(),
                 kind: FieldKind::Cycle,
                 options: tokens.iter().map(|t| t.to_string()).collect(),
                 current: s.max_tokens.to_string(),
@@ -192,13 +236,25 @@ impl ConfigMenu {
         }
     }
 
-    /// Right/Enter/Space on the selected row: cycles fixed-option rows, or
-    /// opens inline text edit for free-text rows (e.g. API key).
+    /// Right/Enter/Space on the selected row: cycles fixed-option rows, opens
+    /// the name/URL/model/key wizard for "New provider", or opens inline text
+    /// edit for other free-text rows (e.g. API key).
     fn activate(&mut self) -> ConfigMenuOutcome {
         let items = self.items();
         let Some(item) = items.get(self.selected) else {
             return ConfigMenuOutcome::None;
         };
+        if item.key == "new_provider" {
+            self.new_provider = Some(NewProviderWizard {
+                field: NewProviderField::Name,
+                name: String::new(),
+                endpoint: String::new(),
+                model: String::new(),
+            });
+            self.editing = true;
+            self.edit_buf.clear();
+            return ConfigMenuOutcome::None;
+        }
         if item.kind == FieldKind::Text {
             self.editing = true;
             self.edit_buf.clear();
@@ -208,6 +264,9 @@ impl ConfigMenu {
     }
 
     fn on_key_editing(&mut self, key: KeyEvent) -> ConfigMenuOutcome {
+        if self.new_provider.is_some() {
+            return self.on_key_new_provider(key);
+        }
         match key.code {
             KeyCode::Esc => {
                 self.editing = false;
@@ -224,6 +283,61 @@ impl ConfigMenu {
                 let value = std::mem::take(&mut self.edit_buf);
                 self.apply_local(key, &value);
                 ConfigMenuOutcome::Set { key, value }
+            }
+            KeyCode::Backspace => {
+                self.edit_buf.pop();
+                ConfigMenuOutcome::None
+            }
+            KeyCode::Char(c) => {
+                self.edit_buf.push(c);
+                ConfigMenuOutcome::None
+            }
+            _ => ConfigMenuOutcome::None,
+        }
+    }
+
+    /// Steps the "New provider" row through name → URL → model → key, one
+    /// Enter-confirmed text entry per field, then emits a single `Set` whose
+    /// value packs all four as newline-separated fields (Enter is the only
+    /// way to commit a field, so a literal newline can never end up in
+    /// `edit_buf`). `apply_config_set` on the engine side splits it back out.
+    fn on_key_new_provider(&mut self, key: KeyEvent) -> ConfigMenuOutcome {
+        match key.code {
+            KeyCode::Esc => {
+                self.new_provider = None;
+                self.editing = false;
+                self.edit_buf.clear();
+                ConfigMenuOutcome::None
+            }
+            KeyCode::Enter => {
+                let value = std::mem::take(&mut self.edit_buf).trim().to_string();
+                let wiz = self.new_provider.as_mut().expect("checked by caller");
+                match wiz.field {
+                    NewProviderField::Name => {
+                        if value.is_empty() {
+                            return ConfigMenuOutcome::None;
+                        }
+                        wiz.name = value;
+                        wiz.field = NewProviderField::Endpoint;
+                        ConfigMenuOutcome::None
+                    }
+                    NewProviderField::Endpoint => {
+                        wiz.endpoint = value;
+                        wiz.field = NewProviderField::Model;
+                        ConfigMenuOutcome::None
+                    }
+                    NewProviderField::Model => {
+                        wiz.model = value;
+                        wiz.field = NewProviderField::ApiKey;
+                        ConfigMenuOutcome::None
+                    }
+                    NewProviderField::ApiKey => {
+                        let encoded = format!("{}\n{}\n{}\n{}", wiz.name, wiz.endpoint, wiz.model, value);
+                        self.new_provider = None;
+                        self.editing = false;
+                        ConfigMenuOutcome::Set { key: "new_provider", value: encoded }
+                    }
+                }
             }
             KeyCode::Backspace => {
                 self.edit_buf.pop();

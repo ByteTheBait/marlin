@@ -1714,10 +1714,27 @@ impl Engine {
                     return None;
                 }
                 let provider = args[0].to_lowercase();
-                match crate::providers::user_providers::set_endpoint(&self.marlin_dir, &provider, args[1]) {
+                let new_endpoint = args[1];
+
+                if let Err(e) = crate::providers::user_providers::validate_endpoint(new_endpoint) {
+                    err!(format!("Invalid endpoint: {e}"));
+                    return None;
+                }
+
+                // Whether this provider already has a saved key, checked
+                // *before* the switch — used below to warn if we're about to
+                // start sending it to a new (non-local) host.
+                let has_existing_key = self.cfg.providers.get(&provider)
+                    .map(|p| !p.api_key.is_empty())
+                    .unwrap_or(false)
+                    || crate::providers::user_providers::load_all(&self.marlin_dir)
+                        .iter()
+                        .any(|p| p.name.eq_ignore_ascii_case(&provider) && !p.api_key.is_empty());
+
+                match crate::providers::user_providers::set_endpoint(&self.marlin_dir, &provider, new_endpoint) {
                     Ok(true) => {}
                     Ok(false) => {
-                        self.cfg.set_endpoint(&provider, args[1]);
+                        self.cfg.set_endpoint(&provider, new_endpoint);
                         save_cfg!();
                     }
                     Err(e) => {
@@ -1726,7 +1743,13 @@ impl Engine {
                     }
                 }
                 self.registry = Registry::new(&self.cfg, Some(&self.marlin_dir));
-                sys!(format!("Endpoint updated for {}: {}", provider, args[1]));
+                sys!(format!("Endpoint updated for {}: {}", provider, new_endpoint));
+
+                if has_existing_key && !crate::providers::user_providers::endpoint_is_private_host(new_endpoint) {
+                    sys!(format!(
+                        "⚠ {provider} has a saved API key — it will now be sent to {new_endpoint} on every request. Only proceed if you trust this endpoint."
+                    ));
+                }
             }
 
             "/system" | "/sys" => {
@@ -2789,6 +2812,39 @@ impl Engine {
                         provider: value.to_string(),
                         model,
                     })).await;
+                }
+            }
+            "new_provider" => {
+                // Packed by the config menu's name/URL/model/key wizard as
+                // newline-separated fields (see ConfigMenu::on_key_new_provider).
+                let mut parts = value.splitn(4, '\n');
+                let name = parts.next().unwrap_or("").trim();
+                let endpoint = parts.next().unwrap_or("").trim();
+                let model = parts.next().unwrap_or("").trim();
+                let api_key = parts.next().unwrap_or("").trim();
+                if name.is_empty() {
+                    // Submitted with nothing typed — silently ignore.
+                } else if self.registry.get(name).is_ok() {
+                    let _ = ui_tx.send(UiUpdate::ErrorMsg(format!("Provider already exists: {name}"))).await;
+                } else {
+                    match crate::providers::user_providers::save_new(&self.marlin_dir, name, endpoint, model, api_key) {
+                        Ok(_) => {
+                            self.registry = Registry::new(&self.cfg, Some(&self.marlin_dir));
+                            self.cfg.active_provider = name.to_string();
+                            self.cfg.active_model = self.registry.get(name)
+                                .map(|p| p.models().first().cloned().unwrap_or_default())
+                                .unwrap_or_default();
+                            let _ = self.cfg.save();
+                            let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
+                                provider: name.to_string(),
+                                model: self.cfg.active_model.clone(),
+                            })).await;
+                            let _ = ui_tx.send(UiUpdate::SystemMsg(format!("Provider '{name}' created and selected."))).await;
+                        }
+                        Err(e) => {
+                            let _ = ui_tx.send(UiUpdate::ErrorMsg(format!("Failed to create provider: {e}"))).await;
+                        }
+                    }
                 }
             }
             "model" => {

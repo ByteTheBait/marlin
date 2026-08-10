@@ -3,6 +3,50 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+// ── Endpoint validation ───────────────────────────────────────────────────────
+
+/// Rejects anything that isn't a usable http(s) API base URL — in particular
+/// `file://` and other schemes that have no business being a chat-completions
+/// endpoint.
+pub fn validate_endpoint(endpoint: &str) -> std::result::Result<(), String> {
+    let url = reqwest::Url::parse(endpoint).map_err(|e| format!("not a valid URL: {e}"))?;
+    match url.scheme() {
+        "http" | "https" => Ok(()),
+        other => Err(format!(
+            "unsupported scheme {other:?} — only http/https endpoints are supported"
+        )),
+    }
+}
+
+/// True if `endpoint`'s host is loopback, private, or link-local.
+///
+/// Informational only — never used to block, since pointing a provider at a
+/// local/self-hosted inference server (Ollama, LM Studio, a home-LAN vLLM
+/// box, ...) is a legitimate and common setup. Used to warn when an endpoint
+/// change might be redirecting a *stored API key* somewhere the user didn't
+/// intend, not to gate self-hosted use.
+pub fn endpoint_is_private_host(endpoint: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(endpoint) else { return false };
+    let Some(host) = url.host_str() else { return false };
+    // IPv6 literals come back bracketed (e.g. "[::1]") — strip for parsing.
+    let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        Ok(std::net::IpAddr::V6(v6)) => {
+            if v6.is_loopback() {
+                return true;
+            }
+            let seg0 = v6.segments()[0];
+            seg0 & 0xfe00 == 0xfc00 // fc00::/7 (unique local)
+                || seg0 & 0xffc0 == 0xfe80 // fe80::/10 (link local)
+        }
+        Err(_) => false,
+    }
+}
+
 // ── User-defined provider ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,21 +130,46 @@ pub fn set_api_key(marlin_dir: &Path, name: &str, key: &str) -> Result<bool> {
 /// Update the endpoint for a user-defined provider. Returns `false` if `name`
 /// doesn't match any provider in `~/.marlin/providers/*.toml`.
 pub fn set_endpoint(marlin_dir: &Path, name: &str, endpoint: &str) -> Result<bool> {
+    validate_endpoint(endpoint).map_err(|e| anyhow::anyhow!(e))?;
     set_field(marlin_dir, name, |p| p.endpoint = endpoint.to_string())
 }
 
+fn write_provider(marlin_dir: &Path, p: &UserProvider) -> Result<PathBuf> {
+    let filename = format!("{}.toml", p.name.replace([' ', '/'], "_").to_lowercase());
+    let path = providers_dir(marlin_dir).join(filename);
+    std::fs::write(&path, toml::to_string_pretty(p)?)?;
+    Ok(path)
+}
+
 pub fn save_template(marlin_dir: &Path, name: &str) -> Result<PathBuf> {
-    let p = UserProvider {
+    write_provider(marlin_dir, &UserProvider {
         name: name.to_string(),
         endpoint: "https://api.example.com/v1".into(),
         api_key: String::new(),
         model: "model-name".into(),
         models: vec!["model-name".into(), "model-name-fast".into()],
+    })
+}
+
+/// Create a user-defined provider from values gathered interactively (the
+/// config menu's "New provider" wizard). Blank `endpoint`/`model` fall back
+/// to the same placeholders `save_template` uses, so the file is still valid
+/// TOML the user can hand-edit later; a non-blank endpoint is validated.
+pub fn save_new(marlin_dir: &Path, name: &str, endpoint: &str, model: &str, api_key: &str) -> Result<PathBuf> {
+    let endpoint = if endpoint.is_empty() {
+        "https://api.example.com/v1".to_string()
+    } else {
+        validate_endpoint(endpoint).map_err(|e| anyhow::anyhow!(e))?;
+        endpoint.to_string()
     };
-    let filename = format!("{}.toml", name.replace([' ', '/'], "_").to_lowercase());
-    let path = providers_dir(marlin_dir).join(filename);
-    std::fs::write(&path, toml::to_string_pretty(&p)?)?;
-    Ok(path)
+    let model = if model.is_empty() { "model-name".to_string() } else { model.to_string() };
+    write_provider(marlin_dir, &UserProvider {
+        name: name.to_string(),
+        endpoint,
+        api_key: api_key.to_string(),
+        model: model.clone(),
+        models: vec![model],
+    })
 }
 
 // ── Default providers ─────────────────────────────────────────────────────────
@@ -129,4 +198,36 @@ fn default_providers() -> Vec<UserProvider> {
         model: "local-model".into(),
         models: vec![],
     }]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_endpoint_accepts_http_and_https() {
+        assert!(validate_endpoint("https://api.example.com/v1").is_ok());
+        assert!(validate_endpoint("http://localhost:1234/v1").is_ok());
+    }
+
+    #[test]
+    fn validate_endpoint_rejects_non_http_schemes() {
+        assert!(validate_endpoint("file:///etc/passwd").is_err());
+        assert!(validate_endpoint("ftp://example.com").is_err());
+    }
+
+    #[test]
+    fn validate_endpoint_rejects_garbage() {
+        assert!(validate_endpoint("not a url").is_err());
+    }
+
+    #[test]
+    fn private_host_detection() {
+        assert!(endpoint_is_private_host("http://localhost:1234/v1"));
+        assert!(endpoint_is_private_host("http://127.0.0.1:8080"));
+        assert!(endpoint_is_private_host("http://192.168.1.50:8000"));
+        assert!(endpoint_is_private_host("http://[::1]:8080"));
+        assert!(!endpoint_is_private_host("https://api.example.com/v1"));
+        assert!(!endpoint_is_private_host("https://8.8.8.8/v1"));
+    }
 }
