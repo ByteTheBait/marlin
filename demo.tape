@@ -47,9 +47,9 @@ Type "/provider ollama-cloud" Enter
 Sleep 500ms
 Type "/model deepseek-v4-flash" Enter
 # ── ask something real (deepseek will respond) ───────────────────────
-Type "explore this directory and list files"
+Type "what is this project and whas does it do"
 Enter
-Sleep 20s
+Sleep 25s
 
 # ── graceful exit ─────────────────────────────────────────────────────────────
 Ctrl+Q
