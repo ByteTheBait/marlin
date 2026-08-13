@@ -6,6 +6,7 @@ use std::sync::{OnceLock, RwLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ratatui::style::{Color, Modifier, Style};
+use tachyonfx::Interpolatable;
 
 use crate::config::{ThemeColors, ThemePalette};
 
@@ -82,6 +83,12 @@ fn col_bg_status() -> Color {
 fn col_deep_ocean() -> Color {
     // Foreground on colored chips — white in both themes
     if is_light() { Color::Rgb(255, 255, 255) } else { Color::Rgb(8, 12, 24) }
+}
+fn col_scroll_hint() -> Color {
+    theme_rgb([215, 155, 45], [150, 90, 15], |t| t.scroll_hint)
+}
+fn col_stream_highlight() -> Color {
+    theme_rgb([0, 170, 170], [0, 120, 140], |t| t.stream_highlight)
 }
 
 // Keep as pub consts for the few places that still need them directly
@@ -308,6 +315,36 @@ pub fn style_status_tool_name() -> Style {
     }
 }
 
+/// Git branch indicator — success/green accent, matching the badge family.
+pub fn style_status_git() -> Style {
+    Style::default()
+        .fg(col_deep_ocean())
+        .bg(col_success())
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Compact per-tool icon glyph, used alongside (or in place of) the tool name
+/// in the chat tool badge and the status bar. A small curated set — anything
+/// unrecognized falls back to a generic spark glyph so the grid never shows a
+/// raw underscore name.
+pub fn tool_glyph(raw: &str) -> &'static str {
+    match raw {
+        "read_file"          => "◈",
+        "write_file"         => "✎",
+        "edit_file"          => "✎",
+        "notebook_edit"      => "✎",
+        "run_command"        => "⚡",
+        "list_directory"     => "▤",
+        "create_directory"   => "▣",
+        "search_codebase"    => "⌕",
+        "run_skill"          => "✦",
+        "ast_skeleton"       => "⊞",
+        "ast_get_node"       => "⊞",
+        "ast_mutate"         => "⊞",
+        _                    => "✦",
+    }
+}
+
 pub fn style_status_streaming() -> Style {
     Style::default().fg(col_aqua())
 }
@@ -340,8 +377,32 @@ pub fn style_user_text() -> Style {
     Style::default().fg(col_user())
 }
 
+/// Style for the "scroll to bottom" indicator that appears when new content
+/// arrives while the user is scrolled up.
+pub fn style_scroll_hint() -> Style {
+    Style::default()
+        .fg(col_scroll_hint())
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Left-border accent for the live streaming buffer (distinct from committed
+/// entries).
+pub fn style_stream_highlight() -> Style {
+    Style::default().fg(col_stream_highlight())
+}
+
 pub fn style_thinking() -> Style {
     Style::default().fg(col_system()).add_modifier(Modifier::ITALIC | Modifier::DIM)
+}
+
+/// Muted, grayed-out style for the final `mark_complete` summary text — reads
+/// as a quiet closing note rather than a normal assistant message.
+pub fn style_summary() -> Style {
+    if is_light() {
+        Style::default().fg(Color::Rgb(120, 130, 145)).add_modifier(Modifier::DIM)
+    } else {
+        Style::default().fg(Color::Rgb(110, 120, 135)).add_modifier(Modifier::DIM)
+    }
 }
 
 pub fn col_app_bg() -> Color {
@@ -362,4 +423,115 @@ pub fn style_input_bubble() -> Style {
     } else {
         Style::default().fg(Color::Rgb(35, 55, 90))
     }
+}
+
+// ── Syntax highlighting styles (code blocks) ─────────────────────────────────
+
+/// Code comments — dim gray, italic.
+pub fn style_syntax_comment() -> Style {
+    if is_light() {
+        Style::default().fg(Color::Rgb(120, 130, 145)).add_modifier(Modifier::ITALIC)
+    } else {
+        Style::default().fg(Color::Rgb(90, 105, 120)).add_modifier(Modifier::ITALIC)
+    }
+}
+
+/// String literals — green.
+pub fn style_syntax_string() -> Style {
+    if is_light() {
+        Style::default().fg(Color::Rgb(50, 150, 80))
+    } else {
+        Style::default().fg(Color::Rgb(140, 210, 150))
+    }
+}
+
+/// Keywords — violet/purple.
+pub fn style_syntax_keyword() -> Style {
+    if is_light() {
+        Style::default().fg(Color::Rgb(140, 70, 170))
+    } else {
+        Style::default().fg(Color::Rgb(200, 140, 230))
+    }
+}
+
+/// Numbers — amber.
+pub fn style_syntax_number() -> Style {
+    if is_light() {
+        Style::default().fg(Color::Rgb(200, 120, 40))
+    } else {
+        Style::default().fg(Color::Rgb(230, 175, 90))
+    }
+}
+
+/// Function/method names and type names — blue.
+pub fn style_syntax_func() -> Style {
+    if is_light() {
+        Style::default().fg(Color::Rgb(30, 110, 190))
+    } else {
+        Style::default().fg(Color::Rgb(110, 170, 230))
+    }
+}
+
+/// Operators (punctuation like = + - * / < >) — steel.
+pub fn style_syntax_operator() -> Style {
+    style_inline_text()
+}
+
+/// Default code text (non-tokenized) — the existing code-block color.
+pub fn style_syntax_default() -> Style {
+    style_code_block()
+}
+
+// ── Subtle animation helpers ─────────────────────────────────────────────────
+
+/// Smoothly interpolate between `a` and `b` using a sine wave driven by the
+/// frame counter. `period_frames` is the full cycle length in frames (e.g. 60
+/// for a 1-second pulse at 60 fps). Returns a color that oscillates between
+/// `a` and `b` (and back) over the period.
+pub fn pulse_rgb(a: Color, b: Color, frame: u64, period_frames: u64) -> Color {
+    let t = (frame % period_frames) as f32 / period_frames as f32;
+    let alpha = (t * std::f32::consts::TAU).sin() * 0.5 + 0.5; // 0..1, sine
+    a.lerp(&b, alpha)
+}
+
+/// Pulsing variant of the streaming cursor — brightens and dims the aqua.
+pub fn style_cursor_pulse(frame: u64) -> Style {
+    let base = if is_light() { Color::Rgb(0, 115, 150) } else { Color::Rgb(0, 200, 200) };
+    let dim = if is_light() { Color::Rgb(0, 70, 100) } else { Color::Rgb(0, 120, 120) };
+    Style::default().fg(pulse_rgb(base, dim, frame, 40))
+}
+
+/// Pulsing variant of the tool badge — gently brightens the chip background.
+pub fn style_tool_badge_pulse(frame: u64) -> Style {
+    let (fg, bg) = if is_light() {
+        (Color::Rgb(25, 60, 120), Color::Rgb(200, 220, 250))
+    } else {
+        (Color::Rgb(160, 205, 255), Color::Rgb(18, 38, 80))
+    };
+    let bg_hi = if is_light() { Color::Rgb(215, 235, 255) } else { Color::Rgb(28, 55, 110) };
+    let bg = pulse_rgb(bg, bg_hi, frame, 50);
+    Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD)
+}
+
+/// Pulsing variant of the scroll-to-bottom hint — gently blinks the amber.
+pub fn style_scroll_hint_pulse(frame: u64) -> Style {
+    let base = col_scroll_hint();
+    let dim = if is_light() { Color::Rgb(110, 60, 5) } else { Color::Rgb(120, 80, 20) };
+    Style::default()
+        .fg(pulse_rgb(base, dim, frame, 30))
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Pulsing variant of the input bubble border while streaming.
+pub fn style_input_bubble_pulse(frame: u64) -> Style {
+    let base = if is_light() { Color::Rgb(0, 110, 140) } else { Color::Rgb(0, 200, 200) };
+    let dim = if is_light() { Color::Rgb(0, 60, 90) } else { Color::Rgb(0, 110, 110) };
+    Style::default().fg(pulse_rgb(base, dim, frame, 50))
+}
+
+/// Pulsing variant of the status-bar "streaming" indicator.
+pub fn style_status_streaming_pulse(frame: u64) -> Style {
+    let base = col_aqua();
+    let dim = if is_light() { Color::Rgb(0, 60, 90) } else { Color::Rgb(0, 110, 110) };
+    Style::default().fg(pulse_rgb(base, dim, frame, 30))
 }

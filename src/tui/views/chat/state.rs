@@ -46,6 +46,9 @@ pub struct ChatView {
 
     // Approval modal
     pub approval_pending: Option<String>,
+    /// Set when the engine is waiting for the user to answer the model's
+    /// ask_user tool call. Holds the question to display in the modal.
+    pub ask_pending: Option<String>,
 
     // /config settings menu overlay
     pub config_menu: Option<ConfigMenu>,
@@ -64,6 +67,10 @@ pub struct ChatView {
     pub content_height: u16,
     pub viewport_height: u16,
     pub at_bottom: bool,
+    /// True when new content (a stream chunk, tool call, etc.) arrived while
+    /// the user was scrolled up, so the renderer can show a "scroll to bottom"
+    /// hint. Cleared once the user returns to the bottom.
+    pub new_content_arrived: bool,
 
     pub width: u16,
     pub height: u16,
@@ -112,6 +119,7 @@ impl ChatView {
             rate_limit_total: 0,
             quit_armed: false,
             approval_pending: None,
+            ask_pending: None,
             config_menu: None,
             viewer: None,
             diff_pane: None,
@@ -120,6 +128,7 @@ impl ChatView {
             content_height: 0,
             viewport_height: 1,
             at_bottom: true,
+            new_content_arrived: false,
             width,
             height,
             provider: String::new(),
@@ -177,8 +186,29 @@ impl ChatView {
                 self.maybe_scroll_to_bottom();
             }
             UiUpdate::ToolCall { name, input } => {
+                // mark_complete is a pure completion signal — its summary is
+                // rendered separately (see UiUpdate::Summary) as muted text, so
+                // don't show the tool-call bubble or count it as a tool iteration.
+                if name == "mark_complete" {
+                    return;
+                }
                 self.current_tool = name.clone();
                 self.tool_iterations += 1;
+                // Commit any partial streamed text as an Assistant entry *before*
+                // the tool call. Otherwise the in-progress text stays in stream_buf
+                // (which is always appended at the very bottom of the viewport) and
+                // the tool bubble renders above it — even though the text was said
+                // first. Committing here makes the text scroll up and the tool bubble
+                // follow it chronologically, as it should.
+                if !self.stream_buf.is_empty() {
+                    let text = std::mem::take(&mut self.stream_buf);
+                    self.entries.push(ChatEntry {
+                        role: EntryRole::Assistant,
+                        content: text,
+                        tool_name: String::new(),
+                        time: Local::now(),
+                    });
+                }
                 self.entries.push(ChatEntry {
                     role: EntryRole::ToolCall,
                     content: input,
@@ -188,10 +218,24 @@ impl ChatView {
                 self.maybe_scroll_to_bottom();
             }
             UiUpdate::ToolResult { name, output, is_error } => {
+                // The mark_complete result ("Acknowledged.") is a pure signal —
+                // hide it along with its tool call.
+                if name == "mark_complete" {
+                    return;
+                }
                 self.entries.push(ChatEntry {
                     role: EntryRole::ToolResult { is_error },
                     content: output,
                     tool_name: name,
+                    time: Local::now(),
+                });
+                self.maybe_scroll_to_bottom();
+            }
+            UiUpdate::Summary(summary) => {
+                self.entries.push(ChatEntry {
+                    role: EntryRole::Summary,
+                    content: summary,
+                    tool_name: String::new(),
                     time: Local::now(),
                 });
                 self.maybe_scroll_to_bottom();
@@ -235,6 +279,9 @@ impl ChatView {
             }
             UiUpdate::AwaitingApproval { cmd } => {
                 self.approval_pending = Some(cmd);
+            }
+            UiUpdate::AskUser { question } => {
+                self.ask_pending = Some(question);
             }
             UiUpdate::ConfigState { state, open } => {
                 if let Some(menu) = &mut self.config_menu {
@@ -309,5 +356,10 @@ impl ChatView {
     pub(super) fn maybe_scroll_to_bottom(&mut self) {
         // The scroll_state is driven to the bottom inside render_viewport when at_bottom is true.
         // Calling this just keeps the at_bottom flag set; the position is applied at render time.
+        // But if the user has scrolled up, mark that new content arrived so the
+        // renderer can show a "scroll to bottom" hint.
+        if !self.at_bottom {
+            self.new_content_arrived = true;
+        }
     }
 }

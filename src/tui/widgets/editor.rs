@@ -93,6 +93,14 @@ impl EditorPane {
         self.pending_discard = false;
     }
 
+    /// Insert pasted text (from a bracketed-paste event) into the buffer as a
+    /// single unit, so newlines in the paste become line breaks rather than
+    /// being interpreted as keys.
+    pub fn paste(&mut self, text: &str) {
+        self.pending_discard = false;
+        self.textarea.insert_str(text);
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) -> EditorOutcome {
         if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.pending_discard = false;

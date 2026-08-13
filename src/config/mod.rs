@@ -183,6 +183,14 @@ pub struct Config {
     /// cap). Set with `/budget <n>`.
     #[serde(default = "default_token_budget")]
     pub token_budget: usize,
+    /// Hard cap on tool-call round-trips within one agentic turn. Set in the
+    /// /config menu (or directly in config.json). Defaults to 100.
+    #[serde(default = "default_tool_call_limit")]
+    pub tool_call_limit: usize,
+}
+
+fn default_tool_call_limit() -> usize {
+    100
 }
 
 fn default_skill_subagents() -> bool {
@@ -351,6 +359,7 @@ impl Config {
             model_tiers: None,
             skill_subagents: true,
             token_budget: default_token_budget(),
+            tool_call_limit: default_tool_call_limit(),
         }
     }
 }
@@ -390,6 +399,14 @@ pub struct ThemeColors {
     /// Secondary text and argument labels
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steel: Option<[u8; 3]>,
+    /// "Scroll to bottom" indicator that appears when new content arrives
+    /// while the user is scrolled up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scroll_hint: Option<[u8; 3]>,
+    /// Left-border accent on the live streaming buffer (distinct from committed
+    /// entries).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_highlight: Option<[u8; 3]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -470,19 +487,89 @@ pub fn install_default_themes(marlin_dir: &Path) {
 }
 
 fn default_themes() -> Vec<ThemeFile> {
-    vec![ThemeFile {
-        name: "nord".into(),
-        description: "Nord color scheme".into(),
-        dark: Some(ThemeColors {
-            bg: Some([46, 52, 64]),
-            assistant: Some([136, 192, 208]),
-            cobalt: Some([94, 129, 172]),
-            steel: Some([76, 86, 106]),
-            user: Some([229, 233, 240]),
-            ..Default::default()
-        }),
-        light: None,
-    }]
+    vec![
+        ThemeFile {
+            name: "nord".into(),
+            description: "Nord color scheme".into(),
+            dark: Some(ThemeColors {
+                bg: Some([46, 52, 64]),
+                assistant: Some([136, 192, 208]),
+                cobalt: Some([94, 129, 172]),
+                steel: Some([76, 86, 106]),
+                user: Some([229, 233, 240]),
+                ..Default::default()
+            }),
+            light: None,
+        },
+        ThemeFile {
+            name: "dracula".into(),
+            description: "Dracula dark theme".into(),
+            dark: Some(ThemeColors {
+                bg: Some([40, 42, 54]),
+                assistant: Some([255, 121, 198]),
+                cobalt: Some([139, 233, 253]),
+                steel: Some([98, 114, 164]),
+                system: Some([68, 71, 90]),
+                user: Some([248, 248, 242]),
+                success: Some([80, 250, 123]),
+                error: Some([255, 85, 85]),
+                amber: Some([255, 184, 108]),
+                scroll_hint: Some([255, 184, 108]),
+                stream_highlight: Some([139, 233, 253]),
+                ..Default::default()
+            }),
+            light: None,
+        },
+        ThemeFile {
+            name: "gruvbox".into(),
+            description: "Gruvbox dark — warm retro".into(),
+            dark: Some(ThemeColors {
+                bg: Some([40, 40, 40]),
+                assistant: Some([184, 187, 38]),
+                cobalt: Some([131, 165, 152]),
+                steel: Some([146, 131, 116]),
+                system: Some([124, 111, 100]),
+                user: Some([235, 219, 178]),
+                success: Some([152, 151, 26]),
+                error: Some([251, 73, 52]),
+                amber: Some([215, 153, 33]),
+                scroll_hint: Some([215, 153, 33]),
+                stream_highlight: Some([184, 187, 38]),
+                ..Default::default()
+            }),
+            light: Some(ThemeColors {
+                bg: Some([251, 241, 199]),
+                assistant: Some([102, 56, 84]),
+                cobalt: Some([23, 131, 150]),
+                steel: Some([69, 133, 136]),
+                system: Some([124, 111, 100]),
+                user: Some([40, 40, 40]),
+                success: Some([102, 56, 84]),
+                error: Some([204, 36, 29]),
+                amber: Some([177, 98, 134]),
+                ..Default::default()
+            }),
+        },
+        ThemeFile {
+            name: "one-dark".into(),
+            description: "Atom One Dark".into(),
+            dark: Some(ThemeColors {
+                bg: Some([40, 44, 52]),
+                assistant: Some([86, 182, 194]),
+                cobalt: Some([97, 175, 239]),
+                steel: Some([92, 99, 112]),
+                system: Some([92, 99, 112]),
+                user: Some([220, 223, 228]),
+                success: Some([152, 195, 121]),
+                error: Some([224, 108, 117]),
+                amber: Some([229, 192, 123]),
+                scroll_hint: Some([229, 192, 123]),
+                stream_highlight: Some([86, 182, 194]),
+                ..Default::default()
+            }),
+            light: None,
+        },
+    ]
 }
 
 // ── Layout config ─────────────────────────────────────────────────────────────

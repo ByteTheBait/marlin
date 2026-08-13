@@ -210,6 +210,13 @@ impl ConfigMenu {
                 options: tokens.iter().map(|t| t.to_string()).collect(),
                 current: s.max_tokens.to_string(),
             },
+            MenuItem {
+                key: "tool_call_limit",
+                label: "Tool call limit".into(),
+                kind: FieldKind::Text,
+                options: vec![],
+                current: s.tool_call_limit.to_string(),
+            },
         ]
     }
 
@@ -370,6 +377,15 @@ impl ConfigMenu {
         ConfigMenuOutcome::Set { key, value }
     }
 
+    /// Insert pasted text into the active text field. Only meaningful while
+    /// editing (API key row or the new-provider wizard); otherwise the paste
+    /// is ignored so it can't leak into the chat input behind the menu.
+    pub fn paste(&mut self, text: &str) {
+        if self.editing {
+            self.edit_buf.push_str(text);
+        }
+    }
+
     /// Optimistic local update so the row changes instantly; the engine's
     /// ConfigState echo is authoritative and overwrites this shortly after.
     /// `animate` is the one exception — it's TUI-local and never echoed back.
@@ -390,6 +406,7 @@ impl ConfigMenu {
             "ast" => s.ast_mode = value.into(),
             "subagents" => s.skill_subagents = value == "on",
             "max_tokens" => s.max_tokens = value.parse().unwrap_or(s.max_tokens),
+            "tool_call_limit" => s.tool_call_limit = value.parse().unwrap_or(s.tool_call_limit),
             _ => {}
         }
     }
@@ -487,5 +504,62 @@ impl ConfigMenu {
         });
 
         Paragraph::new(lines).style(style_app_bg()).render(inner, buf);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::ConfigState;
+
+    fn menu() -> ConfigMenu {
+        ConfigMenu::new(ConfigState::default(), false)
+    }
+
+    #[test]
+    fn paste_ignored_when_not_editing() {
+        let mut m = menu();
+        m.paste("secret-key");
+        assert!(m.edit_buf.is_empty());
+    }
+
+    #[test]
+    fn paste_appends_to_edit_buf_while_editing() {
+        let mut m = menu();
+        // Open inline edit on the API key row (index 2).
+        m.selected = 2;
+        m.activate();
+        assert!(m.editing);
+        m.paste("sk-abc");
+        m.paste("def");
+        assert_eq!(m.edit_buf, "sk-abcdef");
+    }
+
+    #[test]
+    fn paste_into_new_provider_wizard() {
+        let mut m = menu();
+        // "New provider" row is index 1.
+        m.selected = 1;
+        m.activate();
+        assert!(m.editing);
+        assert!(m.new_provider.is_some());
+        m.paste("my-provider");
+        assert_eq!(m.edit_buf, "my-provider");
+    }
+
+    #[test]
+    fn tool_call_limit_row_is_editable_text() {
+        let mut m = menu();
+        // Find the "Tool call limit" row.
+        let idx = m.items().iter().position(|i| i.key == "tool_call_limit").unwrap();
+        m.selected = idx;
+        m.activate();
+        assert!(m.editing);
+        m.paste("250");
+        assert_eq!(m.edit_buf, "250");
+        // Enter commits it as a Set.
+        let outcome = m.on_key(KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(outcome, ConfigMenuOutcome::Set { key: "tool_call_limit", value } if value == "250"));
+        assert_eq!(m.state.tool_call_limit, 250);
     }
 }

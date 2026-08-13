@@ -2,7 +2,7 @@ use std::io;
 use std::time::Duration;
 
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind},
+    event::{self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind},
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -38,7 +38,7 @@ pub fn run(
     let mut stdout = io::stdout();
     // Without this, a scroll wheel event never reaches the app at all — the
     // terminal emulator just scrolls its own native scrollback buffer instead.
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -59,6 +59,7 @@ pub fn run(
                         UiUpdate::StatusUpdate(info) => {
                             status_bar.provider = info.provider.clone();
                             status_bar.model = info.model.clone();
+                            status_bar.git_branch = info.git_branch.clone();
                         }
                         UiUpdate::AstMode(mode) => {
                             status_bar.ast_mode = mode.clone();
@@ -128,8 +129,12 @@ pub fn run(
             tasks: sidebar.tasks.clone(),
             plan: sidebar.plan.clone(),
             subagents: sidebar.subagents.clone(),
+            selected_category: sidebar.selected_category,
+            expanded: sidebar.expanded,
+            focused: sidebar.focused,
         };
         let approval_cmd = chat.approval_pending.clone();
+        let ask_question = chat.ask_pending.clone();
 
         // Render
         terminal.draw(|f| {
@@ -153,6 +158,7 @@ pub fn run(
                         ..area
                     };
                     status_bar.streaming = chat.streaming;
+                    status_bar.frame = status_bar.frame.wrapping_add(1);
                     status_bar.render(status_area, buf);
 
                     // Split body into chat + optional sidebar
@@ -199,6 +205,11 @@ pub fn run(
                     if let Some(cmd) = &approval_cmd {
                         render_approval_modal(cmd, chat_area, buf);
                     }
+
+                    // ask_user modal — rendered on top of chat
+                    if let Some(question) = &ask_question {
+                        render_ask_modal(question, chat_area, buf);
+                    }
                 }
             }
         })?;
@@ -218,6 +229,28 @@ pub fn run(
                         continue;
                     }
 
+                    // Right arrow focuses the sidebar; Left arrow (or Esc)
+                    // returns to the text input. Tab is left free for slash-command
+                    // autocomplete in the input box.
+                    if key.code == KeyCode::Right {
+                        sidebar.focused = true;
+                        if sidebar.selected_category.is_none() {
+                            sidebar.selected_category = Some(0);
+                        }
+                        continue;
+                    }
+
+                    if sidebar.focused {
+                        match key.code {
+                            KeyCode::Left | KeyCode::Esc => sidebar.focused = false,
+                            KeyCode::Up => sidebar.move_selection(-1),
+                            KeyCode::Down => sidebar.move_selection(1),
+                            KeyCode::Enter => sidebar.toggle_expand(),
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     if let Some(action) = chat.on_key(key) {
                         match &action {
                             Action::Quit => {
@@ -229,6 +262,12 @@ pub fn run(
                             }
                         }
                     }
+                }
+                Event::Paste(text) => {
+                    if let View::Splash(_) = &view {
+                        continue;
+                    }
+                    chat.on_paste(&text);
                 }
                 Event::Resize(w, h) => {
                     status_bar.width = w;
@@ -255,7 +294,7 @@ pub fn run(
     }
 
     terminal::disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste)?;
     Ok(())
 }
 
@@ -301,6 +340,56 @@ fn render_approval_modal(cmd: &str, area: Rect, buf: &mut Buffer) {
             Span::styled("Yes, run it", Style::default().fg(Color::Rgb(150, 220, 170))),
             Span::styled("     [n] ", Style::default().fg(Color::Rgb(215, 70, 70)).add_modifier(Modifier::BOLD)),
             Span::styled("No, deny", Style::default().fg(Color::Rgb(220, 150, 150))),
+        ]),
+    ];
+
+    Paragraph::new(lines)
+        .style(Style::default().bg(Color::Rgb(12, 16, 30)))
+        .render(inner, buf);
+}
+
+fn render_ask_modal(question: &str, area: Rect, buf: &mut Buffer) {
+    let modal_w = area.width.clamp(40, 72);
+    let modal_h = 8u16;
+    let x = area.x + (area.width.saturating_sub(modal_w)) / 2;
+    let y = area.y + (area.height.saturating_sub(modal_h)) / 2;
+    let modal_area = Rect { x, y, width: modal_w, height: modal_h };
+
+    // Clear the background
+    Clear.render(modal_area, buf);
+
+    // Aqua-bordered block
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(Color::Rgb(0, 200, 200)).add_modifier(Modifier::BOLD))
+        .title(Span::styled(
+            " ❓  Marlin asks ",
+            Style::default().fg(Color::Rgb(0, 200, 200)).add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(modal_area);
+    block.render(modal_area, buf);
+
+    let max_q = inner.width.saturating_sub(2) as usize;
+    let q_display = if question.chars().count() > max_q {
+        question.chars().take(max_q.saturating_sub(1)).collect::<String>() + "…"
+    } else {
+        question.to_string()
+    };
+
+    let lines = vec![
+        Line::from(Span::styled(&q_display, Style::default().fg(Color::Rgb(220, 230, 240)))),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Type your answer below, then press Enter.",
+            Style::default().fg(Color::Rgb(150, 180, 200)),
+        )),
+        Line::from(vec![
+            Span::styled("  [enter] ", Style::default().fg(Color::Rgb(70, 195, 110)).add_modifier(Modifier::BOLD)),
+            Span::styled("Submit", Style::default().fg(Color::Rgb(150, 220, 170))),
+            Span::styled("     [esc] ", Style::default().fg(Color::Rgb(215, 70, 70)).add_modifier(Modifier::BOLD)),
+            Span::styled("Cancel", Style::default().fg(Color::Rgb(220, 150, 150))),
         ]),
     ];
 

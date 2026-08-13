@@ -133,6 +133,7 @@ fn run_headless(mut eng: engine::Engine, prompt: String, output_path: Option<Str
     loop {
         match ui_rx.blocking_recv() {
             Some(UiUpdate::StreamChunk(chunk)) => buf.push_str(&chunk),
+            Some(UiUpdate::Summary(summary)) => buf.push_str(&summary),
             Some(UiUpdate::GoalComplete { .. }) => {
                 exit_code = 0;
                 break;

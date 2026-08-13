@@ -28,6 +28,9 @@ impl ChatView {
             }
             let max = self.content_height.saturating_sub(self.viewport_height);
             self.at_bottom = self.scroll_state.offset().y >= max;
+            if self.at_bottom {
+                self.new_content_arrived = false;
+            }
         }
     }
 
@@ -54,6 +57,37 @@ impl ChatView {
         None
     }
 
+    /// Handle a bracketed-paste event. The terminal delivers pasted text as a
+    /// single `Event::Paste` (thanks to `EnableBracketedPaste`), so a paste
+    /// containing newlines is inserted as one unit instead of each Enter being
+    /// interpreted as "send message". Routes to whichever textarea is active:
+    /// the ask_user modal, the /edit pane, or the main chat input.
+    pub fn on_paste(&mut self, text: &str) {
+        // ask_user modal — paste into the answer box.
+        if self.ask_pending.is_some() {
+            self.textarea.insert_str(text);
+            return;
+        }
+
+        // /config menu — paste into the active text field (API key, new-provider
+        // wizard). Ignored when not editing so it can't leak into the chat input
+        // behind the menu.
+        if let Some(menu) = &mut self.config_menu {
+            menu.paste(text);
+            return;
+        }
+
+        // /edit pane — paste into the file buffer.
+        if let Some(editor) = &mut self.editor {
+            editor.paste(text);
+            return;
+        }
+
+        // Main chat input.
+        self.textarea.insert_str(text);
+        self.update_suggestions();
+    }
+
     fn update_suggestions(&mut self) {
         let val = self.textarea.lines().first().cloned().unwrap_or_default();
         let defs = &self.suggestions_defs;
@@ -67,6 +101,31 @@ impl ChatView {
 
     pub fn on_key(&mut self, key: crossterm::event::KeyEvent) -> Option<Action> {
         use crossterm::event::{KeyCode, KeyModifiers};
+
+        // ask_user modal intercepts all input — Enter submits the typed answer,
+        // Esc cancels.
+        if self.ask_pending.is_some() {
+            match key.code {
+                KeyCode::Enter => {
+                    let answer: String = self.textarea.lines().join("\n").trim().to_string();
+                    self.ask_pending = None;
+                    self.textarea = TextArea::default();
+                    self.textarea.set_placeholder_text("Message Marlin... (Enter to send, Ctrl+J for newline)");
+                    return Some(Action::UserAnswer(answer));
+                }
+                KeyCode::Esc => {
+                    self.ask_pending = None;
+                    self.textarea = TextArea::default();
+                    self.textarea.set_placeholder_text("Message Marlin... (Enter to send, Ctrl+J for newline)");
+                    return Some(Action::CancelStream);
+                }
+                _ => {
+                    // Let the user type their answer in the input box.
+                    self.textarea.input(key);
+                    return None;
+                }
+            }
+        }
 
         // Approval modal intercepts all input
         if self.approval_pending.is_some() {
@@ -227,10 +286,14 @@ impl ChatView {
             }
             let max = self.content_height.saturating_sub(self.viewport_height);
             self.at_bottom = self.scroll_state.offset().y >= max;
+            if self.at_bottom {
+                self.new_content_arrived = false;
+            }
             return None;
         }
         if key.code == KeyCode::End {
             self.at_bottom = true;
+            self.new_content_arrived = false;
             return None; // render_viewport will pin to bottom
         }
         if key.code == KeyCode::Home {
@@ -250,6 +313,7 @@ impl ChatView {
             self.history_idx = -1;
             self.history_draft.clear();
             self.at_bottom = true;
+            self.new_content_arrived = false;
 
             // Add to local input history (display only)
             if self.input_history.first().map(String::as_str) != Some(&input) {

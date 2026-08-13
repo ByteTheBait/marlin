@@ -66,6 +66,8 @@ See [Command permissions](security.md#command-permissions) for how `/allow` and 
 | `↑` / `↓`  | Scroll history / chat       |
 | `PgUp/Dn`  | Scroll chat by page         |
 | `Tab`      | Autocomplete slash command  |
+| `→`        | Focus the sidebar           |
+| `←` / `Esc`| Return to the text input    |
 
 ---
 

@@ -40,6 +40,13 @@ pub struct Sidebar {
     /// when non-empty; a coarse ordered checklist, not a replacement for it.
     pub plan: Vec<TaskStep>,
     pub subagents: Vec<SubagentEntry>,
+    /// Index of the currently selected task category (grouped by tool name).
+    /// `None` when no categories exist.
+    pub selected_category: Option<usize>,
+    /// Whether the selected category is expanded to show its individual tasks.
+    pub expanded: bool,
+    /// Whether the sidebar (not the chat) currently owns keyboard input.
+    pub focused: bool,
 }
 
 impl Sidebar {
@@ -51,6 +58,40 @@ impl Sidebar {
             tasks: vec![],
             plan: vec![],
             subagents: vec![],
+            selected_category: None,
+            expanded: false,
+            focused: false,
+        }
+    }
+
+    /// Group tasks by tool name, preserving order of first appearance. Tasks
+    /// without a tool name fall into a catch-all "other" bucket.
+    pub fn task_categories(&self) -> Vec<(String, Vec<&TaskStep>)> {
+        let mut order: Vec<String> = Vec::new();
+        let mut map: std::collections::HashMap<String, Vec<&TaskStep>> = std::collections::HashMap::new();
+        for t in &self.tasks {
+            let key = t.tool_name.clone().unwrap_or_else(|| "other".to_string());
+            if !map.contains_key(&key) {
+                order.push(key.clone());
+            }
+            map.entry(key).or_default().push(t);
+        }
+        order.into_iter().map(|k| (k.clone(), map.remove(&k).unwrap_or_default())).collect()
+    }
+
+    /// Move the selected category up/down by `delta` (clamped to range).
+    pub fn move_selection(&mut self, delta: isize) {
+        let cats = self.task_categories();
+        if cats.is_empty() { self.selected_category = None; return; }
+        let cur = self.selected_category.unwrap_or(0) as isize;
+        let next = (cur + delta).clamp(0, cats.len() as isize - 1) as usize;
+        self.selected_category = Some(next);
+    }
+
+    /// Toggle expansion of the selected category.
+    pub fn toggle_expand(&mut self) {
+        if self.selected_category.is_some() {
+            self.expanded = !self.expanded;
         }
     }
 
@@ -255,46 +296,72 @@ impl Widget for Sidebar {
                 y += 1;
             }
         } else {
-            // Show last N tasks that fit
-            let available_rows = inner.bottom().saturating_sub(y) as usize;
-            let start = self.tasks.len().saturating_sub(available_rows);
+            // Group tasks by tool name (category). Collapsed categories show
+            // just the tool name + count; the selected category expands to show
+            // each individual task description.
+            let cats = self.task_categories();
+            let sel = self.selected_category.unwrap_or(0).min(cats.len().saturating_sub(1));
 
-            for step in self.tasks[start..].iter() {
+            for (ci, (name, steps)) in cats.iter().enumerate() {
                 if y >= inner.bottom() { break; }
+                let is_sel = ci == sel;
+                let is_expanded = is_sel && self.expanded;
 
-                let (marker, marker_style) = match step.status {
-                    TaskStatus::Completed  => ("x", style_success()),
-                    TaskStatus::Failed     => ("!", style_error()),
-                    TaskStatus::InProgress => (">", style_prompt_active()),
-                    TaskStatus::Pending    => (" ", style_system()),
-                };
-
-                // Steps that ran concurrently (see Engine::execute_tools' parallel-safe
-                // batching) get a "∥" hint before the bracket instead of a leading
-                // space, so a group reads as "these ran together" at a glance.
-                let (lead, max_desc) = if step.parallel_group.is_some() {
-                    ("∥", inner.width.saturating_sub(5) as usize)
+                // Category header row
+                let arrow = if is_expanded { "▾" } else { "▸" };
+                let count = steps.len();
+                let cat_style = if is_sel && self.focused {
+                    style_prompt_active().add_modifier(Modifier::BOLD)
+                } else if is_sel {
+                    style_inline_bold()
                 } else {
-                    (" ", inner.width.saturating_sub(4) as usize)
+                    style_inline_text()
                 };
-                let desc = if step.description.chars().count() > max_desc {
-                    step.description.chars().take(max_desc.saturating_sub(1)).collect::<String>() + "…"
-                } else {
-                    step.description.clone()
-                };
-
-                let line = Line::from(vec![
-                    Span::styled(lead, style_separator()),
-                    Span::styled("[", style_separator()),
-                    Span::styled(marker, marker_style),
-                    Span::styled("] ", style_separator()),
-                    Span::styled(desc, style_inline_text()),
+                let cat_line = Line::from(vec![
+                    Span::styled(format!("{arrow} "), style_system()),
+                    Span::styled(format!("{name} ({count})"), cat_style),
                 ]);
-                Paragraph::new(line).render(
+                Paragraph::new(cat_line).render(
                     Rect { x: inner.x, y, width: inner.width, height: 1 },
                     buf,
                 );
                 y += 1;
+
+                // Expanded: show each task in this category
+                if is_expanded {
+                    for step in steps {
+                        if y >= inner.bottom() { break; }
+                        let (marker, marker_style) = match step.status {
+                            TaskStatus::Completed  => ("x", style_success()),
+                            TaskStatus::Failed     => ("!", style_error()),
+                            TaskStatus::InProgress => (">", style_prompt_active()),
+                            TaskStatus::Pending    => (" ", style_system()),
+                        };
+                        let (lead, max_desc) = if step.parallel_group.is_some() {
+                            ("∥", inner.width.saturating_sub(6) as usize)
+                        } else {
+                            (" ", inner.width.saturating_sub(5) as usize)
+                        };
+                        let desc = if step.description.chars().count() > max_desc {
+                            step.description.chars().take(max_desc.saturating_sub(1)).collect::<String>() + "…"
+                        } else {
+                            step.description.clone()
+                        };
+                        let line = Line::from(vec![
+                            Span::styled("  ", style_separator()),
+                            Span::styled(lead, style_separator()),
+                            Span::styled("[", style_separator()),
+                            Span::styled(marker, marker_style),
+                            Span::styled("] ", style_separator()),
+                            Span::styled(desc, style_inline_text()),
+                        ]);
+                        Paragraph::new(line).render(
+                            Rect { x: inner.x, y, width: inner.width, height: 1 },
+                            buf,
+                        );
+                        y += 1;
+                    }
+                }
             }
         }
 

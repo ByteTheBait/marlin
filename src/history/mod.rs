@@ -104,11 +104,14 @@ impl Session {
     pub fn summary(&self) -> String {
         let mut msg_count = 0usize;
         let mut preview = String::new();
-        for e in &self.entries {
-            if e.role == "user" || e.role == "assistant" { msg_count += 1; }
-            if e.role == "user" && preview.is_empty() {
-                preview = e.content.chars().take(60).collect();
-                if e.content.len() > 60 { preview.push_str("..."); }
+        // Count user/assistant turns. `messages` is the field that's actually
+        // persisted (populated from engine history in save_session); `entries`
+        // is never filled, so counting it would always show "0 msgs".
+        for m in &self.messages {
+            if m.role == "user" || m.role == "assistant" { msg_count += 1; }
+            if m.role == "user" && preview.is_empty() {
+                preview = m.content.chars().take(60).collect();
+                if m.content.len() > 60 { preview.push_str("..."); }
             }
         }
         format!("{}  [{} msgs]  {}", self.updated_at.format("%b %d %H:%M"), msg_count, preview)

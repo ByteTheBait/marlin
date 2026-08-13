@@ -20,7 +20,8 @@ use crate::index::{self, Index};
 use crate::mcp;
 use crate::preflight;
 use crate::providers::{
-    Message, RateLimitState, StreamRequest, ToolCall, ToolCallMsg, registry::Registry,
+    Message, Provider, RateLimitState, StreamChunk, StreamRequest, ToolCall, ToolCallMsg,
+    registry::Registry,
 };
 use crate::skills::{self, Skill, SkillDef};
 use crate::snapshots;
@@ -36,6 +37,9 @@ pub enum UiUpdate {
     StreamChunk(String),
     ToolCall { name: String, input: String },
     ToolResult { name: String, output: String, is_error: bool },
+    /// Final summary text from a `mark_complete` tool call. The TUI renders it
+    /// as a muted/grayed-out assistant-style message instead of a tool bubble.
+    Summary(String),
     SystemMsg(String),
     ErrorMsg(String),
     RateLimited { secs: u32 },
@@ -44,6 +48,9 @@ pub enum UiUpdate {
     IndexBuilt,
     /// Engine is paused waiting for user approval of a destructive command
     AwaitingApproval { cmd: String },
+    /// Engine is paused waiting for the user to answer the model's ask_user
+    /// tool call. The user's typed reply comes back as Action::UserAnswer.
+    AskUser { question: String },
     /// Updated task list for the sidebar
     TaskUpdate(Vec<TaskStep>),
     /// Upfront plan for the sidebar — coarse ordered checklist, separate from
@@ -90,6 +97,22 @@ pub enum UiUpdate {
 pub struct StatusInfo {
     pub provider: String,
     pub model: String,
+    /// Current git branch of the work directory (None if not a git repo).
+    pub git_branch: Option<String>,
+}
+
+/// Read the current git branch from `<dir>/.git/HEAD`. Returns None when the
+/// directory isn't a git repo or the file is unreadable.
+pub fn detect_git_branch(dir: &str) -> Option<String> {
+    let head = std::path::Path::new(dir).join(".git").join("HEAD");
+    let content = std::fs::read_to_string(&head).ok()?;
+    let branch = content.trim();
+    if let Some(name) = branch.strip_prefix("ref: refs/heads/") {
+        Some(name.to_string())
+    } else {
+        // Detached HEAD — the content is a commit hash; show a short form.
+        Some(branch.chars().take(7).collect())
+    }
 }
 
 /// Snapshot of the editable settings shown in the /config menu.
@@ -109,6 +132,7 @@ pub struct ConfigState {
     pub ast_mode: String,
     pub skill_subagents: bool,
     pub max_tokens: usize,
+    pub tool_call_limit: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +144,8 @@ pub enum Action {
     Approve,
     /// User denied a destructive command in the modal
     Deny,
+    /// User typed an answer to the model's ask_user tool call.
+    UserAnswer(String),
     /// A setting was changed in the /config menu.
     ConfigSet { key: String, value: String },
     /// Ctrl+S in the /edit pane — write `content` to `path`, through the same
@@ -147,6 +173,10 @@ pub struct Engine {
     stall_nudges: usize,
     attachments: Vec<(String, String)>, // (filename, content)
     allowed_commands: Vec<String>,
+    /// Retry counter for mid-stream transient network disconnects within the
+    /// current turn. Reset to 0 at the start of each new message/slash command
+    /// (see SendMessage / SlashCommand) so a fresh request gets a clean slate.
+    mid_stream_retries: usize,
 
     rate_limit_state: Option<RateLimitState>,
     loop_guard: LoopGuard,
@@ -245,6 +275,7 @@ impl Engine {
             active_goal: String::new(),
             tool_iterations: 0,
             stall_nudges: 0,
+            mid_stream_retries: 0,
             attachments: vec![],
             allowed_commands: allowed,
             rate_limit_state: None,
@@ -285,9 +316,11 @@ impl Engine {
         ui_tx: mpsc::Sender<UiUpdate>,
     ) {
         // Send initial status
+        let git_branch = detect_git_branch(&self.work_dir);
         let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
             provider: self.cfg.active_provider.clone(),
             model: self.cfg.active_model.clone(),
+            git_branch,
         })).await;
 
         let _ = ui_tx.send(UiUpdate::SystemMsg("marlin ready  /help for commands".into())).await;
@@ -341,6 +374,9 @@ impl Engine {
 
                 // Approval actions received outside an agentic loop are no-ops
                 Action::Approve | Action::Deny => {}
+                // UserAnswer is consumed inside await_ask_user while the agentic
+                // loop is blocked; if it arrives here it's a stray no-op.
+                Action::UserAnswer(_) => {}
 
                 Action::ConfigSet { key, value } => {
                     self.apply_config_set(&key, &value, &ui_tx).await;
@@ -376,6 +412,7 @@ impl Engine {
                     self.active_goal = text.clone();
                     self.tool_iterations = 0;
                     self.stall_nudges = 0;
+                    self.mid_stream_retries = 0;
                     self.task_steps.clear();
                     self.plan_steps.clear();
                     self.plan_cursor = 0;
@@ -432,6 +469,7 @@ impl Engine {
                         self.active_goal = prompt.clone();
                         self.tool_iterations = 0;
                         self.stall_nudges = 0;
+                        self.mid_stream_retries = 0;
                         self.task_steps.clear();
                         self.plan_steps.clear();
                         self.plan_cursor = 0;
@@ -448,7 +486,7 @@ impl Engine {
     }
 
     async fn agentic_loop(&mut self, ui_tx: &mpsc::Sender<UiUpdate>, action_rx: &mut mpsc::Receiver<Action>) {
-        const SAFETY_CAP: usize = 100;
+        let safety_cap = self.cfg.tool_call_limit;
 
         loop {
             if self.cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
@@ -517,12 +555,9 @@ impl Engine {
                 tools: all_tools(&self.ast_mode, &self.skill_tool_list(&self.active_goal), &self.external_tools, self.cfg.skill_subagents, &self.mcp_tools),
             };
 
-            let mut stream = match provider.stream(req).await {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = ui_tx.send(UiUpdate::ErrorMsg(e.to_string())).await;
-                    break;
-                }
+            let mut stream = match self.stream_with_retry(provider, req, ui_tx).await {
+                Some(s) => s,
+                None => break,
             };
 
             let mut text_buf = String::new();
@@ -566,6 +601,20 @@ impl Engine {
                 }
 
                 if let Some(e) = chunk.error {
+                    // Mid-stream transient network disconnect (stream dropped
+                    // after the request succeeded). Nothing has been committed
+                    // to history yet — text_buf is local — so a full re-request
+                    // of this same turn is safe and idempotent. Retry a couple
+                    // times, then give up with a clear error.
+                    if is_transient_network_error(&e) && self.mid_stream_retries < 2 {
+                        self.mid_stream_retries += 1;
+                        let _ = ui_tx.send(UiUpdate::SystemMsg(format!(
+                            "Stream interrupted — retrying ({}/2): {e}",
+                            self.mid_stream_retries
+                        ))).await;
+                        tokio::time::sleep(Duration::from_millis(600)).await;
+                        break 'recv; // outer loop re-requests the stream
+                    }
                     let _ = ui_tx.send(UiUpdate::ErrorMsg(e.to_string())).await;
                     return;
                 }
@@ -587,9 +636,9 @@ impl Engine {
             let Some(tool_calls) = done_chunk else { continue };
 
             if !tool_calls.is_empty() {
-                if self.tool_iterations >= SAFETY_CAP {
+                if self.tool_iterations >= safety_cap {
                     let _ = ui_tx.send(UiUpdate::ErrorMsg(format!(
-                        "Safety cap reached ({SAFETY_CAP} tool calls). Send a new message to continue."
+                        "Safety cap reached ({safety_cap} tool calls). Send a new message to continue."
                     ))).await;
                     self.active_goal.clear();
                     return;
@@ -721,7 +770,7 @@ impl Engine {
                 if let Some(done_call) = tool_calls.iter().find(|tc| tc.name == "mark_complete") {
                     let summary = extract_summary_field(&done_call.input);
                     if !summary.is_empty() {
-                        let _ = ui_tx.send(UiUpdate::StreamChunk(summary)).await;
+                        let _ = ui_tx.send(UiUpdate::Summary(summary)).await;
                     }
                     self.finish_turn(ui_tx).await;
                     break;
@@ -778,6 +827,54 @@ impl Engine {
         }
     }
 
+    /// Call `provider.stream(req)`, retrying up to `NETWORK_RETRIES` times on
+    /// transient network errors (connection refused/timeout, DNS, TLS, mid-stream
+    /// disconnect — anything `is_transient_network_error` matches). The request
+    /// is deterministic given the (unchanged) history, so a retry is safe and
+    /// idempotent. Non-transient errors (auth, 4xx/5xx, bad request) are reported
+    /// to the UI and surfaced as `None` so the caller breaks the loop. Also
+    /// surfaces a system message on each retry so the user sees why it's hanging.
+    async fn stream_with_retry(
+        &self,
+        provider: Arc<dyn Provider>,
+        req: StreamRequest,
+        ui_tx: &mpsc::Sender<UiUpdate>,
+    ) -> Option<mpsc::Receiver<StreamChunk>> {
+        let mut last_err: Option<anyhow::Error> = None;
+        let mut attempt = 0;
+        while attempt <= NETWORK_RETRIES {
+            if self.cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                return None;
+            }
+            match provider.stream(req.clone()).await {
+                Ok(stream) => return Some(stream),
+                Err(e) => {
+                    if !is_transient_network_error(&e) {
+                        let _ = ui_tx.send(UiUpdate::ErrorMsg(e.to_string())).await;
+                        return None;
+                    }
+                    last_err = Some(e);
+                    attempt += 1;
+                    if attempt > NETWORK_RETRIES {
+                        break;
+                    }
+                    let backoff_ms = NETWORK_RETRY_BASE_MS * (1 << (attempt - 1));
+                    let _ = ui_tx.send(UiUpdate::SystemMsg(format!(
+                        "Network error — retrying in {}ms (attempt {}/{}): {}",
+                        backoff_ms, attempt, NETWORK_RETRIES,
+                        last_err.as_ref().map(|e| e.to_string()).unwrap_or_default(),
+                    ))).await;
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                }
+            }
+        }
+        let _ = ui_tx.send(UiUpdate::ErrorMsg(
+            last_err.map(|e| format!("Still failing after {NETWORK_RETRIES} retries: {e}"))
+                .unwrap_or_else(|| format!("Network error after {NETWORK_RETRIES} retries."))
+        )).await;
+        None
+    }
+
     /// Ends the current turn: resets iteration/stall counters, clears the
     /// active goal, persists the session, marks any leftover plan steps
     /// done, and tells the TUI the goal is complete. Shared by the
@@ -809,7 +906,7 @@ impl Engine {
     /// use this — not the pre-execution `parallel_group_ids` guess — as the
     /// source of truth for what actually ran concurrently.
     async fn execute_tools(
-        &self,
+        &mut self,
         calls: &[ToolCall],
         denied: &HashSet<String>,
         ui_tx: &mpsc::Sender<UiUpdate>,
@@ -868,6 +965,23 @@ impl Engine {
             // batch finishes and ends the turn instead of continuing.
             if call.name == "mark_complete" {
                 results.push((executor::ToolResult { output: "Acknowledged.".into(), is_error: false }, None));
+                continue;
+            }
+
+            // ask_user is interactive — send the question to the TUI and block
+            // until the user types a reply, which is returned as the tool result.
+            if call.name == "ask_user" {
+                let input_map: std::collections::HashMap<String, String> =
+                    serde_json::from_str(&call.input).unwrap_or_default();
+                let question = input_map.get("question").cloned()
+                    .unwrap_or_else(|| "Please answer:".to_string());
+                let answer = self.await_ask_user(ui_tx, action_rx, question).await;
+                let (output, is_error) = match answer {
+                    Some(a) if !a.trim().is_empty() => (a.trim().to_string(), false),
+                    Some(_) => ("(no answer)".to_string(), false),
+                    None => ("User cancelled.".to_string(), true),
+                };
+                results.push((executor::ToolResult { output, is_error }, None));
                 continue;
             }
 
@@ -1214,6 +1328,29 @@ impl Engine {
                 }
                 None => break false,
                 _ => {} // ignore other actions while modal is open
+            }
+        }
+    }
+
+    /// Ask the user a question (from the model's ask_user tool call) and block
+    /// until they type an answer. Returns `Some(answer)` on a reply, or `None`
+    /// if the user cancelled / the channel closed.
+    async fn await_ask_user(
+        &mut self,
+        ui_tx: &mpsc::Sender<UiUpdate>,
+        action_rx: &mut mpsc::Receiver<Action>,
+        question: String,
+    ) -> Option<String> {
+        let _ = ui_tx.send(UiUpdate::AskUser { question }).await;
+        loop {
+            match action_rx.recv().await {
+                Some(Action::UserAnswer(answer)) => break Some(answer),
+                Some(Action::CancelStream) => {
+                    self.cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    break None;
+                }
+                None => break None,
+                _ => {} // ignore other actions while the question modal is open
             }
         }
     }
@@ -1720,6 +1857,7 @@ impl Engine {
                         sys!(format!("Switched to provider: {name}  model: {model}"));
                         let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
                             provider: name.to_string(), model,
+                            git_branch: detect_git_branch(&self.work_dir),
                         })).await;
                     }
                 }
@@ -1743,6 +1881,7 @@ impl Engine {
                 let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
                     provider: self.cfg.active_provider.clone(),
                     model,
+                    git_branch: detect_git_branch(&self.work_dir),
                 })).await;
             }
 
@@ -2523,6 +2662,12 @@ impl Engine {
                         self.work_dir = new_dir.clone();
                         self.cfg.work_dir = new_dir.clone();
                         save_cfg!();
+                        let git_branch = detect_git_branch(&self.work_dir);
+                        let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
+                            provider: self.cfg.active_provider.clone(),
+                            model: self.cfg.active_model.clone(),
+                            git_branch,
+                        })).await;
                         sys!(format!("Directory: {new_dir}"));
                     }
                     _ => err!(format!("Not a directory: {}", args[0])),
@@ -2878,6 +3023,7 @@ impl Engine {
             ast_mode: self.ast_mode.label().into(),
             skill_subagents: self.cfg.skill_subagents,
             max_tokens: self.cfg.max_tokens,
+            tool_call_limit: self.cfg.tool_call_limit,
         }
     }
 
@@ -2899,6 +3045,7 @@ impl Engine {
                     let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
                         provider: value.to_string(),
                         model,
+                        git_branch: detect_git_branch(&self.work_dir),
                     })).await;
                 }
             }
@@ -2926,6 +3073,7 @@ impl Engine {
                             let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
                                 provider: name.to_string(),
                                 model: self.cfg.active_model.clone(),
+                                git_branch: detect_git_branch(&self.work_dir),
                             })).await;
                             let _ = ui_tx.send(UiUpdate::SystemMsg(format!("Provider '{name}' created and selected."))).await;
                         }
@@ -2945,6 +3093,7 @@ impl Engine {
                 let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
                     provider: self.cfg.active_provider.clone(),
                     model: value.to_string(),
+                    git_branch: detect_git_branch(&self.work_dir),
                 })).await;
             }
             "api_key" => {
@@ -3018,6 +3167,14 @@ impl Engine {
                 if let Ok(n) = value.parse::<usize>() {
                     if n > 0 {
                         self.cfg.max_tokens = n;
+                        let _ = self.cfg.save();
+                    }
+                }
+            }
+            "tool_call_limit" => {
+                if let Ok(n) = value.parse::<usize>() {
+                    if n > 0 {
+                        self.cfg.tool_call_limit = n;
                         let _ = self.cfg.save();
                     }
                 }
@@ -3160,6 +3317,32 @@ fn compact_serialize(messages: &[Message]) -> String {
 /// a completed/blocked report. Deliberately conservative (checked only
 /// against the last sentence) to avoid flagging retrospective phrasing like
 /// "I let the test run" or a plan summary that happens to contain "I'll".
+/// Number of times to retry a provider call that fails with a transient
+/// network error (connection refused, DNS, timeout, mid-stream disconnect —
+/// anything that isn't an API-level error). The message history is intact so
+/// a retry is safe; the request itself is deterministic given the history.
+const NETWORK_RETRIES: usize = 3;
+/// Backoff (ms) between network retries, doubling each attempt: 800, 1600, 3200.
+const NETWORK_RETRY_BASE_MS: u64 = 800;
+
+/// True if a provider error is a transient network failure worth retrying
+/// rather than an API/auth/HTTP-level error. reqwest wraps connection-level
+/// failures in `error sending request for url (...)`, so we match on that
+/// rather than on the inner `reqwest::Error`.
+fn is_transient_network_error(e: &anyhow::Error) -> bool {
+    let s = e.to_string().to_lowercase();
+    s.contains("error sending request")
+        || s.contains("connect timeout")
+        || s.contains("connection refused")
+        || s.contains("connection reset")
+        || s.contains("connection closed")
+        || s.contains("dns")
+        || s.contains("timed out")
+        || s.contains("tls")
+        || s.contains("unexpected eof")
+        || s.contains("stream ended")
+}
+
 fn looks_like_unfinished_stall(text: &str) -> bool {
     let last_sentence = text
         .rsplit(['.', '!', '?', '\n'])

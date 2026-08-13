@@ -20,9 +20,10 @@ use crate::tools::{all_tools, executor, policy};
 
 use super::{Action, UiUpdate};
 
-/// Hard cap on tool-call round-trips within one subagent run — independent of
-/// (and much tighter than) the main loop's SAFETY_CAP, since a subagent is
-/// meant to complete one narrow, delegated task.
+/// Default hard cap on tool-call round-trips within one subagent run —
+/// independent of (and much tighter than) the main loop's cap, since a
+/// subagent is meant to complete one narrow, delegated task. Overridable via
+/// the config's `tool_call_limit` (see `run`).
 const MAX_ITERATIONS: usize = 15;
 
 pub struct SubagentResult {
@@ -110,7 +111,12 @@ pub async fn run(
     let mut final_text = String::new();
     let mut ok = true;
 
-    'iters: for _ in 0..MAX_ITERATIONS {
+    // Subagents are bounded by the same configurable tool-call limit as the
+    // main loop (default 100), so a raised limit applies to delegated skill
+    // runs too. MAX_ITERATIONS remains as the fallback default.
+    let iterations = cfg.tool_call_limit.max(MAX_ITERATIONS);
+
+    'iters: for _ in 0..iterations {
         if cancel_flag.load(Ordering::SeqCst) {
             final_text = "(cancelled)".into();
             ok = false;

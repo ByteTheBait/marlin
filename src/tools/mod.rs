@@ -110,6 +110,19 @@ pub fn all_tools(
             ],
             required: vec!["summary".into()],
         },
+        ToolDef {
+            name: "ask_user".into(),
+            description: "Ask the user a question and wait for their typed answer. Use this when \
+                you need a decision, clarification, a preference, or information only the user \
+                has (e.g. which option they want, whether to proceed a certain way, a value \
+                you can't infer). The user's reply is returned as the tool result. Phrase the \
+                question clearly and self-contained so they can answer without extra context. \
+                Do not call this when the answer is already available or inferable.".into(),
+            properties: vec![
+                ToolProp { name: "question".into(), ty: "string".into(), description: "The question to ask the user. Be specific and single-focus.".into() },
+            ],
+            required: vec!["question".into()],
+        },
     ];
 
     // Inject skill tools when skills are loaded. `skills` is expected to already

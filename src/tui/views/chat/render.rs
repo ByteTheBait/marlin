@@ -105,6 +105,7 @@ impl ChatView {
                 &self.stream_buf
             };
 
+            let stream_start = all_lines.len();
             all_lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled("marlin", style_assistant_label()),
@@ -122,13 +123,19 @@ impl ChatView {
             } else {
                 "|"
             };
+            // Pulse the cursor color while streaming for a subtle "alive" feel.
+            let cursor_style = style_cursor_pulse(self.frame);
             all_lines.push(Line::from(vec![
                 Span::raw("  "),
-                Span::styled(cursor_sym, style_prompt_active()),
+                Span::styled(cursor_sym, cursor_style),
             ]));
+            // Apply a left-border accent to the live streaming buffer so it reads
+            // as "in progress" rather than a committed entry.
+            let hl = style_stream_highlight();
+            for line in &mut all_lines[stream_start..] {
+                line.spans.insert(0, Span::styled("▎", hl));
+            }
         }
-
-        // Agentic turn indicator
         if self.streaming && self.tool_iterations > 0 && self.stream_buf.is_empty() {
             let raw = if self.current_tool.is_empty() { "thinking" } else { &self.current_tool };
             let label = if self.current_tool.is_empty() {
@@ -137,10 +144,16 @@ impl ChatView {
                 tool_display_name(&self.current_tool)
             };
             let _ = raw;
+            // Pulse the tool badge while the tool is actively running.
+            let badge_style = if self.streaming {
+                style_tool_badge_pulse(self.frame)
+            } else {
+                style_tool_badge()
+            };
             all_lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled("╭", style_tool_badge_bracket()),
-                Span::styled(format!(" {label} "), style_tool_badge()),
+                Span::styled(format!(" {} {label} ", tool_glyph(&self.current_tool)), badge_style),
                 Span::styled("╮", style_tool_badge_bracket()),
                 Span::raw("  "),
                 Span::styled(
@@ -174,6 +187,24 @@ impl ChatView {
 
         // Render the scroll view (clips to the viewport and draws the scrollbar)
         scroll_view.render(area, buf, &mut self.scroll_state);
+
+        // Scroll-to-bottom hint: when new content arrives while the user has
+        // scrolled up, show a small "▼ new" indicator at the bottom of the
+        // viewport so they know there's unread content below.
+        if self.new_content_arrived && !self.at_bottom && area.height >= 2 {
+            let label = "  ▼ new  ";
+            let x = area.right().saturating_sub(label.len() as u16).saturating_sub(1);
+            let y = area.bottom().saturating_sub(2);
+            // Pulse the hint so it gently draws the eye without being obtrusive.
+            let hint_style = style_scroll_hint_pulse(self.frame);
+            for (i, ch) in label.chars().enumerate() {
+                let cell_x = x + i as u16;
+                if cell_x < area.right() && y < area.bottom() {
+                    buf[(cell_x, y)].set_symbol(&ch.to_string());
+                    buf[(cell_x, y)].set_style(hint_style);
+                }
+            }
+        }
     }
 
     fn build_lines(&self, width: usize) -> Vec<Line<'static>> {
@@ -227,6 +258,19 @@ impl ChatView {
                             style_system(),
                         )));
                     }
+                    i += 1;
+                }
+                EntryRole::Summary => {
+                    // Muted closing note from mark_complete — grayed-out text,
+                    // no label, no tool bubble.
+                    for md in render_markdown(&entry.content, md_width) {
+                        let mut spans = vec![Span::raw("  ")];
+                        for s in md.spans {
+                            spans.push(Span::styled(s.content, style_summary()));
+                        }
+                        lines.push(Line::from(spans));
+                    }
+                    lines.push(Line::from(""));
                     i += 1;
                 }
                 EntryRole::Error => {
@@ -284,6 +328,7 @@ impl ChatView {
                         };
 
                         let display = tool_display_name(&call_entry.tool_name);
+                        let display = format!("{} {display}", tool_glyph(&call_entry.tool_name));
                         let mut content: Vec<(String, Style)> = Vec::new();
 
                         // Input args
@@ -322,7 +367,7 @@ impl ChatView {
                             }
                         }
 
-                        lines.extend(build_tool_bubble(display, &content, width));
+                        lines.extend(build_tool_bubble(&display, &content, width));
                     }
 
                     i = result_start + result_count;
@@ -353,11 +398,17 @@ impl ChatView {
     }
 
     fn render_input(&self, area: Rect, buf: &mut Buffer) {
-        // Draw bubble border
+        // Draw bubble border — pulse the border color while streaming so the
+        // input area reads as "busy" without being distracting.
+        let border_style = if self.streaming {
+            style_input_bubble_pulse(self.frame)
+        } else {
+            style_input_bubble()
+        };
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(style_input_bubble());
+            .border_style(border_style);
         let inner = block.inner(area);
         block.render(area, buf);
 

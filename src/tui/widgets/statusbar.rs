@@ -17,9 +17,13 @@ pub struct StatusBar {
     pub streaming: bool,
     pub width: u16,
     pub ast_mode: AstMode,
+    /// Current git branch of the work directory (None if not a git repo).
+    pub git_branch: Option<String>,
     /// Set when the base prompt injection (system prompt + tool defs) exceeds
     /// its ~2k token target. Informational only — never blocks a request.
     pub prompt_budget_over: Option<usize>,
+    /// Frame counter for subtle animations (pulsing streaming indicator).
+    pub frame: u64,
 }
 
 impl StatusBar {
@@ -32,7 +36,9 @@ impl StatusBar {
             streaming: false,
             width,
             ast_mode: AstMode::Off,
+            git_branch: None,
             prompt_budget_over: None,
+            frame: 0,
         }
     }
 
@@ -48,9 +54,15 @@ impl StatusBar {
             left.push(Span::styled(self.model.clone(), style_status_model()));
         }
 
+        if let Some(branch) = &self.git_branch {
+            left.push(Span::raw("    "));
+            left.push(Span::styled(format!("  {branch}  "), style_status_git()));
+        }
+
         if !self.active_tool.is_empty() {
             left.push(Span::raw("    "));
-            left.push(Span::styled("@ ", style_status_tool()));
+            let glyph = tool_glyph(&self.active_tool);
+            left.push(Span::styled(format!("{glyph} "), style_status_tool()));
             left.push(Span::styled(self.active_tool.clone(), style_status_tool_name()));
         }
 
@@ -72,7 +84,8 @@ impl StatusBar {
         }
 
         let (right_text, right_style) = if self.streaming {
-            ("  streaming  ", style_status_streaming())
+            // Pulse the "streaming" indicator so it reads as alive.
+            ("  streaming  ", style_status_streaming_pulse(self.frame))
         } else {
             ("             ", Style::default())
         };

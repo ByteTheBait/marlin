@@ -12,6 +12,9 @@ pub enum EntryRole {
     Output,
     ToolCall,
     ToolResult { is_error: bool },
+    /// The final summary text from a `mark_complete` tool call — rendered in a
+    /// muted/grayed-out style rather than as a normal assistant message.
+    Summary,
 }
 
 #[derive(Clone)]
