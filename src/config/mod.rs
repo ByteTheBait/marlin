@@ -187,6 +187,11 @@ pub struct Config {
     /// /config menu (or directly in config.json). Defaults to 100.
     #[serde(default = "default_tool_call_limit")]
     pub tool_call_limit: usize,
+    /// Per-directory status bar background colors, keyed by work_dir. Lets you
+    /// color-code different sessions (one per working directory) so you can
+    /// tell them apart at a glance. Set with `/color <#rrggbb>`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub status_colors: HashMap<String, [u8; 3]>,
 }
 
 fn default_tool_call_limit() -> usize {
@@ -360,8 +365,22 @@ impl Config {
             skill_subagents: true,
             token_budget: default_token_budget(),
             tool_call_limit: default_tool_call_limit(),
+            status_colors: HashMap::new(),
         }
     }
+}
+
+/// Parse a `#rrggbb` (or `rrggbb`) hex color string into an `[r, g, b]` triple.
+/// Returns `None` for anything malformed.
+pub fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
+    let s = s.trim().trim_start_matches('#');
+    if s.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+    Some([r, g, b])
 }
 
 // ── Theme palette (optional ~/.marlin/theme.toml) ────────────────────────────

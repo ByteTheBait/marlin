@@ -76,6 +76,10 @@ pub struct ChatView {
     pub height: u16,
     pub provider: String,
     pub model: String,
+    /// Absolute working directory, shown in the session status bar.
+    pub work_dir: String,
+    /// Per-directory status bar background color (None = default theme color).
+    pub status_color: Option<[u8; 3]>,
     pub frame: u64,
     pub(super) last_frame_time: Instant,
     pub(super) bubble_effect: Effect,
@@ -133,6 +137,8 @@ impl ChatView {
             height,
             provider: String::new(),
             model: String::new(),
+            work_dir: String::new(),
+            status_color: None,
             frame: 0,
             last_frame_time: Instant::now(),
             bubble_effect: fx::repeating(fx::ping_pong(fx::hsl_shift_fg(
@@ -276,6 +282,8 @@ impl ChatView {
             UiUpdate::StatusUpdate(info) => {
                 self.provider = info.provider;
                 self.model = info.model;
+                self.work_dir = info.work_dir;
+                self.status_color = info.status_color;
             }
             UiUpdate::AwaitingApproval { cmd } => {
                 self.approval_pending = Some(cmd);

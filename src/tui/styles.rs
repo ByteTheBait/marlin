@@ -184,6 +184,25 @@ pub fn style_separator() -> Style {
     }
 }
 
+/// Default background for the session status bar (used when no per-directory
+/// `/color` override is set).
+pub fn style_session_status_bg() -> Color {
+    if is_light() {
+        Color::Rgb(200, 220, 245)
+    } else {
+        Color::Rgb(30, 40, 60)
+    }
+}
+
+/// Foreground for the session status bar text.
+pub fn style_session_status_fg() -> Color {
+    if is_light() {
+        Color::Rgb(20, 30, 50)
+    } else {
+        Color::Rgb(200, 210, 230)
+    }
+}
+
 pub fn style_placeholder() -> Style {
     if is_light() {
         Style::default().fg(Color::Rgb(165, 185, 215))

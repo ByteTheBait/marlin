@@ -99,6 +99,10 @@ pub struct StatusInfo {
     pub model: String,
     /// Current git branch of the work directory (None if not a git repo).
     pub git_branch: Option<String>,
+    /// Absolute path of the working directory.
+    pub work_dir: String,
+    /// Per-directory status bar background color (None = default theme color).
+    pub status_color: Option<[u8; 3]>,
 }
 
 /// Read the current git branch from `<dir>/.git/HEAD`. Returns None when the
@@ -310,18 +314,27 @@ impl Engine {
         &self.startup_diagnostics
     }
 
+    /// Build the current `StatusInfo` (provider/model/git branch/work dir and the
+    /// per-directory status bar color from config, if any).
+    fn status_info(&self) -> StatusInfo {
+        let git_branch = detect_git_branch(&self.work_dir);
+        let status_color = self.cfg.status_colors.get(&self.work_dir).copied();
+        StatusInfo {
+            provider: self.cfg.active_provider.clone(),
+            model: self.cfg.active_model.clone(),
+            git_branch,
+            work_dir: self.work_dir.clone(),
+            status_color,
+        }
+    }
+
     pub async fn run(
         &mut self,
         mut action_rx: mpsc::Receiver<Action>,
         ui_tx: mpsc::Sender<UiUpdate>,
     ) {
         // Send initial status
-        let git_branch = detect_git_branch(&self.work_dir);
-        let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
-            provider: self.cfg.active_provider.clone(),
-            model: self.cfg.active_model.clone(),
-            git_branch,
-        })).await;
+        let _ = ui_tx.send(UiUpdate::StatusUpdate(self.status_info())).await;
 
         let _ = ui_tx.send(UiUpdate::SystemMsg("marlin ready  /help for commands".into())).await;
         if !self.startup_diagnostics.is_empty() {
@@ -1855,10 +1868,7 @@ impl Engine {
                         self.cfg.active_model = model.clone();
                         save_cfg!();
                         sys!(format!("Switched to provider: {name}  model: {model}"));
-                        let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
-                            provider: name.to_string(), model,
-                            git_branch: detect_git_branch(&self.work_dir),
-                        })).await;
+                        let _ = ui_tx.send(UiUpdate::StatusUpdate(self.status_info())).await;
                     }
                 }
             }
@@ -1878,11 +1888,7 @@ impl Engine {
                 self.cfg.remember_model(&self.cfg.active_provider.clone(), &model);
                 save_cfg!();
                 sys!(format!("Model set to: {model}"));
-                let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
-                    provider: self.cfg.active_provider.clone(),
-                    model,
-                    git_branch: detect_git_branch(&self.work_dir),
-                })).await;
+                let _ = ui_tx.send(UiUpdate::StatusUpdate(self.status_info())).await;
             }
 
             "/key" => {
@@ -2243,6 +2249,42 @@ impl Engine {
                         let state = if self.cfg.clean_env { "on" } else { "off" };
                         sys!(format!("Clean-env: {state}  (use /clean-env on|off)"));
                     }
+                }
+            }
+
+            "/color" => {
+                if args.is_empty() {
+                    let current = self.cfg.status_colors.get(&self.work_dir)
+                        .map(|c| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]))
+                        .unwrap_or_else(|| "default".into());
+                    sys!(format!(
+                        "Status bar color for this directory: {current}\n\
+                         Usage: /color <#rrggbb>  —  or /color off to clear.\n\
+                         The color is saved per working directory so you can tell sessions apart."
+                    ));
+                    return None;
+                }
+                let arg = args[0];
+                if arg == "off" || arg == "none" || arg == "default" {
+                    self.cfg.status_colors.remove(&self.work_dir);
+                    save_cfg!();
+                    let _ = ui_tx.send(UiUpdate::StatusUpdate(self.status_info())).await;
+                    sys!("Status bar color cleared (default).");
+                    return None;
+                }
+                match crate::config::parse_hex_color(arg) {
+                    Some(rgb) => {
+                        self.cfg.status_colors.insert(self.work_dir.clone(), rgb);
+                        save_cfg!();
+                        let _ = ui_tx.send(UiUpdate::StatusUpdate(self.status_info())).await;
+                        sys!(format!(
+                            "Status bar color set to #{:02x}{:02x}{:02x} for this directory.",
+                            rgb[0], rgb[1], rgb[2]
+                        ));
+                    }
+                    None => err!(format!(
+                        "Invalid color: {arg:?} — use a hex value like #ff8800, or /color off to clear."
+                    )),
                 }
             }
 
@@ -2662,12 +2704,7 @@ impl Engine {
                         self.work_dir = new_dir.clone();
                         self.cfg.work_dir = new_dir.clone();
                         save_cfg!();
-                        let git_branch = detect_git_branch(&self.work_dir);
-                        let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
-                            provider: self.cfg.active_provider.clone(),
-                            model: self.cfg.active_model.clone(),
-                            git_branch,
-                        })).await;
+                        let _ = ui_tx.send(UiUpdate::StatusUpdate(self.status_info())).await;
                         sys!(format!("Directory: {new_dir}"));
                     }
                     _ => err!(format!("Not a directory: {}", args[0])),
@@ -3042,11 +3079,7 @@ impl Engine {
                         .unwrap_or_default();
                     self.cfg.active_model = model.clone();
                     let _ = self.cfg.save();
-                    let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
-                        provider: value.to_string(),
-                        model,
-                        git_branch: detect_git_branch(&self.work_dir),
-                    })).await;
+                    let _ = ui_tx.send(UiUpdate::StatusUpdate(self.status_info())).await;
                 }
             }
             "new_provider" => {
@@ -3070,11 +3103,7 @@ impl Engine {
                                 .map(|p| p.models().first().cloned().unwrap_or_default())
                                 .unwrap_or_default();
                             let _ = self.cfg.save();
-                            let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
-                                provider: name.to_string(),
-                                model: self.cfg.active_model.clone(),
-                                git_branch: detect_git_branch(&self.work_dir),
-                            })).await;
+                            let _ = ui_tx.send(UiUpdate::StatusUpdate(self.status_info())).await;
                             let _ = ui_tx.send(UiUpdate::SystemMsg(format!("Provider '{name}' created and selected."))).await;
                         }
                         Err(e) => {
@@ -3090,11 +3119,7 @@ impl Engine {
                 }
                 self.cfg.remember_model(&self.cfg.active_provider.clone(), value);
                 let _ = self.cfg.save();
-                let _ = ui_tx.send(UiUpdate::StatusUpdate(StatusInfo {
-                    provider: self.cfg.active_provider.clone(),
-                    model: value.to_string(),
-                    git_branch: detect_git_branch(&self.work_dir),
-                })).await;
+                let _ = ui_tx.send(UiUpdate::StatusUpdate(self.status_info())).await;
             }
             "api_key" => {
                 let provider = self.cfg.active_provider.clone();
@@ -3450,6 +3475,7 @@ fn help_text() -> String {
         ("/ast [off|sexpr|harness]", "AST context mode: off=raw, sexpr=S-expr reads, harness=JSON surgery (persists)"),
         ("/clean-env [on|off]", "strip subprocess environment for isolation (persists)"),
         ("/theme [dark|light|<name>]", "switch theme; named themes live in ~/.marlin/themes/"),
+        ("/color [<#rrggbb>|off]", "set the status bar background color for this directory (persists per workdir)"),
         ("/command [list|new|reload]", "manage user-defined slash commands (~/.marlin/commands/)"),
         ("/tool [list|new|reload]", "manage user-defined LLM tools (~/.marlin/tools/)"),
         ("/mcp [list|new|reload]", "manage MCP server connections (~/.marlin/mcp/)"),

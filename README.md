@@ -101,8 +101,6 @@ Switch model: `/model claude-opus-4-5` (or any model your provider supports). Br
 - [Hacking Marlin](docs/extending.md) — themes, custom commands/tools/providers, Rust extension points
 
 ---
-## Inspired by
-This project was roughly inspired by [smelt](https://github.com/leonardcser/smelt)
 
 ## License
 

@@ -3,7 +3,7 @@ use std::time::Instant;
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect, Size},
-    style::Style,
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, StatefulWidget, Widget},
 };
@@ -45,8 +45,9 @@ impl ChatView {
         let input_h = (input_lines as u16).min(5) + 2;
         let sep_h = 1u16;
         let hint_h = 1u16;
+        let session_h = 1u16;
         let vp_h = area.height
-            .saturating_sub(sugg_h + sep_h + input_h + hint_h)
+            .saturating_sub(sugg_h + sep_h + input_h + hint_h + session_h)
             .max(1);
 
         let chunks = Layout::default()
@@ -55,6 +56,7 @@ impl ChatView {
                 Constraint::Length(vp_h),
                 Constraint::Length(sugg_h),
                 Constraint::Length(sep_h),
+                Constraint::Length(session_h),
                 Constraint::Length(input_h),
                 Constraint::Length(hint_h),
             ])
@@ -76,8 +78,9 @@ impl ChatView {
         }
 
         self.render_separator(chunks[2], buf);
-        self.render_input(chunks[3], buf);
-        self.render_hint(chunks[4], buf);
+        self.render_session_status(chunks[3], buf);
+        self.render_input(chunks[4], buf);
+        self.render_hint(chunks[5], buf);
     }
 
     fn render_separator(&self, area: Rect, buf: &mut Buffer) {
@@ -86,6 +89,49 @@ impl ChatView {
             buf[(x, area.top())].set_symbol("-");
             buf[(x, area.top())].set_style(style);
         }
+    }
+
+    /// Session status bar shown directly above the input box: working directory
+    /// and the current goal/summary. Its background color is configurable per
+    /// working directory via `/color <#rrggbb>` so different sessions are easy
+    /// to tell apart at a glance.
+    fn render_session_status(&self, area: Rect, buf: &mut Buffer) {
+        let bg = self.status_color
+            .map(|[r, g, b]| Color::Rgb(r, g, b))
+            .unwrap_or_else(style_session_status_bg);
+        let fg = style_session_status_fg();
+
+        // Working directory (basename, or full path if it's short).
+        let dir = if self.work_dir.is_empty() {
+            ".".to_string()
+        } else {
+            let base = std::path::Path::new(&self.work_dir)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| self.work_dir.clone());
+            if base.is_empty() { self.work_dir.clone() } else { base }
+        };
+
+        // Goal / summary of the current session.
+        let goal = if self.active_goal.is_empty() {
+            "no active goal".to_string()
+        } else {
+            self.active_goal.clone()
+        };
+
+        let line = Line::from(vec![
+            Span::styled("  ", Style::default().bg(bg)),
+            Span::styled("📁", Style::default().bg(bg).fg(fg)),
+            Span::styled(format!(" {dir} "), Style::default().bg(bg).fg(fg).add_modifier(Modifier::BOLD)),
+            Span::styled("·", Style::default().bg(bg).fg(fg)),
+            Span::styled(format!(" {goal}"), Style::default().bg(bg).fg(fg)),
+        ]);
+
+        // Fill the whole row with the background color, then draw the text.
+        for x in area.left()..area.right() {
+            buf[(x, area.top())].set_style(Style::default().bg(bg));
+        }
+        Paragraph::new(line).render(area, buf);
     }
 
     fn render_viewport(&mut self, area: Rect, buf: &mut Buffer) {
