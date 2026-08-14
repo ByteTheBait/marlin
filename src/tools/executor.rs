@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::extract::extract_symbol;
@@ -42,6 +42,8 @@ pub(crate) fn shell_quote(s: &str) -> String {
 
 /// Callback used to search the code index for `search_codebase`.
 pub type SearchFn<'a> = dyn Fn(&str, usize) -> String + 'a;
+/// Callback used to search the code index for symbol definitions (`search_symbols`).
+pub type SymbolSearchFn<'a> = dyn Fn(&str, usize) -> String + 'a;
 /// Callback used to snapshot a file before a write/edit tool mutates it.
 pub type SnapshotFn<'a> = dyn Fn(&str, &str) + 'a;
 /// Callback used to stream run_command output chunks as they arrive.
@@ -54,6 +56,7 @@ pub fn execute(
     work_dir: &str,
     is_allowed: &dyn Fn(&str) -> bool,
     search_fn: Option<&SearchFn<'_>>,
+    symbol_search_fn: Option<&SymbolSearchFn<'_>>,
     snapshot_fn: Option<&SnapshotFn<'_>>,
     stream_fn: Option<&StreamFn<'_>>,
     logs_dir: Option<&Path>,
@@ -214,6 +217,11 @@ pub fn execute(
 
             // Streaming path
             if let Some(stream) = stream_fn {
+                let timeout_secs: u64 = input.get("timeout")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(120)
+                    .max(1);
+
                 let mut command = Command::new("sh");
                 command.arg("-c").arg(cmd).current_dir(work_dir);
                 if clean_env {
@@ -236,73 +244,113 @@ pub fn execute(
                 let stdout = child.stdout.take();
                 let stderr = child.stderr.take();
 
-                // Read stdout in a thread, send chunks through the callback
-                let (tx, rx) = std::sync::mpsc::channel::<String>();
+                // Read stdout and stderr in background threads, feeding a shared
+                // channel so the main loop can poll for the timeout while output
+                // streams in. This replaces the old synchronous stderr read, which
+                // blocked the whole call and made a timeout impossible.
+                let (tx, rx) = std::sync::mpsc::channel::<(bool, String)>(); // (is_stderr, line)
+                let tx_stderr = tx.clone();
                 let stdout_thread = stdout.map(|out| {
                     std::thread::spawn(move || {
                         let reader = std::io::BufReader::new(out);
                         for line in reader.lines() {
                             if let Ok(l) = line {
-                                let _ = tx.send(format!("{l}\n"));
+                                let _ = tx.send((false, format!("{l}\n")));
+                            }
+                        }
+                    })
+                });
+                let stderr_thread = stderr.map(|err| {
+                    std::thread::spawn(move || {
+                        let reader = std::io::BufReader::new(err);
+                        for line in reader.lines() {
+                            if let Ok(l) = line {
+                                let _ = tx_stderr.send((true, format!("{l}\n")));
                             }
                         }
                     })
                 });
 
+                let mut stdout_buf = String::new();
                 let mut stderr_buf = String::new();
-                if let Some(err) = stderr {
-                    let reader = std::io::BufReader::new(err);
-                    for line in reader.lines() {
-                        if let Ok(l) = line {
-                            stderr_buf.push_str(&l);
-                            stderr_buf.push('\n');
+
+                // Poll for completion, killing the child if it exceeds the timeout.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+                loop {
+                    // Drain whatever output has arrived so far.
+                    while let Ok((is_err, chunk)) = rx.try_recv() {
+                        if is_err {
+                            stderr_buf.push_str(&chunk);
+                        } else {
+                            stream(&chunk);
+                            stdout_buf.push_str(&chunk);
+                        }
+                    }
+
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            // Child exited — drain any remaining output.
+                            while let Ok((is_err, chunk)) = rx.recv() {
+                                if is_err {
+                                    stderr_buf.push_str(&chunk);
+                                } else {
+                                    stream(&chunk);
+                                    stdout_buf.push_str(&chunk);
+                                }
+                            }
+                            let combined = format!("{stdout_buf}{stderr_buf}");
+                            let trimmed = combined.trim().to_string();
+                            let result = if trimmed.is_empty() { "(no output)".to_string() } else { trimmed };
+                            let success = status.success();
+                            let display = format_command_output_display(&result, logs_dir, clamp);
+                            return if success {
+                                ToolResult::ok(display)
+                            } else {
+                                ToolResult::err(display)
+                            };
+                        }
+                        Ok(None) => {
+                            // Still running.
+                            if std::time::Instant::now() >= deadline {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                        }
+                        Err(e) => {
+                            return ToolResult::err(format!("command wait error: {e}"));
                         }
                     }
                 }
 
-                let mut stdout_buf = String::new();
-                for chunk in rx {
-                    stream(&chunk);
-                    stdout_buf.push_str(&chunk);
+                // Timed out — drain whatever output arrived, then report.
+                while let Ok((is_err, chunk)) = rx.try_recv() {
+                    if is_err {
+                        stderr_buf.push_str(&chunk);
+                    } else {
+                        stream(&chunk);
+                        stdout_buf.push_str(&chunk);
+                    }
                 }
-                if let Some(h) = stdout_thread {
-                    let _ = h.join();
-                }
+                if let Some(h) = stdout_thread { let _ = h.join(); }
+                if let Some(h) = stderr_thread { let _ = h.join(); }
 
-                let status = child.wait();
                 let combined = format!("{stdout_buf}{stderr_buf}");
                 let trimmed = combined.trim().to_string();
                 let result = if trimmed.is_empty() { "(no output)".to_string() } else { trimmed };
-                let success = status.map(|s| s.success()).unwrap_or(false);
-
-                let display = if result.len() > LOG_THRESHOLD_BYTES {
-                    match spill_to_log(&result, logs_dir) {
-                        Some(log_path) => {
-                            let total_lines = result.lines().count();
-                            let snippet: String = result.lines()
-                                .rev().take(40).collect::<Vec<_>>()
-                                .into_iter().rev()
-                                .collect::<Vec<_>>().join("\n");
-                            format!(
-                                "[Marlin: truncated {} lines of output. Full log saved to {}]\n\
-                                --- last 40 lines ---\n{}",
-                                total_lines, log_path, snippet
-                            )
-                        }
-                        None => clamp(result),
-                    }
-                } else {
-                    clamp(result)
-                };
-
-                return if success {
-                    ToolResult::ok(display)
-                } else {
-                    ToolResult::err(display)
-                };
+                let display = format_command_output_display(&result, logs_dir, clamp);
+                return ToolResult::err(format!(
+                    "command timed out after {timeout_secs}s and was killed.\n{display}"
+                ));
             }
 
-            // Non-streaming fallback
+            // Non-streaming fallback (used by subagents and tests)
+            let timeout_secs: u64 = input.get("timeout")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(120)
+                .max(1);
+
             let mut command = Command::new("sh");
             command.arg("-c").arg(cmd).current_dir(work_dir);
             if clean_env {
@@ -313,10 +361,81 @@ pub fn execute(
                     }
                 }
             }
-            match command.output() {
-                Err(e) => ToolResult::err(e.to_string()),
-                Ok(out) => format_command_output(&out.stdout, &out.stderr, out.status.success(), logs_dir),
+            command.stdout(std::process::Stdio::piped());
+            command.stderr(std::process::Stdio::piped());
+
+            let mut child = match command.spawn() {
+                Ok(c) => c,
+                Err(e) => return ToolResult::err(e.to_string()),
+            };
+
+            // Read stdout and stderr in background threads so the main loop can
+            // poll for the timeout even when the command produces no output
+            // (e.g. `sleep 5`) — a synchronous read would block forever.
+            use std::io::Read;
+            let stdout = child.stdout.take();
+            let stderr = child.stderr.take();
+            let (tx, rx) = std::sync::mpsc::channel::<(bool, Vec<u8>)>();
+            let tx_err = tx.clone();
+            let stdout_thread = stdout.map(|mut out| {
+                std::thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    let _ = out.read_to_end(&mut buf);
+                    let _ = tx.send((false, buf));
+                })
+            });
+            let stderr_thread = stderr.map(|mut err| {
+                std::thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    let _ = err.read_to_end(&mut buf);
+                    let _ = tx_err.send((true, buf));
+                })
+            });
+
+            let mut stdout_buf = Vec::new();
+            let mut stderr_buf = Vec::new();
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+            loop {
+                // Drain whatever output has arrived so far.
+                while let Ok((is_err, chunk)) = rx.try_recv() {
+                    if is_err { stderr_buf.extend_from_slice(&chunk); }
+                    else { stdout_buf.extend_from_slice(&chunk); }
+                }
+
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        // Drain remaining output.
+                        while let Ok((is_err, chunk)) = rx.recv() {
+                            if is_err { stderr_buf.extend_from_slice(&chunk); }
+                            else { stdout_buf.extend_from_slice(&chunk); }
+                        }
+                        return format_command_output(&stdout_buf, &stderr_buf, status.success(), logs_dir);
+                    }
+                    Ok(None) => {
+                        if std::time::Instant::now() >= deadline {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    Err(e) => return ToolResult::err(format!("command wait error: {e}")),
+                }
             }
+
+            // Timed out — drain whatever output arrived.
+            while let Ok((is_err, chunk)) = rx.try_recv() {
+                if is_err { stderr_buf.extend_from_slice(&chunk); }
+                else { stdout_buf.extend_from_slice(&chunk); }
+            }
+            if let Some(h) = stdout_thread { let _ = h.join(); }
+            if let Some(h) = stderr_thread { let _ = h.join(); }
+            let display = format_command_output(&stdout_buf, &stderr_buf, false, logs_dir);
+            return ToolResult::err(format!(
+                "command timed out after {timeout_secs}s and was killed.\n{}",
+                display.output
+            ));
         }
 
         "list_directory" => {
@@ -370,6 +489,141 @@ pub fn execute(
                 .unwrap_or(5)
                 .clamp(1, 20);
             ToolResult::ok(sf(query, limit))
+        }
+
+        "search_symbols" => {
+            let Some(sf) = symbol_search_fn else {
+                return ToolResult::err("index not built — run /index first");
+            };
+            let symbol = input.get("symbol").map(String::as_str).unwrap_or("").trim();
+            if symbol.is_empty() {
+                return ToolResult::err("search_symbols requires 'symbol'");
+            }
+            let limit: usize = input.get("limit")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5)
+                .clamp(1, 20);
+            ToolResult::ok(sf(symbol, limit))
+        }
+
+        "grep" => {
+            let pattern = input.get("pattern").map(String::as_str).unwrap_or("").trim();
+            if pattern.is_empty() {
+                return ToolResult::err("grep requires 'pattern'");
+            }
+            let re = match regex::Regex::new(pattern) {
+                Ok(r) => r,
+                Err(e) => return ToolResult::err(format!("invalid regex: {e}")),
+            };
+            let path = input.get("path").map(String::as_str).unwrap_or("").trim();
+            let root = if path.is_empty() { work_dir.to_string() } else { resolve(path) };
+            let glob_pat = input.get("glob").map(String::as_str).unwrap_or("").trim();
+            let context: usize = input.get("context")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let limit: usize = input.get("limit")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(50)
+                .clamp(1, 200);
+
+            let root_path = Path::new(&root);
+            if !root_path.exists() {
+                return ToolResult::err(format!("path not found: {root}"));
+            }
+
+            let mut matches: Vec<String> = Vec::new();
+            let mut files_searched = 0usize;
+            let mut total_matches = 0usize;
+
+            // Collect candidate files: a single file, or walk the directory tree.
+            let mut files: Vec<PathBuf> = Vec::new();
+            if root_path.is_file() {
+                files.push(root_path.to_path_buf());
+            } else {
+                collect_grep_files(root_path, &mut files, &mut files_searched);
+            }
+
+            // Optional glob filter on the file path (relative to root).
+            let glob_filter = if glob_pat.is_empty() {
+                None
+            } else {
+                match glob::Pattern::new(glob_pat) {
+                    Ok(p) => Some(p),
+                    Err(e) => return ToolResult::err(format!("invalid glob: {e}")),
+                }
+            };
+
+            for file in files {
+                if total_matches >= limit { break; }
+                let rel = file.strip_prefix(&root).unwrap_or(&file).to_string_lossy().to_string();
+                if let Some(g) = &glob_filter {
+                    if !g.matches(&rel) { continue; }
+                }
+                let Ok(text) = std::fs::read_to_string(&file) else { continue };
+                let lines: Vec<&str> = text.lines().collect();
+                for (i, line) in lines.iter().enumerate() {
+                    if total_matches >= limit { break; }
+                    if re.is_match(line) {
+                        total_matches += 1;
+                        if context > 0 {
+                            let start = i.saturating_sub(context);
+                            let end = (i + context + 1).min(lines.len());
+                            let mut block = String::new();
+                            for j in start..end {
+                                let marker = if j == i { ">" } else { " " };
+                                block.push_str(&format!("  {marker} {:>4}: {}\n", j + 1, lines[j]));
+                            }
+                            matches.push(format!("{rel}:{i}:\n{block}"));
+                        } else {
+                            matches.push(format!("{rel}:{}: {}", i + 1, line));
+                        }
+                    }
+                }
+            }
+
+            if matches.is_empty() {
+                return ToolResult::ok(format!("No matches for /{pattern}/ in {root}"));
+            }
+            let mut out = format!("grep /{pattern}/ — {} match(es) in {root}:\n", total_matches);
+            for m in matches {
+                out.push_str(&m);
+                out.push('\n');
+            }
+            if total_matches >= limit {
+                out.push_str(&format!("\n… truncated at {limit} matches"));
+            }
+            ToolResult::ok(clamp(out))
+        }
+
+        "glob" => {
+            let pattern = input.get("pattern").map(String::as_str).unwrap_or("").trim();
+            if pattern.is_empty() {
+                return ToolResult::err("glob requires 'pattern'");
+            }
+            let limit: usize = input.get("limit")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(100)
+                .clamp(1, 500);
+
+            let pat = match glob::Pattern::new(pattern) {
+                Ok(p) => p,
+                Err(e) => return ToolResult::err(format!("invalid glob: {e}")),
+            };
+
+            let mut results: Vec<String> = Vec::new();
+            collect_glob_matches(Path::new(work_dir), &pat, work_dir, &mut results, limit);
+
+            if results.is_empty() {
+                return ToolResult::ok(format!("No files match /{pattern}/"));
+            }
+            let mut out = format!("glob /{pattern}/ — {} result(s):\n", results.len());
+            for r in &results {
+                out.push_str(&format!("  {r}\n"));
+            }
+            if results.len() >= limit {
+                out.push_str(&format!("\n… truncated at {limit} results"));
+            }
+            ToolResult::ok(clamp(out))
         }
 
         // ── AST Harness tools ────────────────────────────────────────────────
@@ -760,6 +1014,31 @@ fn format_command_output(stdout: &[u8], stderr: &[u8], success: bool, logs_dir: 
     }
 }
 
+/// Apply the log-spill / size-clamp display formatting to an already-combined
+/// output string (used by the streaming run_command path, which assembles
+/// stdout+stderr itself). Returns the display string.
+fn format_command_output_display(result: &str, logs_dir: Option<&Path>, clamp: impl Fn(String) -> String) -> String {
+    if result.len() > LOG_THRESHOLD_BYTES {
+        match spill_to_log(result, logs_dir) {
+            Some(log_path) => {
+                let total_lines = result.lines().count();
+                let snippet: String = result.lines()
+                    .rev().take(40).collect::<Vec<_>>()
+                    .into_iter().rev()
+                    .collect::<Vec<_>>().join("\n");
+                format!(
+                    "[Marlin: truncated {} lines of output. Full log saved to {}]\n\
+                    --- last 40 lines ---\n{}",
+                    total_lines, log_path, snippet
+                )
+            }
+            None => clamp(result.to_string()),
+        }
+    } else {
+        clamp(result.to_string())
+    }
+}
+
 fn clamp(s: String) -> String {
     if s.len() > MAX_OUTPUT_BYTES {
         let mut end = MAX_OUTPUT_BYTES;
@@ -808,6 +1087,74 @@ pub(crate) fn resolve_path(p: &str, work_dir: &str) -> String {
     }
     if Path::new(p).is_absolute() { return p.to_string(); }
     Path::new(work_dir).join(p).to_string_lossy().to_string()
+}
+
+/// Directories never descended into by the grep/glob walkers — same spirit as
+/// the index's SKIP_DIRS, kept local so these tools don't depend on the index.
+const SEARCH_SKIP_DIRS: &[&str] = &[
+    ".git", "node_modules", "target", "dist", ".next", "vendor", "__pycache__",
+    ".venv", "venv", "build", ".cache", ".marlin",
+];
+
+/// Directories that are always skipped by the grep walker regardless of name
+/// (e.g. hidden dirs like `.github` are fine to search, but `.git` is not).
+fn is_skipped_dir(name: &str) -> bool {
+    SEARCH_SKIP_DIRS.contains(&name)
+}
+
+/// Recursively collect searchable text files under `dir` into `files`.
+/// `count` tracks how many entries were visited (for a rough "files searched"
+/// figure). Skips binary files and junk directories.
+fn collect_grep_files(dir: &Path, files: &mut Vec<PathBuf>, count: &mut usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if path.is_dir() {
+            if !is_skipped_dir(&name) {
+                collect_grep_files(&path, files, count);
+            }
+            continue;
+        }
+        *count += 1;
+        if is_binary_path(&path) { continue; }
+        files.push(path);
+    }
+}
+
+/// Heuristic binary detection by extension — cheap and good enough for grep.
+fn is_binary_path(path: &Path) -> bool {
+    const BINARY_EXTS: &[&str] = &[
+        "exe", "dll", "so", "dylib", "png", "jpg", "jpeg", "gif", "webp", "ico",
+        "pdf", "zip", "tar", "gz", "wasm", "bin", "lock", "woff", "woff2", "ttf",
+        "otf", "mp3", "mp4", "mov", "avi", "class", "pyc", "o", "a", "rlib",
+    ];
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| BINARY_EXTS.contains(&e.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// Recursively walk `dir`, collecting paths (relative to `work_dir`) that match
+/// `pat`. Stops once `results` reaches `limit`. Skips junk directories.
+fn collect_glob_matches(dir: &Path, pat: &glob::Pattern, work_dir: &str, results: &mut Vec<String>, limit: usize) {
+    if results.len() >= limit { return; }
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        if results.len() >= limit { return; }
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if path.is_dir() {
+            if !is_skipped_dir(&name) {
+                collect_glob_matches(&path, pat, work_dir, results, limit);
+            }
+            continue;
+        }
+        let rel = path.strip_prefix(work_dir).unwrap_or(&path).to_string_lossy().to_string();
+        if pat.matches(&rel) {
+            results.push(rel);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -936,5 +1283,108 @@ mod notebook_edit_tests {
             source_lines("a\nb\n"),
             vec![serde_json::json!("a\n"), serde_json::json!("b\n")]
         );
+    }
+}
+
+#[cfg(test)]
+mod grep_glob_tests {
+    use super::*;
+
+    fn setup_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("marlin_grep_glob_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "fn main() {\n    println!(\"hello world\");\n}\n").unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "pub fn helper() -> u32 { 42 }\n").unwrap();
+        std::fs::write(dir.join("README.md"), "# Project\nhello there\n").unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        dir
+    }
+
+    fn allow_all() -> impl Fn(&str) -> bool {
+        |_| true
+    }
+
+    #[test]
+    fn grep_finds_matching_lines_with_line_numbers() {
+        let dir = setup_dir();
+        let input = serde_json::json!({"pattern": "hello"}).to_string();
+        let res = execute("grep", &input, dir.to_str().unwrap(), &allow_all(), None, None, None, None, None, false, AstMode::Off, &SandboxMode::Off, &[]);
+        assert!(!res.is_error, "grep failed: {}", res.output);
+        assert!(res.output.contains("main.rs:2"), "missing main.rs:2 in: {}", res.output);
+        assert!(res.output.contains("README.md:2"), "missing README.md:2 in: {}", res.output);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn grep_respects_glob_filter() {
+        let dir = setup_dir();
+        let input = serde_json::json!({"pattern": "hello", "glob": "*.rs"}).to_string();
+        let res = execute("grep", &input, dir.to_str().unwrap(), &allow_all(), None, None, None, None, None, false, AstMode::Off, &SandboxMode::Off, &[]);
+        assert!(!res.is_error);
+        assert!(res.output.contains("main.rs:2"));
+        assert!(!res.output.contains("README.md"), "glob filter should exclude README.md: {}", res.output);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn grep_no_match_returns_empty_message() {
+        let dir = setup_dir();
+        let input = serde_json::json!({"pattern": "zzz_nothing_here"}).to_string();
+        let res = execute("grep", &input, dir.to_str().unwrap(), &allow_all(), None, None, None, None, None, false, AstMode::Off, &SandboxMode::Off, &[]);
+        assert!(!res.is_error);
+        assert!(res.output.contains("No matches"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn grep_invalid_regex_errors() {
+        let dir = setup_dir();
+        let input = serde_json::json!({"pattern": "("}).to_string();
+        let res = execute("grep", &input, dir.to_str().unwrap(), &allow_all(), None, None, None, None, None, false, AstMode::Off, &SandboxMode::Off, &[]);
+        assert!(res.is_error);
+        assert!(res.output.contains("invalid regex"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn glob_finds_files_by_pattern() {
+        let dir = setup_dir();
+        let input = serde_json::json!({"pattern": "**/*.rs"}).to_string();
+        let res = execute("glob", &input, dir.to_str().unwrap(), &allow_all(), None, None, None, None, None, false, AstMode::Off, &SandboxMode::Off, &[]);
+        assert!(!res.is_error, "glob failed: {}", res.output);
+        assert!(res.output.contains("src/main.rs"), "missing src/main.rs in: {}", res.output);
+        assert!(res.output.contains("src/lib.rs"), "missing src/lib.rs in: {}", res.output);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn glob_no_match_returns_empty_message() {
+        let dir = setup_dir();
+        let input = serde_json::json!({"pattern": "**/*.py"}).to_string();
+        let res = execute("glob", &input, dir.to_str().unwrap(), &allow_all(), None, None, None, None, None, false, AstMode::Off, &SandboxMode::Off, &[]);
+        assert!(!res.is_error);
+        assert!(res.output.contains("No files match"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn run_command_timeout_kills_and_reports() {
+        let dir = setup_dir();
+        // A command that sleeps longer than the 1s timeout.
+        let input = serde_json::json!({"command": "sleep 5", "timeout": "1"}).to_string();
+        let res = execute("run_command", &input, dir.to_str().unwrap(), &allow_all(), None, None, None, None, None, false, AstMode::Off, &SandboxMode::Off, &[]);
+        assert!(res.is_error, "expected timeout error, got: {}", res.output);
+        assert!(res.output.contains("timed out"), "missing 'timed out' in: {}", res.output);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn run_command_completes_within_timeout() {
+        let dir = setup_dir();
+        let input = serde_json::json!({"command": "echo done", "timeout": "5"}).to_string();
+        let res = execute("run_command", &input, dir.to_str().unwrap(), &allow_all(), None, None, None, None, None, false, AstMode::Off, &SandboxMode::Off, &[]);
+        assert!(!res.is_error, "expected success, got: {}", res.output);
+        assert!(res.output.contains("done"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

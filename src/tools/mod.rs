@@ -67,11 +67,54 @@ pub fn all_tools(
         },
         ToolDef {
             name: "run_command".into(),
-            description: "Run a shell command in the working directory and return combined stdout/stderr.".into(),
+            description: "Run a shell command in the working directory and return combined stdout/stderr. \
+                If the command exceeds 'timeout' seconds it is killed and partial output is returned. \
+                For long-running work (a dev server, a watch build, a long test) prefer bg_start so the \
+                process keeps running while you continue working — poll it later with bg_status/bg_log.".into(),
             properties: vec![
                 ToolProp { name: "command".into(), ty: "string".into(), description: "Shell command to execute.".into() },
+                ToolProp { name: "timeout".into(), ty: "string".into(), description: "Optional timeout in seconds (default 120). The command is killed if it runs longer.".into() },
             ],
             required: vec!["command".into()],
+        },
+        ToolDef {
+            name: "bg_start".into(),
+            description: "Start a long-running process in the background (dev server, watch build, long test) \
+                and return immediately with a process id — it keeps running while you continue working. \
+                Poll it later with bg_status / bg_log, and stop it with bg_kill.".into(),
+            properties: vec![
+                ToolProp { name: "command".into(), ty: "string".into(), description: "Shell command to run in the background.".into() },
+            ],
+            required: vec!["command".into()],
+        },
+        ToolDef {
+            name: "bg_status".into(),
+            description: "Report the status of background process(es): running or exited, exit code, \
+                elapsed time, and output size. With no id, lists all background processes. Use this \
+                to check whether a bg_start'd server/watch/test is still alive.".into(),
+            properties: vec![
+                ToolProp { name: "id".into(), ty: "string".into(), description: "Optional background process id. Omit to list all.".into() },
+            ],
+            required: vec![],
+        },
+        ToolDef {
+            name: "bg_log".into(),
+            description: "Read the new stdout+stderr that a background process has produced since the \
+                last bg_log call. Poll this after bg_status shows the process is running to see its \
+                output (logs, errors, readiness messages).".into(),
+            properties: vec![
+                ToolProp { name: "id".into(), ty: "string".into(), description: "Background process id.".into() },
+            ],
+            required: vec!["id".into()],
+        },
+        ToolDef {
+            name: "bg_kill".into(),
+            description: "Terminate a background process started with bg_start (SIGTERM then SIGKILL on \
+                unix). Use this to stop a dev server or watch build you no longer need.".into(),
+            properties: vec![
+                ToolProp { name: "id".into(), ty: "string".into(), description: "Background process id to terminate.".into() },
+            ],
+            required: vec!["id".into()],
         },
         ToolDef {
             name: "list_directory".into(),
@@ -98,6 +141,45 @@ pub fn all_tools(
                 ToolProp { name: "limit".into(), ty: "string".into(), description: "Maximum number of results to return (default 5, max 20).".into() },
             ],
             required: vec!["query".into()],
+        },
+        ToolDef {
+            name: "grep".into(),
+            description: "Search file contents with a regular expression, returning matching lines with \
+                line numbers and context. Use this to find where a symbol is used, a string appears, or \
+                a pattern occurs across the project — faster and more precise than search_codebase for \
+                exact/regex matches. Skips binary files and common junk directories (node_modules, \
+                target, .git, etc.).".into(),
+            properties: vec![
+                ToolProp { name: "pattern".into(), ty: "string".into(), description: "Regular expression to search for (Rust regex syntax).".into() },
+                ToolProp { name: "path".into(), ty: "string".into(), description: "File or directory to search. Defaults to the working directory.".into() },
+                ToolProp { name: "glob".into(), ty: "string".into(), description: "Optional file glob to filter which files are searched (e.g. '*.rs' or 'src/**/*.ts').".into() },
+                ToolProp { name: "context".into(), ty: "string".into(), description: "Number of lines of context before/after each match (default 0).".into() },
+                ToolProp { name: "limit".into(), ty: "string".into(), description: "Maximum number of matches to return (default 50, max 200).".into() },
+            ],
+            required: vec!["pattern".into()],
+        },
+        ToolDef {
+            name: "glob".into(),
+            description: "Find files and directories by path pattern (glob). Use this to locate files by \
+                name or path shape — e.g. '**/*.test.ts', 'src/**/mod.rs', '*.toml'. Returns matching \
+                paths relative to the working directory. Skips common junk directories (node_modules, \
+                target, .git, etc.).".into(),
+            properties: vec![
+                ToolProp { name: "pattern".into(), ty: "string".into(), description: "Glob pattern to match (e.g. '**/*.rs' or 'src/**/*.test.ts').".into() },
+                ToolProp { name: "limit".into(), ty: "string".into(), description: "Maximum number of results to return (default 100, max 500).".into() },
+            ],
+            required: vec!["pattern".into()],
+        },
+        ToolDef {
+            name: "search_symbols".into(),
+            description: "Find which file *defines* a symbol (function, type, class, const, enum, trait). \
+                Returns the file path and a snippet of the definition line. Use this when you know a \
+                function or type name and want to jump to its definition, instead of grepping broadly.".into(),
+            properties: vec![
+                ToolProp { name: "symbol".into(), ty: "string".into(), description: "The symbol name to find (e.g. 'parse_args' or 'Config').".into() },
+                ToolProp { name: "limit".into(), ty: "string".into(), description: "Maximum number of results to return (default 5, max 20).".into() },
+            ],
+            required: vec!["symbol".into()],
         },
         ToolDef {
             name: "mark_complete".into(),

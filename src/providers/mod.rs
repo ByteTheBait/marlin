@@ -40,6 +40,24 @@ pub struct Message {
     pub tool_call_id: String,  // OpenAI tool result
     #[serde(default)]
     pub is_error: bool,
+    /// Inline image attachments for this message: (mime_type, base64 data).
+    /// Rendered as multimodal content blocks by the providers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<(String, String)>,
+}
+
+impl Message {
+    pub fn new_user(content: impl Into<String>) -> Self {
+        Message {
+            role: "user".into(),
+            content: content.into(),
+            tool_calls: vec![],
+            tool_use_id: String::new(),
+            tool_call_id: String::new(),
+            is_error: false,
+            images: vec![],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

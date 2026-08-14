@@ -340,7 +340,27 @@ fn marshal_claude_messages(msgs: &[Message]) -> Vec<Value> {
                 }));
             }
             _ => {
-                out.push(serde_json::json!({"role": m.role, "content": m.content}));
+                // User messages with inline images become multimodal content
+                // blocks: image blocks followed by the text block.
+                if !m.images.is_empty() {
+                    let mut content: Vec<Value> = Vec::new();
+                    for (mime, b64) in &m.images {
+                        content.push(serde_json::json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": mime,
+                                "data": b64,
+                            }
+                        }));
+                    }
+                    if !m.content.is_empty() {
+                        content.push(serde_json::json!({"type": "text", "text": m.content}));
+                    }
+                    out.push(serde_json::json!({"role": m.role, "content": content}));
+                } else {
+                    out.push(serde_json::json!({"role": m.role, "content": m.content}));
+                }
             }
         }
     }

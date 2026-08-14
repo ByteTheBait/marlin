@@ -442,7 +442,24 @@ fn marshal_openai_messages(messages: &[Message], system_prompt: &str) -> Vec<Val
                 }));
             }
             _ => {
-                out.push(serde_json::json!({"role": m.role, "content": m.content}));
+                // Multimodal user message: image_url blocks + text.
+                if !m.images.is_empty() {
+                    let mut content: Vec<Value> = Vec::new();
+                    for (mime, b64) in &m.images {
+                        content.push(serde_json::json!({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": format!("data:{mime};base64,{b64}"),
+                            }
+                        }));
+                    }
+                    if !m.content.is_empty() {
+                        content.push(serde_json::json!({"type": "text", "text": m.content}));
+                    }
+                    out.push(serde_json::json!({"role": m.role, "content": content}));
+                } else {
+                    out.push(serde_json::json!({"role": m.role, "content": m.content}));
+                }
             }
         }
     }

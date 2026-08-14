@@ -1,9 +1,11 @@
+pub mod background;
 pub mod budget;
 pub mod context;
 pub mod loop_guard;
 pub mod subagent;
 pub mod tasks;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -112,6 +114,8 @@ pub struct StatusInfo {
     pub work_dir: String,
     /// Per-directory status bar background color (None = default theme color).
     pub status_color: Option<[u8; 3]>,
+    /// Number of currently-running background processes (see bg_start/bg_kill).
+    pub bg_count: usize,
 }
 
 /// Read the current git branch from `<dir>/.git/HEAD`. Returns None when the
@@ -125,6 +129,25 @@ pub fn detect_git_branch(dir: &str) -> Option<String> {
     } else {
         // Detached HEAD — the content is a commit hash; show a short form.
         Some(branch.chars().take(7).collect())
+    }
+}
+
+/// Map a file extension to its MIME type if it's a supported image. Returns
+/// None for anything that isn't an image (so /attach can fall through to the
+/// text-attachment path).
+fn image_mime(path: &str) -> Option<String> {
+    let ext = Path::new(path).extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "png" => Some("image/png".into()),
+        "jpg" | "jpeg" => Some("image/jpeg".into()),
+        "gif" => Some("image/gif".into()),
+        "webp" => Some("image/webp".into()),
+        "bmp" => Some("image/bmp".into()),
+        "svg" => Some("image/svg+xml".into()),
+        _ => None,
     }
 }
 
@@ -189,6 +212,9 @@ pub struct Engine {
 
     pub history: Vec<Message>,
     code_index: Option<Index>,
+    /// mtime/size snapshot used to detect external file changes for the
+    /// background index refresh.
+    index_refresh: index::RefreshState,
     session: Option<Session>,
     input_history: InputHistory,
 
@@ -196,6 +222,9 @@ pub struct Engine {
     tool_iterations: usize,
     stall_nudges: usize,
     attachments: Vec<(String, String)>, // (filename, content)
+    /// Image attachments for the next user message: (path, mime_type, base64).
+    /// Injected as multimodal content blocks by the providers.
+    image_attachments: Vec<(String, String, String)>,
     allowed_commands: Vec<String>,
     /// Retry counter for mid-stream transient network disconnects within the
     /// current turn. Reset to 0 at the start of each new message/slash command
@@ -243,6 +272,11 @@ pub struct Engine {
     /// Token count at last LLM compaction — prevents immediate re-triggering.
     compact_guard_tokens: usize,
 
+    /// Registry of long-running background processes (see `engine::background`).
+    /// The model starts/polls/kills them via the bg_start/bg_log/bg_status/bg_kill
+    /// tools; they survive across turns.
+    background: background::BackgroundRegistry,
+
     /// Diagnostics collected at construction time (skill validation issues,
     /// missing binaries, unparsable config files, stale index) — emitted once
     /// `run()` has a UI channel to surface them on, since eprintln! during
@@ -262,6 +296,13 @@ impl Engine {
 
         let input_history = InputHistory::load(&marlin_dir);
         let code_index = index::load(&marlin_dir, &work_dir).ok();
+        // Seed the mtime/size baseline so the first background refresh only
+        // re-indexes files that actually change after startup — not everything.
+        let mut index_refresh = index::RefreshState::default();
+        if code_index.is_some() {
+            let (_, next) = index::diff_against(&index_refresh, &work_dir);
+            index_refresh = next;
+        }
 
         let project_name = Path::new(&work_dir).file_name()
             .unwrap_or_default().to_string_lossy().to_string();
@@ -294,6 +335,7 @@ impl Engine {
             work_dir,
             history: vec![],
             code_index,
+            index_refresh,
             session,
             input_history,
             active_goal: String::new(),
@@ -301,6 +343,7 @@ impl Engine {
             stall_nudges: 0,
             mid_stream_retries: 0,
             attachments: vec![],
+            image_attachments: vec![],
             allowed_commands: allowed,
             rate_limit_state: None,
             loop_guard: LoopGuard::new(),
@@ -321,6 +364,7 @@ impl Engine {
             req_backup_provider: String::new(),
             req_backup_model: String::new(),
             compact_guard_tokens: 0,
+            background: background::BackgroundRegistry::new(),
             startup_diagnostics,
         };
         engine.apply_project_config();
@@ -373,6 +417,7 @@ impl Engine {
             git_branch,
             work_dir: self.work_dir.clone(),
             status_color,
+            bg_count: self.background.running_count(),
         }
     }
 
@@ -415,7 +460,21 @@ impl Engine {
         // server reports a message and doesn't block the others or startup.
         self.connect_mcp_servers(&ui_tx).await;
 
+        // Periodic background index refresh: every 30s, re-index any files that
+        // changed on disk (added externally, edited outside the agent, deleted).
+        let mut index_tick = tokio::time::Instant::now();
+
         while let Some(action) = action_rx.recv().await {
+            // Keep the index warm in the background between actions.
+            if index_tick.elapsed() >= Duration::from_secs(30) {
+                index_tick = tokio::time::Instant::now();
+                let n = self.maybe_refresh_index();
+                if n > 0 {
+                    let _ = ui_tx.send(UiUpdate::SystemMsg(format!(
+                        "index: refreshed {n} changed file(s)"
+                    ))).await;
+                }
+            }
             match action {
                 Action::Quit => break,
 
@@ -462,16 +521,8 @@ impl Engine {
                         let _ = ui_tx.send(UiUpdate::SkillMatches(matches)).await;
                     }
 
-                    let content = self.build_message_content(&text);
-                    self.history.push(Message {
-                        role: "user".into(),
-                        content,
-                        tool_calls: vec![],
-                        tool_use_id: String::new(),
-                        tool_call_id: String::new(),
-                        is_error: false,
-                    });
-                    self.attachments.clear();
+                    let msg = self.take_attachments(&text);
+                    self.history.push(msg);
                     self.active_goal = text.clone();
                     self.tool_iterations = 0;
                     self.stall_nudges = 0;
@@ -519,16 +570,8 @@ impl Engine {
                     self.input_history.add(&cmd);
                     if let Some(prompt) = self.handle_slash_command(&cmd, &ui_tx, &mut action_rx).await {
                         // Prompt-type user command: inject expanded template and run agentic loop.
-                        let content = self.build_message_content(&prompt);
-                        self.history.push(Message {
-                            role: "user".into(),
-                            content,
-                            tool_calls: vec![],
-                            tool_use_id: String::new(),
-                            tool_call_id: String::new(),
-                            is_error: false,
-                        });
-                        self.attachments.clear();
+                        let msg = self.take_attachments(&prompt);
+                        self.history.push(msg);
                         self.active_goal = prompt.clone();
                         self.tool_iterations = 0;
                         self.stall_nudges = 0;
@@ -761,6 +804,7 @@ impl Engine {
                     }).collect(),
                     tool_use_id: String::new(),
                     tool_call_id: String::new(),
+                    images: vec![],
                     is_error: false,
                 });
 
@@ -842,6 +886,7 @@ impl Engine {
                             tool_calls: vec![],
                             tool_use_id: tc.id.clone(),
                             tool_call_id: tc.id.clone(),
+                            images: vec![],
                             is_error: true,
                         });
                     } else {
@@ -851,6 +896,7 @@ impl Engine {
                             tool_calls: vec![],
                             tool_use_id: tc.id.clone(),
                             tool_call_id: tc.id.clone(),
+                            images: vec![],
                             is_error: res.is_error,
                         });
                     }
@@ -917,6 +963,7 @@ impl Engine {
                         tool_calls: vec![],
                         tool_use_id: String::new(),
                         tool_call_id: String::new(),
+                        images: vec![],
                         is_error: false,
                     });
                     self.history.push(Message {
@@ -927,6 +974,7 @@ impl Engine {
                         tool_calls: vec![],
                         tool_use_id: String::new(),
                         tool_call_id: String::new(),
+                        images: vec![],
                         is_error: false,
                     });
                     continue;
@@ -939,6 +987,7 @@ impl Engine {
                         tool_calls: vec![],
                         tool_use_id: String::new(),
                         tool_call_id: String::new(),
+                        images: vec![],
                         is_error: false,
                     });
                 } else if self.tool_iterations == 0 {
@@ -1216,6 +1265,87 @@ impl Engine {
                 continue;
             }
 
+            // ── Background process tools (bg_start/bg_status/bg_log/bg_kill) ─
+            // These operate on the engine's background registry, not the
+            // blocking executor. `bg_start` returns immediately with an id so
+            // the model can keep working while the process runs.
+            if call.name == "bg_start" || call.name == "bg_status"
+                || call.name == "bg_log" || call.name == "bg_kill"
+            {
+                let input_map: std::collections::HashMap<String, String> =
+                    serde_json::from_str(&call.input).unwrap_or_default();
+                let result = match call.name.as_str() {
+                    "bg_start" => {
+                        let cmd = input_map.get("command").cloned().unwrap_or_default();
+                        if cmd.trim().is_empty() {
+                            executor::ToolResult { output: "bg_start requires 'command'".into(), is_error: true }
+                        } else {
+                            match self.background.start(&cmd, &self.work_dir) {
+                                Ok(id) => executor::ToolResult { output: format!(
+                                    "background process started: id={id}  cmd={cmd:?}\n\
+                                     Poll with bg_status id={id} and bg_log id={id}; stop with bg_kill id={id}."
+                                ), is_error: false },
+                                Err(e) => executor::ToolResult { output: e, is_error: true },
+                            }
+                        }
+                    }
+                    "bg_status" => {
+                        let id = input_map.get("id").cloned().unwrap_or_default();
+                        let statuses = self.background.status(&id);
+                        if statuses.is_empty() {
+                            executor::ToolResult { output: if id.is_empty() {
+                                "no background processes running".into()
+                            } else {
+                                format!("no background process with id '{id}'")
+                            }, is_error: false }
+                        } else {
+                            let mut lines = Vec::new();
+                            for s in &statuses {
+                                let state = if s.running {
+                                    "RUNNING".to_string()
+                                } else {
+                                    match s.exit_code {
+                                        Some(0) => "exited (code 0)".into(),
+                                        Some(c) => format!("exited (code {c})"),
+                                        None => "exited (no code)".into(),
+                                    }
+                                };
+                                lines.push(format!(
+                                    "id={}  {state}  ~{}s  stdout={}B stderr={}B  cmd={:?}",
+                                    s.id, s.elapsed_secs, s.stdout_len, s.stderr_len, s.cmd
+                                ));
+                            }
+                            executor::ToolResult { output: lines.join("\n"), is_error: false }
+                        }
+                    }
+                    "bg_log" => {
+                        let id = input_map.get("id").cloned().unwrap_or_default();
+                        match self.background.log(&id) {
+                            Ok((out, err)) => {
+                                let mut text = String::new();
+                                if out.trim().is_empty() && err.trim().is_empty() {
+                                    text = "(no new output since last poll)".into();
+                                } else {
+                                    if !out.trim().is_empty() { text.push_str(&format!("[stdout]\n{out}")); }
+                                    if !err.trim().is_empty() { text.push_str(&format!("[stderr]\n{err}")); }
+                                }
+                                executor::ToolResult { output: text, is_error: false }
+                            }
+                            Err(e) => executor::ToolResult { output: e, is_error: true },
+                        }
+                    }
+                    _ => { // bg_kill
+                        let id = input_map.get("id").cloned().unwrap_or_default();
+                        match self.background.kill(&id) {
+                            Ok(msg) => executor::ToolResult { output: msg, is_error: false },
+                            Err(e) => executor::ToolResult { output: e, is_error: true },
+                        }
+                    }
+                };
+                results.push((result, None));
+                continue;
+            }
+
             // Route mcp__{server}__{tool} calls to the owning MCP connection.
             // Not treated as parallel-safe (unlike read_file et al.) — an MCP
             // tool's side effects are opaque to marlin, so batching several
@@ -1242,7 +1372,12 @@ impl Engine {
             // Before executing write_file / edit_file / notebook_edit, compute
             // what the file would look like and show a unified diff. The user
             // can accept (tool runs) or reject (tool is skipped with a message).
-            if call.name == "write_file" || call.name == "edit_file" || call.name == "notebook_edit" {
+            // Skipped entirely when `skip_permissions` is on — that mode means
+            // "don't ask me about file operations", so the diff dialog would
+            // just be noise.
+            if !self.cfg.skip_permissions
+                && (call.name == "write_file" || call.name == "edit_file" || call.name == "notebook_edit")
+            {
                 if let Some(path) = extract_file_path(&call.input, &self.work_dir) {
                     let old_content = std::fs::read_to_string(&path).unwrap_or_default();
                     let new_content = match call.name.as_str() {
@@ -1358,11 +1493,21 @@ impl Engine {
         let stream_tx = ui_tx.clone();
 
         tokio::task::spawn_blocking(move || {
+            let idx_search = idx_clone.clone();
             let search_fn: Option<Box<executor::SearchFn<'_>>> =
-                idx_clone.map(|idx| {
+                idx_search.map(|idx| {
                     let f: Box<executor::SearchFn<'_>> = Box::new(move |q: &str, lim: usize| {
                         let results = index::search(&idx, q, lim);
                         index::format_results(&results, q)
+                    });
+                    f
+                });
+
+            let symbol_search_fn: Option<Box<executor::SymbolSearchFn<'_>>> =
+                idx_clone.map(|idx| {
+                    let f: Box<executor::SymbolSearchFn<'_>> = Box::new(move |sym: &str, lim: usize| {
+                        let results = index::search_symbols(&idx, sym, lim);
+                        index::format_symbol_results(&results, sym)
                     });
                     f
                 });
@@ -1387,6 +1532,7 @@ impl Engine {
                 &work_dir,
                 &|cmd| sandbox || policy::is_command_allowed(cmd, &allowed),
                 search_fn.as_deref(),
+                symbol_search_fn.as_deref(),
                 Some(&|abs_path: &str, tool: &str| {
                     snapshots::take(&marlin_dir, &wd2, abs_path, tool);
                 }),
@@ -1531,6 +1677,7 @@ impl Engine {
                 &cmd_json,
                 &wd,
                 &|c: &str| sandbox || policy::is_command_allowed(c, &allowed),
+                None,
                 None,
                 None,
                 None, Some(&logs_dir),
@@ -1712,6 +1859,7 @@ impl Engine {
                 tool_calls: vec![],
                 tool_use_id: String::new(),
                 tool_call_id: String::new(),
+                images: vec![],
                 is_error: false,
             })
         }
@@ -1760,6 +1908,7 @@ impl Engine {
                 tool_calls: vec![],
                 tool_use_id: String::new(),
                 tool_call_id: String::new(),
+                images: vec![],
                 is_error: false,
             }],
             system_prompt: String::new(),
@@ -1792,6 +1941,7 @@ impl Engine {
             tool_calls: vec![],
             tool_use_id: String::new(),
             tool_call_id: String::new(),
+            images: vec![],
             is_error: false,
         });
         self.history.extend(recent);
@@ -1875,6 +2025,7 @@ impl Engine {
                 tool_calls: vec![],
                 tool_use_id: String::new(),
                 tool_call_id: String::new(),
+                images: vec![],
                 is_error: false,
             }],
             system_prompt: String::new(),
@@ -1920,6 +2071,7 @@ impl Engine {
                 tool_calls: vec![],
                 tool_use_id: String::new(),
                 tool_call_id: String::new(),
+                images: vec![],
                 is_error: false,
             }],
             system_prompt: String::new(),
@@ -1998,6 +2150,49 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Re-scan the working directory for files whose mtime/size changed since
+    /// the last refresh and re-index just those (or drop files that were
+    /// deleted). Runs periodically from the main action loop so the index stays
+    /// fresh without a full rebuild on every edit. Returns the number of files
+    /// re-indexed this round (0 when nothing changed).
+    fn maybe_refresh_index(&mut self) -> usize {
+        let Some(_idx) = &self.code_index else { return 0 };
+        let work_dir = self.work_dir.clone();
+        let (changed, next_state) = index::diff_against(&self.index_refresh, &work_dir);
+        self.index_refresh = next_state;
+        if changed.is_empty() {
+            return 0;
+        }
+        let mut reindexed = 0;
+        for rel in &changed {
+            let abs = std::path::Path::new(&work_dir).join(rel);
+            // Deleted files are dropped from the index.
+            if !abs.exists() {
+                if let Some(idx) = &mut self.code_index {
+                    index::remove_file(idx, &abs.to_string_lossy());
+                }
+                continue;
+            }
+            // Skip binary/junk extensions the walker itself skips.
+            if let Some(ext) = std::path::Path::new(rel).extension().and_then(|e| e.to_str()) {
+                let ext = ext.to_lowercase();
+                let skips = ["exe", "dll", "so", "dylib", "png", "jpg", "jpeg", "gif", "webp",
+                    "ico", "pdf", "zip", "tar", "gz", "wasm", "bin", "lock"];
+                if skips.contains(&ext.as_str()) { continue; }
+            }
+            if let Some(idx) = &mut self.code_index {
+                index::update_file(idx, &abs.to_string_lossy());
+            }
+            reindexed += 1;
+        }
+        if reindexed > 0 {
+            if let Some(idx) = &self.code_index {
+                index::save(&self.marlin_dir, idx);
+            }
+        }
+        reindexed
     }
 
     /// Skill names/descriptions to advertise in the `run_skill` tool description
@@ -2182,6 +2377,7 @@ impl Engine {
                 tool_calls: vec![],
                 tool_use_id: String::new(),
                 tool_call_id: String::new(),
+                images: vec![],
                 is_error: false,
             }],
             system_prompt: String::new(),
@@ -2224,6 +2420,7 @@ impl Engine {
             tool_calls: vec![],
             tool_use_id: String::new(),
             tool_call_id: String::new(),
+            images: vec![],
             is_error: false,
         });
         self.history.extend(recent);
@@ -2507,17 +2704,33 @@ impl Engine {
 
             "/attach" | "/a" => {
                 if args.is_empty() {
-                    if self.attachments.is_empty() {
+                    if self.attachments.is_empty() && self.image_attachments.is_empty() {
                         sys!("No files attached. Usage: /attach <file>");
                     } else {
-                        let names: Vec<String> = self.attachments.iter()
+                        let mut names: Vec<String> = self.attachments.iter()
                             .map(|(f, c)| format!("{} ({} lines)", f, c.lines().count()))
                             .collect();
+                        names.extend(self.image_attachments.iter()
+                            .map(|(f, _, _)| format!("{} (image)", f)));
                         sys!(format!("Attached:\n{}", names.join("\n")));
                     }
                     return None;
                 }
                 let path = self.resolve_path(args[0]);
+                // Image files are attached as multimodal content, not inlined text.
+                if let Some(mime) = image_mime(&path) {
+                    match std::fs::read(&path) {
+                        Ok(bytes) => {
+                            let b64 = B64.encode(bytes);
+                            self.image_attachments.retain(|(f, _, _)| f != &path);
+                            self.image_attachments.push((path.clone(), mime, b64));
+                            sys!(format!("Attached image: {} — send your next message to include it",
+                                Path::new(&path).file_name().unwrap_or_default().to_string_lossy()));
+                        }
+                        Err(e) => err!(format!("attach error: {e}")),
+                    }
+                    return None;
+                }
                 match std::fs::read_to_string(&path) {
                     Ok(content) => {
                         let lines = content.lines().count();
@@ -2533,14 +2746,18 @@ impl Engine {
             "/detach" => {
                 if args.is_empty() {
                     self.attachments.clear();
+                    self.image_attachments.clear();
                     sys!("All attachments cleared.");
                 } else {
                     let name = args[0];
-                    let before = self.attachments.len();
+                    let before = self.attachments.len() + self.image_attachments.len();
                     self.attachments.retain(|(f, _)| {
                         Path::new(f).file_name().and_then(|n| n.to_str()) != Some(name) && f != name
                     });
-                    if self.attachments.len() < before {
+                    self.image_attachments.retain(|(f, _, _)| {
+                        Path::new(f).file_name().and_then(|n| n.to_str()) != Some(name) && f != name
+                    });
+                    if self.attachments.len() + self.image_attachments.len() < before {
                         sys!(format!("Detached: {name}"));
                     } else {
                         err!(format!("No attachment named {name:?}"));
@@ -2954,8 +3171,9 @@ impl Engine {
             "/index" => {
                 if args.first().copied() == Some("status") {
                     if let Some(idx) = &self.code_index {
-                        sys!(format!("Index: {} files, {} terms, built {}.",
-                            idx.file_count, idx.term_count,
+                        let symbol_count: usize = idx.files.iter().map(|f| f.symbols.len()).sum();
+                        sys!(format!("Index: {} files, {} terms, {} symbols, built {}.",
+                            idx.file_count, idx.term_count, symbol_count,
                             idx.built_at.format("%b %d %H:%M")));
                     } else {
                         sys!("No index built. Run /index to build one.");
@@ -2967,10 +3185,15 @@ impl Engine {
                 let result = tokio::task::spawn_blocking(move || index::build(&wd, None)).await;
                 match result {
                     Ok(Ok((idx, stats))) => {
+                        // Re-seed the refresh baseline to match the freshly built
+                        // index so the next periodic refresh isn't a no-op storm.
+                        self.index_refresh = index::RefreshState::default();
+                        let (_, next) = index::diff_against(&self.index_refresh, &self.work_dir);
+                        self.index_refresh = next;
                         let _ = ui_tx.send(UiUpdate::IndexBuilt).await;
                         index::save(&self.marlin_dir, &idx);
-                        sys!(format!("Index built: {} files, {} terms in {:?}. Use /search <query> or the AI will use it automatically.",
-                            stats.files, stats.terms, stats.elapsed));
+                        sys!(format!("Index built: {} files, {} terms, {} symbols in {:?}. Use /search <query> or the AI will use it automatically.",
+                            stats.files, stats.terms, stats.symbols, stats.elapsed));
                         self.code_index = Some(idx);
                     }
                     _ => err!("Index build failed"),
@@ -3781,6 +4004,26 @@ impl Engine {
         executor::resolve_path(p, &self.work_dir)
     }
 
+    /// Consume the queued text + image attachments for the next message into a
+    /// `Message`, clearing both queues.
+    fn take_attachments(&mut self, text: &str) -> Message {
+        let content = self.build_message_content(text);
+        let images: Vec<(String, String)> = std::mem::take(&mut self.image_attachments)
+            .into_iter()
+            .map(|(_, mime, b64)| (mime, b64))
+            .collect();
+        self.attachments.clear();
+        Message {
+            role: "user".into(),
+            content,
+            tool_calls: vec![],
+            tool_use_id: String::new(),
+            tool_call_id: String::new(),
+            images,
+            is_error: false,
+        }
+    }
+
     /// Send a desktop notification (best-effort, non-blocking).
     fn send_notification(&self, title: &str, body: &str) {
         let title = title.to_string();
@@ -4027,7 +4270,7 @@ fn looks_like_unfinished_stall(text: &str) -> bool {
 /// model requests several in one turn. Everything else (writes, commands,
 /// skills, AST mutation, external tools) stays strictly sequential.
 fn is_parallel_safe(name: &str) -> bool {
-    matches!(name, "read_file" | "list_directory" | "search_codebase" | "ast_skeleton" | "ast_get_node")
+    matches!(name, "read_file" | "list_directory" | "search_codebase" | "search_symbols" | "grep" | "glob" | "ast_skeleton" | "ast_get_node")
 }
 
 /// Assigns a shared group id (the run's starting index) to every call in a
@@ -4071,6 +4314,14 @@ fn tool_short_desc(name: &str, input_json: &str) -> String {
         "search_codebase" => {
             let q = v["query"].as_str().unwrap_or("?");
             format!("search: {q}")
+        }
+        "grep" => {
+            let p = v["pattern"].as_str().unwrap_or("?");
+            format!("grep: {p}")
+        }
+        "glob" => {
+            let p = v["pattern"].as_str().unwrap_or("?");
+            format!("glob: {p}")
         }
         "ast_skeleton" => {
             let f = v["file"].as_str().unwrap_or("?");
@@ -4197,6 +4448,8 @@ mod parallel_batching_tests {
         assert!(is_parallel_safe("read_file"));
         assert!(is_parallel_safe("list_directory"));
         assert!(is_parallel_safe("search_codebase"));
+        assert!(is_parallel_safe("grep"));
+        assert!(is_parallel_safe("glob"));
         assert!(is_parallel_safe("ast_skeleton"));
         assert!(is_parallel_safe("ast_get_node"));
 

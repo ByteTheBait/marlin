@@ -33,6 +33,10 @@ pub struct ChatView {
     pub tool_iterations: usize,
     pub active_goal: String,
     pub current_tool: String,
+    /// Streaming output from a long-running run_command tool call. Rendered
+    /// live inside the tool-call bubble rather than bleeding into the main
+    /// chat stream buffer (which is model text).
+    pub tool_stream_buf: String,
 
     // Rate-limit
     pub rate_limited: bool,
@@ -127,6 +131,7 @@ impl ChatView {
             tool_iterations: 0,
             active_goal: String::new(),
             current_tool: String::new(),
+            tool_stream_buf: String::new(),
             rate_limited: false,
             rate_limit_secs: 0,
             rate_limit_total: 0,
@@ -211,6 +216,9 @@ impl ChatView {
                 }
                 self.current_tool = name.clone();
                 self.tool_iterations += 1;
+                // A new tool call starts — reset any leftover streaming output
+                // from a previous tool so it doesn't bleed into this one.
+                self.tool_stream_buf.clear();
                 // Commit any partial streamed text as an Assistant entry *before*
                 // the tool call. Otherwise the in-progress text stays in stream_buf
                 // (which is always appended at the very bottom of the viewport) and
@@ -240,6 +248,9 @@ impl ChatView {
                 if name == "mark_complete" {
                     return;
                 }
+                // The tool finished — clear the live streaming buffer so the
+                // committed result (below) is what shows in the bubble.
+                self.tool_stream_buf.clear();
                 self.entries.push(ChatEntry {
                     role: EntryRole::ToolResult { is_error },
                     content: output,
@@ -370,13 +381,10 @@ impl ChatView {
                 | UiUpdate::SubagentToolCall { .. } | UiUpdate::SubagentFinished { .. } => {}
             UiUpdate::IndexBuilt => {}
             UiUpdate::ToolStreamChunk { chunk, .. } => {
-                // Stream tool output chunks into the stream buffer so they
-                // appear inline as they arrive, just like model text.
-                if !self.streaming {
-                    self.typewriter_pos = 0;
-                }
-                self.streaming = true;
-                self.stream_buf.push_str(&chunk);
+                // Stream tool output into the tool-call bubble buffer so it
+                // stays inside the tool box instead of bleeding into the main
+                // chat stream (which is model text).
+                self.tool_stream_buf.push_str(&chunk);
                 self.maybe_scroll_to_bottom();
             }
             UiUpdate::DiffPreview { tool_id, path, diff } => {

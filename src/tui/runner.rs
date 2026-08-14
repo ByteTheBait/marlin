@@ -60,6 +60,7 @@ pub fn run(
                             status_bar.provider = info.provider.clone();
                             status_bar.model = info.model.clone();
                             status_bar.git_branch = info.git_branch.clone();
+                            status_bar.bg_count = info.bg_count;
                         }
                         UiUpdate::AstMode(mode) => {
                             status_bar.ast_mode = mode.clone();

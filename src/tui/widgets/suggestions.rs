@@ -19,6 +19,8 @@ pub fn all_commands() -> Vec<CmdDef> {
         ("/help",      "",                  "show all commands"),
         ("/config",    "",                  "interactive settings menu"),
         ("/clear",     "",                  "clear chat history"),
+        ("/compact",   "",                  "manually compact older turns into a summary now"),
+        ("/color",     "<#rrggbb|off>",     "set per-directory status bar color"),
         ("/provider",  "<name>",            "switch provider"),
         ("/p",         "<name>",            "switch provider (short)"),
         ("/model",     "<name>",            "switch model"),

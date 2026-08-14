@@ -392,6 +392,14 @@ pub fn style_status_budget_warn() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+/// Chip showing the number of running background processes (bg_start/bg_kill).
+pub fn style_status_bg_chip() -> Style {
+    Style::default()
+        .fg(if is_light() { Color::Rgb(0, 80, 60) } else { Color::Rgb(120, 230, 200) })
+        .bg(if is_light() { Color::Rgb(210, 245, 235) } else { Color::Rgb(25, 50, 42) })
+        .add_modifier(Modifier::BOLD)
+}
+
 pub fn style_user_text() -> Style {
     Style::default().fg(col_user())
 }

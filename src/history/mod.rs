@@ -174,6 +174,7 @@ pub fn from_session_message(m: &SessionMessage) -> Message {
         }).collect(),
         tool_call_id: m.tool_call_id.clone(),
         tool_use_id: m.tool_use_id.clone(),
+        images: vec![],
         is_error: m.is_error,
     }
 }

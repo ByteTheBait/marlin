@@ -22,6 +22,8 @@ pub struct StatusBar {
     /// Set when the base prompt injection (system prompt + tool defs) exceeds
     /// its ~2k token target. Informational only — never blocks a request.
     pub prompt_budget_over: Option<usize>,
+    /// Number of running background processes (started via bg_start).
+    pub bg_count: usize,
     /// Frame counter for subtle animations (pulsing streaming indicator).
     pub frame: u64,
 }
@@ -38,6 +40,7 @@ impl StatusBar {
             ast_mode: AstMode::Off,
             git_branch: None,
             prompt_budget_over: None,
+            bg_count: 0,
             frame: 0,
         }
     }
@@ -81,6 +84,11 @@ impl StatusBar {
         if let Some(tokens) = self.prompt_budget_over {
             left.push(Span::raw("    "));
             left.push(Span::styled(format!(" ⚠ PROMPT {tokens}t "), style_status_budget_warn()));
+        }
+
+        if self.bg_count > 0 {
+            left.push(Span::raw("    "));
+            left.push(Span::styled(format!("  ⚙ {n} bg  ", n = self.bg_count), style_status_bg_chip()));
         }
 
         let (right_text, right_style) = if self.streaming {

@@ -54,6 +54,7 @@ pub fn spawn(
                 tool_calls: vec![],
                 tool_use_id: String::new(),
                 tool_call_id: String::new(),
+                images: vec![],
                 is_error: false,
             }],
             system_prompt: String::new(),

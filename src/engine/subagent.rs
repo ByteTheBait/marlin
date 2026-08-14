@@ -104,6 +104,7 @@ pub async fn run(
         tool_calls: vec![],
         tool_use_id: String::new(),
         tool_call_id: String::new(),
+        images: vec![],
         is_error: false,
     }];
 
@@ -177,6 +178,7 @@ pub async fn run(
             }).collect(),
             tool_use_id: String::new(),
             tool_call_id: String::new(),
+            images: vec![],
             is_error: false,
         });
 
@@ -194,6 +196,7 @@ pub async fn run(
                 tool_calls: vec![],
                 tool_use_id: tc.id.clone(),
                 tool_call_id: tc.id.clone(),
+                images: vec![],
                 is_error: result.is_error,
             });
         }
@@ -276,10 +279,17 @@ async fn run_one_tool(
     let idx_clone = code_index.cloned();
 
     tokio::task::spawn_blocking(move || {
-        let search_fn: Option<Box<executor::SearchFn<'_>>> = idx_clone.map(|idx| {
+        let search_fn: Option<Box<executor::SearchFn<'_>>> = idx_clone.clone().map(|idx| {
             let f: Box<executor::SearchFn<'_>> = Box::new(move |q: &str, lim: usize| {
                 let results = crate::index::search(&idx, q, lim);
                 crate::index::format_results(&results, q)
+            });
+            f
+        });
+        let symbol_search_fn: Option<Box<executor::SymbolSearchFn<'_>>> = idx_clone.map(|idx| {
+            let f: Box<executor::SymbolSearchFn<'_>> = Box::new(move |sym: &str, lim: usize| {
+                let results = crate::index::search_symbols(&idx, sym, lim);
+                crate::index::format_symbol_results(&results, sym)
             });
             f
         });
@@ -289,6 +299,7 @@ async fn run_one_tool(
             &work_dir,
             &|c: &str| sandbox || policy::is_command_allowed(c, &allowed),
             search_fn.as_deref(),
+            symbol_search_fn.as_deref(),
             None,
             None, Some(&logs_dir),
             clean_env,

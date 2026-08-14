@@ -216,11 +216,16 @@ impl ChatView {
         // bottom instead of jumping. The step is a fraction of the remaining
         // distance, so it glides fast when there's a lot to scroll through and
         // slows down as it approaches (e.g. when the model response stops).
+        //
+        // The smooth easing is tied to the typewriter animation toggle
+        // (`/animate`): when animation is off, the viewport snaps straight to
+        // the bottom instead of gliding, so the two "animated" behaviors can
+        // be turned off together.
         if self.at_bottom {
             let max_y = content_height.saturating_sub(area.height) as f64;
-            // Snap if the target was explicitly requested (End / send) or the
-            // content now fits entirely in the viewport.
-            if self.smooth_offset >= f64::MAX / 2.0 || max_y <= 0.0 {
+            // Snap if animation is off, the target was explicitly requested
+            // (End / send), or the content now fits entirely in the viewport.
+            if !self.typewriter_enabled || self.smooth_offset >= f64::MAX / 2.0 || max_y <= 0.0 {
                 self.smooth_offset = max_y;
             } else {
                 let remaining = max_y - self.smooth_offset;
@@ -441,6 +446,21 @@ impl ChatView {
 
                             let out: Vec<&str> =
                                 result.content.trim_end_matches('\n').lines().collect();
+                            for l in out.iter().take(6) {
+                                content.push((l.to_string(), style_system()));
+                            }
+                            if out.len() > 6 {
+                                content.push((
+                                    format!("... {} more lines", out.len() - 6),
+                                    style_system(),
+                                ));
+                            }
+                        } else if !self.tool_stream_buf.is_empty() {
+                            // No result yet — show the live streaming output from
+                            // the long-running tool inside the bubble, so it stays
+                            // in the tool box rather than bleeding into the chat.
+                            let out: Vec<&str> =
+                                self.tool_stream_buf.trim_end_matches('\n').lines().collect();
                             for l in out.iter().take(6) {
                                 content.push((l.to_string(), style_system()));
                             }

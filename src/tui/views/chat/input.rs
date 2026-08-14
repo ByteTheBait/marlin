@@ -157,9 +157,14 @@ impl ChatView {
                 }
                 ConfigMenuOutcome::Set { key, value } => {
                     if key == "animate" {
-                        // TUI-local toggle — no engine round-trip needed.
+                        // TUI-local toggle — no engine round-trip needed. Also
+                        // snaps the viewport to the bottom when animation is
+                        // turned off (smooth scroll is tied to this toggle).
                         self.typewriter_enabled = value == "on";
                         self.typewriter_pos = 0;
+                        if !self.typewriter_enabled {
+                            self.smooth_offset = f64::MAX;
+                        }
                         return None;
                     }
                     return Some(Action::ConfigSet { key: key.to_string(), value });
@@ -395,13 +400,26 @@ impl ChatView {
                 self.input_history.insert(0, input.clone());
             }
 
-            // /animate is handled locally — no engine roundtrip needed
+            // /animate is handled locally — no engine roundtrip needed. It
+            // toggles both the typewriter text reveal and the smooth-scroll
+            // easing together, so turning animation off snaps the viewport to
+            // the bottom immediately.
             if input == "/animate" || input.starts_with("/animate ") {
                 let arg = input["animate".len() + 1..].trim();
                 match arg {
                     "on"  => { self.typewriter_enabled = true;  self.typewriter_pos = 0; }
-                    "off" => { self.typewriter_enabled = false; }
-                    _     => { self.typewriter_enabled = !self.typewriter_enabled; self.typewriter_pos = 0; }
+                    "off" => {
+                        self.typewriter_enabled = false;
+                        // Snap to the bottom right away — no lingering ease.
+                        self.smooth_offset = f64::MAX;
+                    }
+                    _     => {
+                        self.typewriter_enabled = !self.typewriter_enabled;
+                        self.typewriter_pos = 0;
+                        if !self.typewriter_enabled {
+                            self.smooth_offset = f64::MAX;
+                        }
+                    }
                 }
                 let state = if self.typewriter_enabled { "on" } else { "off" };
                 self.entries.push(ChatEntry {
