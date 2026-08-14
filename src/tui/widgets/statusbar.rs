@@ -48,7 +48,10 @@ impl StatusBar {
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
         let mut left: Vec<Span> = Vec::new();
 
-        left.push(Span::styled(format!(" {} ", self.mode.to_uppercase()), style_status_chip()));
+        left.push(Span::styled(
+            format!(" {} ", self.mode.to_uppercase()),
+            style_status_chip(),
+        ));
 
         if !self.provider.is_empty() {
             left.push(Span::raw("  "));
@@ -66,7 +69,10 @@ impl StatusBar {
             left.push(Span::raw("    "));
             let glyph = tool_glyph(&self.active_tool);
             left.push(Span::styled(format!("{glyph} "), style_status_tool()));
-            left.push(Span::styled(self.active_tool.clone(), style_status_tool_name()));
+            left.push(Span::styled(
+                self.active_tool.clone(),
+                style_status_tool_name(),
+            ));
         }
 
         match &self.ast_mode {
@@ -83,12 +89,18 @@ impl StatusBar {
 
         if let Some(tokens) = self.prompt_budget_over {
             left.push(Span::raw("    "));
-            left.push(Span::styled(format!(" ⚠ PROMPT {tokens}t "), style_status_budget_warn()));
+            left.push(Span::styled(
+                format!(" ⚠ PROMPT {tokens}t "),
+                style_status_budget_warn(),
+            ));
         }
 
         if self.bg_count > 0 {
             left.push(Span::raw("    "));
-            left.push(Span::styled(format!("  ⚙ {n} bg  ", n = self.bg_count), style_status_bg_chip()));
+            left.push(Span::styled(
+                format!("  ⚙ {n} bg  ", n = self.bg_count),
+                style_status_bg_chip(),
+            ));
         }
 
         let (right_text, right_style) = if self.streaming {

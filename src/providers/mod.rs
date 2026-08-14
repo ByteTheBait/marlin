@@ -1,7 +1,7 @@
 pub mod claude;
 pub mod openai_compat;
-pub mod registry;
 pub mod ratelimit;
+pub mod registry;
 pub mod user_providers;
 
 use std::time::{Duration, SystemTime};
@@ -35,9 +35,9 @@ pub struct Message {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallMsg>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub tool_use_id: String,   // Claude tool result
+    pub tool_use_id: String, // Claude tool result
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub tool_call_id: String,  // OpenAI tool result
+    pub tool_call_id: String, // OpenAI tool result
     #[serde(default)]
     pub is_error: bool,
     /// Inline image attachments for this message: (mime_type, base64 data).
@@ -91,8 +91,8 @@ pub struct ToolProp {
 
 #[derive(Debug, Clone)]
 pub struct RateLimitState {
-    pub remaining_requests: i64,  // -1 = unknown
-    pub remaining_tokens: i64,    // -1 = unknown
+    pub remaining_requests: i64, // -1 = unknown
+    pub remaining_tokens: i64,   // -1 = unknown
     pub reset_requests_at: Option<SystemTime>,
     pub reset_tokens_at: Option<SystemTime>,
 }
@@ -103,7 +103,7 @@ pub struct StreamChunk {
     pub done: bool,
     pub error: Option<anyhow::Error>,
     pub tool_calls: Vec<ToolCall>,
-    pub retry_after: u32,  // 0 = not rate-limited
+    pub retry_after: u32, // 0 = not rate-limited
     pub rate_limit: Option<RateLimitState>,
 }
 
@@ -131,5 +131,7 @@ pub trait Provider: Send + Sync {
 
     /// Exact input token count for the given request.
     /// Returns None if the provider doesn't support this (falls back to heuristic).
-    async fn count_tokens(&self, _req: &StreamRequest) -> Option<usize> { None }
+    async fn count_tokens(&self, _req: &StreamRequest) -> Option<usize> {
+        None
+    }
 }

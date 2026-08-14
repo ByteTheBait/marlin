@@ -46,7 +46,8 @@ impl ChatView {
         let sep_h = 1u16;
         let hint_h = 1u16;
         let session_h = 1u16;
-        let vp_h = area.height
+        let vp_h = area
+            .height
             .saturating_sub(sugg_h + sep_h + input_h + hint_h + session_h)
             .max(1);
 
@@ -96,7 +97,8 @@ impl ChatView {
     /// working directory via `/color <#rrggbb>` so different sessions are easy
     /// to tell apart at a glance.
     fn render_session_status(&self, area: Rect, buf: &mut Buffer) {
-        let bg = self.status_color
+        let bg = self
+            .status_color
             .map(|[r, g, b]| Color::Rgb(r, g, b))
             .unwrap_or_else(style_session_status_bg);
         let fg = style_session_status_fg();
@@ -109,7 +111,11 @@ impl ChatView {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| self.work_dir.clone());
-            if base.is_empty() { self.work_dir.clone() } else { base }
+            if base.is_empty() {
+                self.work_dir.clone()
+            } else {
+                base
+            }
         };
 
         // Goal / summary of the current session.
@@ -122,7 +128,10 @@ impl ChatView {
         let line = Line::from(vec![
             Span::styled("  ", Style::default().bg(bg)),
             Span::styled("📁", Style::default().bg(bg).fg(fg)),
-            Span::styled(format!(" {dir} "), Style::default().bg(bg).fg(fg).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!(" {dir} "),
+                Style::default().bg(bg).fg(fg).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("·", Style::default().bg(bg).fg(fg)),
             Span::styled(format!(" {goal}"), Style::default().bg(bg).fg(fg)),
         ]);
@@ -183,7 +192,11 @@ impl ChatView {
             }
         }
         if self.streaming && self.tool_iterations > 0 && self.stream_buf.is_empty() {
-            let raw = if self.current_tool.is_empty() { "thinking" } else { &self.current_tool };
+            let raw = if self.current_tool.is_empty() {
+                "thinking"
+            } else {
+                &self.current_tool
+            };
             let label = if self.current_tool.is_empty() {
                 "Thinking"
             } else {
@@ -199,13 +212,13 @@ impl ChatView {
             all_lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled("╭", style_tool_badge_bracket()),
-                Span::styled(format!(" {} {label} ", tool_glyph(&self.current_tool)), badge_style),
+                Span::styled(
+                    format!(" {} {label} ", tool_glyph(&self.current_tool)),
+                    badge_style,
+                ),
                 Span::styled("╮", style_tool_badge_bracket()),
                 Span::raw("  "),
-                Span::styled(
-                    format!("turn {}", self.tool_iterations),
-                    style_system(),
-                ),
+                Span::styled(format!("turn {}", self.tool_iterations), style_system()),
             ]));
         }
 
@@ -248,12 +261,20 @@ impl ChatView {
         }
 
         // Build the virtual scroll canvas and render lines into it
-        let virtual_size = Size { width: area.width, height: content_height.max(1) };
+        let virtual_size = Size {
+            width: area.width,
+            height: content_height.max(1),
+        };
         let mut scroll_view = ScrollView::new(virtual_size)
             .horizontal_scrollbar_visibility(ScrollbarVisibility::Never);
         scroll_view.render_widget(
             Paragraph::new(all_lines).style(style_app_bg()),
-            Rect { x: 0, y: 0, width: area.width, height: content_height.max(1) },
+            Rect {
+                x: 0,
+                y: 0,
+                width: area.width,
+                height: content_height.max(1),
+            },
         );
 
         // Render the scroll view (clips to the viewport and draws the scrollbar)
@@ -264,7 +285,10 @@ impl ChatView {
         // viewport so they know there's unread content below.
         if self.new_content_arrived && !self.at_bottom && area.height >= 2 {
             let label = "  ▼ new  ";
-            let x = area.right().saturating_sub(label.len() as u16).saturating_sub(1);
+            let x = area
+                .right()
+                .saturating_sub(label.len() as u16)
+                .saturating_sub(1);
             let y = area.bottom().saturating_sub(2);
             // Pulse the hint so it gently draws the eye without being obtrusive.
             let hint_style = style_scroll_hint_pulse(self.frame);
@@ -377,10 +401,7 @@ impl ChatView {
                         style_success(),
                     )));
                     for l in content_lines.iter().skip(1) {
-                        lines.push(Line::from(Span::styled(
-                            format!("    {l}"),
-                            style_system(),
-                        )));
+                        lines.push(Line::from(Span::styled(format!("    {l}"), style_system())));
                     }
                     i += 1;
                 }
@@ -440,8 +461,11 @@ impl ChatView {
                         if let Some(result) = maybe_result {
                             let is_err =
                                 matches!(result.role, EntryRole::ToolResult { is_error: true });
-                            let (icon, icon_style) =
-                                if is_err { ("✗", style_error()) } else { ("✓", style_success()) };
+                            let (icon, icon_style) = if is_err {
+                                ("✗", style_error())
+                            } else {
+                                ("✓", style_success())
+                            };
                             content.push((icon.to_string(), icon_style));
 
                             let out: Vec<&str> =
@@ -459,8 +483,11 @@ impl ChatView {
                             // No result yet — show the live streaming output from
                             // the long-running tool inside the bubble, so it stays
                             // in the tool box rather than bleeding into the chat.
-                            let out: Vec<&str> =
-                                self.tool_stream_buf.trim_end_matches('\n').lines().collect();
+                            let out: Vec<&str> = self
+                                .tool_stream_buf
+                                .trim_end_matches('\n')
+                                .lines()
+                                .collect();
                             for l in out.iter().take(6) {
                                 content.push((l.to_string(), style_system()));
                             }
@@ -588,7 +615,9 @@ impl ChatView {
         let line = if self.rate_limited {
             let pct = if self.rate_limit_total > 0 {
                 self.rate_limit_secs as f64 / self.rate_limit_total as f64
-            } else { 1.0 };
+            } else {
+                1.0
+            };
             let bar = rate_bar(pct, 16);
             Line::from(vec![
                 Span::styled("  rate limited  ", style_error()),
@@ -600,7 +629,11 @@ impl ChatView {
             ])
         } else if self.streaming {
             let goal: String = self.active_goal.chars().take(40).collect();
-            let ellipsis = if self.active_goal.chars().count() > 40 { "..." } else { "" };
+            let ellipsis = if self.active_goal.chars().count() > 40 {
+                "..."
+            } else {
+                ""
+            };
             Line::from(vec![
                 Span::styled("  ", Style::default()),
                 Span::styled(format!("{goal}{ellipsis}"), style_system()),

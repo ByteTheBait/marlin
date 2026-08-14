@@ -5,7 +5,7 @@ pub mod loop_guard;
 pub mod subagent;
 pub mod tasks;
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,15 +15,13 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 use crate::config::{AstMode, Config, ModelTier, SandboxMode};
-use crate::history::{
-    self, InputHistory, Session, from_session_message, to_session_message,
-};
+use crate::history::{self, from_session_message, to_session_message, InputHistory, Session};
 use crate::index::{self, Index};
 use crate::mcp;
 use crate::preflight;
 use crate::providers::{
-    Message, Provider, RateLimitState, StreamChunk, StreamRequest, ToolCall, ToolCallMsg,
-    registry::Registry,
+    registry::Registry, Message, Provider, RateLimitState, StreamChunk, StreamRequest, ToolCall,
+    ToolCallMsg,
 };
 use crate::skills::{self, Skill, SkillDef};
 use crate::snapshots;
@@ -37,22 +35,37 @@ use tasks::{TaskStatus, TaskStep};
 #[derive(Debug)]
 pub enum UiUpdate {
     StreamChunk(String),
-    ToolCall { name: String, input: String },
-    ToolResult { name: String, output: String, is_error: bool },
+    ToolCall {
+        name: String,
+        input: String,
+    },
+    ToolResult {
+        name: String,
+        output: String,
+        is_error: bool,
+    },
     /// Final summary text from a `mark_complete` tool call. The TUI renders it
     /// as a muted/grayed-out assistant-style message instead of a tool bubble.
     Summary(String),
     SystemMsg(String),
     ErrorMsg(String),
-    RateLimited { secs: u32 },
-    GoalComplete { tool_count: usize },
+    RateLimited {
+        secs: u32,
+    },
+    GoalComplete {
+        tool_count: usize,
+    },
     StatusUpdate(StatusInfo),
     IndexBuilt,
     /// Engine is paused waiting for user approval of a destructive command
-    AwaitingApproval { cmd: String },
+    AwaitingApproval {
+        cmd: String,
+    },
     /// Engine is paused waiting for the user to answer the model's ask_user
     /// tool call. The user's typed reply comes back as Action::UserAnswer.
-    AskUser { question: String },
+    AskUser {
+        question: String,
+    },
     /// Updated task list for the sidebar
     TaskUpdate(Vec<TaskStep>),
     /// Upfront plan for the sidebar — coarse ordered checklist, separate from
@@ -62,15 +75,23 @@ pub enum UiUpdate {
     /// content))`, or reports why it couldn't (missing file, read error) as `Err`.
     OpenViewer(Result<(String, String), String>),
     /// Opens the /diff-mode pane: current file content vs. its most recent snapshot.
-    OpenDiff { path: String, diff: Vec<snapshots::DiffLine> },
+    OpenDiff {
+        path: String,
+        diff: Vec<snapshots::DiffLine>,
+    },
     /// Opens the /edit pane with `Ok((resolved_path, content))`, or reports why
     /// it couldn't (missing file, read error) as `Err`.
     OpenEditor(Result<(String, String), String>),
     /// A Ctrl+S save from the /edit pane completed — lets the pane clear its
     /// dirty flag and rebase its "original content" comparison.
-    EditorSaved { path: String },
+    EditorSaved {
+        path: String,
+    },
     /// Token budget update for the sidebar meter
-    TokenUsage { used: usize, budget: usize },
+    TokenUsage {
+        used: usize,
+        budget: usize,
+    },
     /// Base prompt injection (system prompt + tool defs) budget check — informational,
     /// never blocking. `Some(total_tokens)` when over budget::WARN_THRESHOLD, else `None`.
     PromptBudget(Option<usize>),
@@ -81,23 +102,44 @@ pub enum UiUpdate {
     /// Skill keyword matches for the most recent user message.
     SkillMatches(Vec<(String, String)>),
     /// Difficulty score and selected tier for the current request.
-    TierSelected { score: u8, tier: String },
+    TierSelected {
+        score: u8,
+        tier: String,
+    },
     /// User-defined commands loaded from ~/.marlin/commands/ — sent to TUI for autocomplete.
     UserCommandsLoaded(Vec<crate::commands::UserCommandDef>),
     /// A subagent (delegated skill run) started — shown in the sidebar below Tasks.
-    SubagentStarted { id: String, label: String },
+    SubagentStarted {
+        id: String,
+        label: String,
+    },
     /// A subagent is about to run one tool call — updates its sidebar status line.
-    SubagentToolCall { id: String, name: String },
+    SubagentToolCall {
+        id: String,
+        name: String,
+    },
     /// A subagent finished (successfully or not).
-    SubagentFinished { id: String, ok: bool },
+    SubagentFinished {
+        id: String,
+        ok: bool,
+    },
     /// Config snapshot for the interactive /config menu. `open` is true when
     /// the user ran /config; false for refreshes after a ConfigSet applied.
-    ConfigState { state: ConfigState, open: bool },
+    ConfigState {
+        state: ConfigState,
+        open: bool,
+    },
     /// Streaming chunk from a long-running run_command tool call.
-    ToolStreamChunk { tool_id: String, chunk: String },
+    ToolStreamChunk {
+        chunk: String,
+    },
     /// Diff preview for a pending write_file/edit_file — the TUI shows a
     /// unified diff and the user accepts or rejects before the write happens.
-    DiffPreview { tool_id: String, path: String, diff: Vec<snapshots::DiffLine> },
+    DiffPreview {
+        tool_id: String,
+        path: String,
+        diff: Vec<snapshots::DiffLine>,
+    },
     /// Result of a steering command/note the user sent while the model was
     /// working. Rendered as a distinct text field in the model's output area
     /// without interrupting the in-flight stream.
@@ -136,7 +178,8 @@ pub fn detect_git_branch(dir: &str) -> Option<String> {
 /// None for anything that isn't an image (so /attach can fall through to the
 /// text-attachment path).
 fn image_mime(path: &str) -> Option<String> {
-    let ext = Path::new(path).extension()
+    let ext = Path::new(path)
+        .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
@@ -186,15 +229,25 @@ pub enum Action {
     /// User typed an answer to the model's ask_user tool call.
     UserAnswer(String),
     /// A setting was changed in the /config menu.
-    ConfigSet { key: String, value: String },
+    ConfigSet {
+        key: String,
+        value: String,
+    },
     /// Ctrl+S in the /edit pane — write `content` to `path`, through the same
     /// preflight funnel (path-escape approval, snapshotting) as the LLM's
     /// own write_file tool call.
-    SaveEditorFile { path: String, content: String },
+    SaveEditorFile {
+        path: String,
+        content: String,
+    },
     /// User accepted a diff preview for a pending write_file/edit_file.
-    AcceptDiff { tool_id: String },
+    AcceptDiff {
+        tool_id: String,
+    },
     /// User rejected a diff preview for a pending write_file/edit_file.
-    RejectDiff { tool_id: String },
+    RejectDiff {
+        tool_id: String,
+    },
     /// A steering command/note the user typed while the model was working.
     /// If it's a slash command it's executed instantly; otherwise it's shown
     /// as a text field in the model's output without interrupting the stream.
@@ -304,8 +357,11 @@ impl Engine {
             index_refresh = next;
         }
 
-        let project_name = Path::new(&work_dir).file_name()
-            .unwrap_or_default().to_string_lossy().to_string();
+        let project_name = Path::new(&work_dir)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         let session = Some(Session::new(&project_name, &work_dir));
 
         let ast_mode = cfg.ast_mode.clone();
@@ -326,7 +382,12 @@ impl Engine {
         let loaded_mcp_configs = mcp::load_all(&marlin_dir);
         crate::config::install_default_themes(&marlin_dir);
 
-        startup_diagnostics.extend(preflight::startup(&cfg, &marlin_dir, &work_dir, code_index.as_ref()));
+        startup_diagnostics.extend(preflight::startup(
+            &cfg,
+            &marlin_dir,
+            &work_dir,
+            code_index.as_ref(),
+        ));
 
         let mut engine = Self {
             cfg,
@@ -429,27 +490,40 @@ impl Engine {
         // Send initial status
         let _ = ui_tx.send(UiUpdate::StatusUpdate(self.status_info())).await;
 
-        let _ = ui_tx.send(UiUpdate::SystemMsg("marlin ready  /help for commands".into())).await;
+        let _ = ui_tx
+            .send(UiUpdate::SystemMsg(
+                "marlin ready  /help for commands".into(),
+            ))
+            .await;
         if !self.startup_diagnostics.is_empty() {
             let body = self.startup_diagnostics.join("\n  ");
-            let _ = ui_tx.send(UiUpdate::SystemMsg(
-                format!("preflight startup ({} note(s)) — see /preflight:\n  {body}", self.startup_diagnostics.len())
-            )).await;
+            let _ = ui_tx
+                .send(UiUpdate::SystemMsg(format!(
+                    "preflight startup ({} note(s)) — see /preflight:\n  {body}",
+                    self.startup_diagnostics.len()
+                )))
+                .await;
         }
         if self.ast_mode != AstMode::Off {
             let _ = ui_tx.send(UiUpdate::AstMode(self.ast_mode.clone())).await;
         }
         if let Some(idx) = &self.code_index {
-            let _ = ui_tx.send(UiUpdate::SystemMsg(
-                format!("index: {} files, {} terms", idx.file_count, idx.term_count)
-            )).await;
+            let _ = ui_tx
+                .send(UiUpdate::SystemMsg(format!(
+                    "index: {} files, {} terms",
+                    idx.file_count, idx.term_count
+                )))
+                .await;
         }
 
         // Send skills and user commands to TUI for suggestion panel.
         let skill_defs: Vec<SkillDef> = self.skills.iter().map(SkillDef::from).collect();
         let _ = ui_tx.send(UiUpdate::SkillsLoaded(skill_defs)).await;
-        let cmd_defs: Vec<crate::commands::UserCommandDef> =
-            self.user_commands.iter().map(crate::commands::UserCommandDef::from).collect();
+        let cmd_defs: Vec<crate::commands::UserCommandDef> = self
+            .user_commands
+            .iter()
+            .map(crate::commands::UserCommandDef::from)
+            .collect();
         let _ = ui_tx.send(UiUpdate::UserCommandsLoaded(cmd_defs)).await;
 
         // Spawn nightly skill-suggestion daemon.
@@ -470,16 +544,19 @@ impl Engine {
                 index_tick = tokio::time::Instant::now();
                 let n = self.maybe_refresh_index();
                 if n > 0 {
-                    let _ = ui_tx.send(UiUpdate::SystemMsg(format!(
-                        "index: refreshed {n} changed file(s)"
-                    ))).await;
+                    let _ = ui_tx
+                        .send(UiUpdate::SystemMsg(format!(
+                            "index: refreshed {n} changed file(s)"
+                        )))
+                        .await;
                 }
             }
             match action {
                 Action::Quit => break,
 
                 Action::CancelStream => {
-                    self.cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    self.cancel_flag
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
                     self.active_goal.clear();
                     self.tool_iterations = 0;
                     self.stall_nudges = 0;
@@ -505,18 +582,21 @@ impl Engine {
                 }
 
                 Action::SaveEditorFile { path, content } => {
-                    self.save_editor_file(path, content, &ui_tx, &mut action_rx).await;
+                    self.save_editor_file(path, content, &ui_tx, &mut action_rx)
+                        .await;
                 }
 
                 Action::SendMessage(text) => {
                     self.input_history.add(&text);
 
                     // Emit skill matches so TUI can show relevant skills.
-                    let skill_defs: Vec<SkillDef> = self.skills.iter().map(SkillDef::from).collect();
-                    let matches: Vec<(String, String)> = skills::suggest::match_skills(&text, &skill_defs)
-                        .into_iter()
-                        .map(|m| (m.name, m.description))
-                        .collect();
+                    let skill_defs: Vec<SkillDef> =
+                        self.skills.iter().map(SkillDef::from).collect();
+                    let matches: Vec<(String, String)> =
+                        skills::suggest::match_skills(&text, &skill_defs)
+                            .into_iter()
+                            .map(|m| (m.name, m.description))
+                            .collect();
                     if !matches.is_empty() {
                         let _ = ui_tx.send(UiUpdate::SkillMatches(matches)).await;
                     }
@@ -532,7 +612,8 @@ impl Engine {
                     self.plan_cursor = 0;
                     let _ = ui_tx.send(UiUpdate::PlanUpdate(vec![])).await;
                     self.loop_guard.reset();
-                    self.cancel_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                    self.cancel_flag
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
 
                     // Select model tier based on difficulty score (if tiers enabled).
                     self.rate_and_route(&text, &ui_tx).await;
@@ -545,7 +626,13 @@ impl Engine {
                     // Broadcast token count immediately so the sidebar isn't stale while waiting.
                     // Prefer exact count from provider API; fall back to heuristic.
                     let system_prompt = self.effective_system_prompt();
-                    let turn_tools = all_tools(&self.ast_mode, &self.skill_tool_list(&text), &self.external_tools, self.cfg.skill_subagents, &self.mcp_tools);
+                    let turn_tools = all_tools(
+                        &self.ast_mode,
+                        &self.skill_tool_list(&text),
+                        &self.external_tools,
+                        self.cfg.skill_subagents,
+                        &self.mcp_tools,
+                    );
                     let tok = if let Ok(p) = self.registry.get(&self.req_provider) {
                         let req_for_count = StreamRequest {
                             model: self.req_model.clone(),
@@ -555,25 +642,35 @@ impl Engine {
                             tools: turn_tools.clone(),
                             thinking: false,
                         };
-                        p.count_tokens(&req_for_count).await
+                        p.count_tokens(&req_for_count)
+                            .await
                             .unwrap_or_else(|| estimate_tokens(&self.history, &system_prompt))
                     } else {
                         estimate_tokens(&self.history, &system_prompt)
                     };
                     let injection_report = budget::compute(&system_prompt, &turn_tools);
-                    let _ = ui_tx.send(UiUpdate::PromptBudget(
-                        injection_report.over_budget().then_some(injection_report.total)
-                    )).await;
-                    let _ = ui_tx.send(UiUpdate::TokenUsage {
-                        used: tok,
-                        budget: self.token_budget,
-                    }).await;
+                    let _ = ui_tx
+                        .send(UiUpdate::PromptBudget(
+                            injection_report
+                                .over_budget()
+                                .then_some(injection_report.total),
+                        ))
+                        .await;
+                    let _ = ui_tx
+                        .send(UiUpdate::TokenUsage {
+                            used: tok,
+                            budget: self.token_budget,
+                        })
+                        .await;
                     self.agentic_loop(&ui_tx, &mut action_rx).await;
                 }
 
                 Action::SlashCommand(cmd) => {
                     self.input_history.add(&cmd);
-                    if let Some(prompt) = self.handle_slash_command(&cmd, &ui_tx, &mut action_rx).await {
+                    if let Some(prompt) = self
+                        .handle_slash_command(&cmd, &ui_tx, &mut action_rx)
+                        .await
+                    {
                         // Prompt-type user command: inject expanded template and run agentic loop.
                         let msg = self.take_attachments(&prompt);
                         self.history.push(msg);
@@ -586,7 +683,8 @@ impl Engine {
                         self.plan_cursor = 0;
                         let _ = ui_tx.send(UiUpdate::PlanUpdate(vec![])).await;
                         self.loop_guard.reset();
-                        self.cancel_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                        self.cancel_flag
+                            .store(false, std::sync::atomic::Ordering::SeqCst);
                         self.rate_and_route(&prompt, &ui_tx).await;
                         self.maybe_generate_plan(&prompt, &ui_tx).await;
                         self.maybe_checkpoint(&ui_tx).await;
@@ -604,7 +702,11 @@ impl Engine {
         }
     }
 
-    async fn agentic_loop(&mut self, ui_tx: &mpsc::Sender<UiUpdate>, action_rx: &mut mpsc::Receiver<Action>) {
+    async fn agentic_loop(
+        &mut self,
+        ui_tx: &mpsc::Sender<UiUpdate>,
+        action_rx: &mut mpsc::Receiver<Action>,
+    ) {
         let safety_cap = self.cfg.tool_call_limit;
 
         loop {
@@ -634,7 +736,9 @@ impl Engine {
                     if let Some(reset) = rl.reset_requests_at {
                         if let Ok(d) = reset.duration_since(SystemTime::now()) {
                             let s = d.as_secs() as u32 + 1;
-                            if s > wait_secs { wait_secs = s; }
+                            if s > wait_secs {
+                                wait_secs = s;
+                            }
                         }
                     }
                 }
@@ -643,7 +747,11 @@ impl Engine {
                     self.rate_limit_state = None;
                     let _ = ui_tx.send(UiUpdate::RateLimited { secs: wait_secs }).await;
                     tokio::time::sleep(Duration::from_secs(wait_secs as u64)).await;
-                    let _ = ui_tx.send(UiUpdate::SystemMsg("Rate limit cleared — resuming...".into())).await;
+                    let _ = ui_tx
+                        .send(UiUpdate::SystemMsg(
+                            "Rate limit cleared — resuming...".into(),
+                        ))
+                        .await;
                 }
             }
 
@@ -659,10 +767,12 @@ impl Engine {
 
             // Broadcast token usage to sidebar
             let tok_used = estimate_tokens(&self.history, &self.effective_system_prompt());
-            let _ = ui_tx.send(UiUpdate::TokenUsage {
-                used: tok_used,
-                budget: self.token_budget,
-            }).await;
+            let _ = ui_tx
+                .send(UiUpdate::TokenUsage {
+                    used: tok_used,
+                    budget: self.token_budget,
+                })
+                .await;
 
             // A cancel may have arrived during compaction / rate-limit sleep
             // above — catch it before spending a new stream request.
@@ -683,7 +793,13 @@ impl Engine {
                 messages: self.history.clone(),
                 system_prompt: self.effective_system_prompt(),
                 max_tokens: self.cfg.max_tokens,
-                tools: all_tools(&self.ast_mode, &self.skill_tool_list(&self.active_goal), &self.external_tools, self.cfg.skill_subagents, &self.mcp_tools),
+                tools: all_tools(
+                    &self.ast_mode,
+                    &self.skill_tool_list(&self.active_goal),
+                    &self.external_tools,
+                    self.cfg.skill_subagents,
+                    &self.mcp_tools,
+                ),
                 thinking: self.cfg.thinking,
             };
 
@@ -745,15 +861,25 @@ impl Engine {
                     if !self.req_backup_provider.is_empty() {
                         let bp = std::mem::take(&mut self.req_backup_provider);
                         let bm = std::mem::take(&mut self.req_backup_model);
-                        let _ = ui_tx.send(UiUpdate::SystemMsg(format!(
-                            "Rate limited — switching to backup: {bp} / {bm}"
-                        ))).await;
+                        let _ = ui_tx
+                            .send(UiUpdate::SystemMsg(format!(
+                                "Rate limited — switching to backup: {bp} / {bm}"
+                            )))
+                            .await;
                         self.req_provider = bp;
                         self.req_model = bm;
                     } else {
-                        let _ = ui_tx.send(UiUpdate::RateLimited { secs: chunk.retry_after }).await;
+                        let _ = ui_tx
+                            .send(UiUpdate::RateLimited {
+                                secs: chunk.retry_after,
+                            })
+                            .await;
                         tokio::time::sleep(Duration::from_secs(chunk.retry_after as u64)).await;
-                        let _ = ui_tx.send(UiUpdate::SystemMsg("Rate limit cleared — resuming...".into())).await;
+                        let _ = ui_tx
+                            .send(UiUpdate::SystemMsg(
+                                "Rate limit cleared — resuming...".into(),
+                            ))
+                            .await;
                     }
                     break 'recv;
                 }
@@ -766,10 +892,12 @@ impl Engine {
                     // times, then give up with a clear error.
                     if is_transient_network_error(&e) && self.mid_stream_retries < 2 {
                         self.mid_stream_retries += 1;
-                        let _ = ui_tx.send(UiUpdate::SystemMsg(format!(
-                            "Stream interrupted — retrying ({}/2): {e}",
-                            self.mid_stream_retries
-                        ))).await;
+                        let _ = ui_tx
+                            .send(UiUpdate::SystemMsg(format!(
+                                "Stream interrupted — retrying ({}/2): {e}",
+                                self.mid_stream_retries
+                            )))
+                            .await;
                         tokio::time::sleep(Duration::from_millis(600)).await;
                         break 'recv; // outer loop re-requests the stream
                     }
@@ -791,7 +919,9 @@ impl Engine {
                 }
             }
 
-            let Some(tool_calls) = done_chunk else { continue };
+            let Some(tool_calls) = done_chunk else {
+                continue;
+            };
 
             if !tool_calls.is_empty() {
                 if self.tool_iterations >= safety_cap {
@@ -806,9 +936,14 @@ impl Engine {
                 self.history.push(Message {
                     role: "assistant".into(),
                     content: text.clone(),
-                    tool_calls: tool_calls.iter().map(|tc| ToolCallMsg {
-                        id: tc.id.clone(), name: tc.name.clone(), input: tc.input.clone(),
-                    }).collect(),
+                    tool_calls: tool_calls
+                        .iter()
+                        .map(|tc| ToolCallMsg {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            input: tc.input.clone(),
+                        })
+                        .collect(),
                     tool_use_id: String::new(),
                     tool_call_id: String::new(),
                     images: vec![],
@@ -820,21 +955,32 @@ impl Engine {
                 // `parallel_group_ids`) so the sidebar can show they ran together.
                 let groups = parallel_group_ids(&tool_calls);
                 for (tc, group) in tool_calls.iter().zip(groups.iter()) {
-                    let _ = ui_tx.send(UiUpdate::ToolCall {
-                        name: tc.name.clone(),
-                        input: tc.input.clone(),
-                    }).await;
+                    let _ = ui_tx
+                        .send(UiUpdate::ToolCall {
+                            name: tc.name.clone(),
+                            input: tc.input.clone(),
+                        })
+                        .await;
                     let desc = tool_short_desc(&tc.name, &tc.input);
-                    self.task_steps.push(TaskStep::tool_pending(&tc.name, desc, *group));
+                    self.task_steps
+                        .push(TaskStep::tool_pending(&tc.name, desc, *group));
                 }
-                let _ = ui_tx.send(UiUpdate::TaskUpdate(self.task_steps.clone())).await;
+                let _ = ui_tx
+                    .send(UiUpdate::TaskUpdate(self.task_steps.clone()))
+                    .await;
 
                 // Check for destructive commands and await user approval
-                let denied = self.run_approval_checks(&tool_calls, ui_tx, action_rx).await;
-                if self.cancel_flag.load(std::sync::atomic::Ordering::SeqCst) { return; }
+                let denied = self
+                    .run_approval_checks(&tool_calls, ui_tx, action_rx)
+                    .await;
+                if self.cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
 
                 // Execute tools (run in blocking thread)
-                let results = self.execute_tools(&tool_calls, &denied, ui_tx, action_rx).await;
+                let results = self
+                    .execute_tools(&tool_calls, &denied, ui_tx, action_rx)
+                    .await;
 
                 // A cancel may have arrived while the tools were running — stop
                 // the loop rather than feeding the results back to the model.
@@ -845,12 +991,16 @@ impl Engine {
                 // Track which task step index corresponds to this batch
                 let batch_task_start = self.task_steps.len().saturating_sub(tool_calls.len());
 
-                for (i, (tc, (res, real_group))) in tool_calls.iter().zip(results.iter()).enumerate() {
-                    let _ = ui_tx.send(UiUpdate::ToolResult {
-                        name: tc.name.clone(),
-                        output: res.output.clone(),
-                        is_error: res.is_error,
-                    }).await;
+                for (i, (tc, (res, real_group))) in
+                    tool_calls.iter().zip(results.iter()).enumerate()
+                {
+                    let _ = ui_tx
+                        .send(UiUpdate::ToolResult {
+                            name: tc.name.clone(),
+                            output: res.output.clone(),
+                            is_error: res.is_error,
+                        })
+                        .await;
 
                     // When a tool returns an error, offer a quick inline explanation
                     if res.is_error {
@@ -874,10 +1024,15 @@ impl Engine {
                     }
 
                     // File-hash-aware loop guard for edits
-                    let intercept = if tc.name == "edit_file" || tc.name == "write_file" || tc.name == "notebook_edit" {
+                    let intercept = if tc.name == "edit_file"
+                        || tc.name == "write_file"
+                        || tc.name == "notebook_edit"
+                        || tc.name == "multi_edit"
+                    {
                         if let Some(path) = extract_file_path(&tc.input, &self.work_dir) {
                             let content = std::fs::read(&path).unwrap_or_default();
-                            self.loop_guard.check_file_edit(&path, &content, res.is_error)
+                            self.loop_guard
+                                .check_file_edit(&path, &content, res.is_error)
                         } else {
                             self.loop_guard.check(&tc.name, res.is_error)
                         }
@@ -909,7 +1064,12 @@ impl Engine {
                     }
 
                     // Keep index fresh after writes
-                    if (tc.name == "write_file" || tc.name == "edit_file" || tc.name == "notebook_edit") && !res.is_error {
+                    if (tc.name == "write_file"
+                        || tc.name == "edit_file"
+                        || tc.name == "notebook_edit"
+                        || tc.name == "multi_edit")
+                        && !res.is_error
+                    {
                         if let Some(path) = extract_file_path(&tc.input, &self.work_dir) {
                             if let Some(idx) = &mut self.code_index {
                                 index::update_file(idx, &path);
@@ -918,22 +1078,34 @@ impl Engine {
                     }
                 }
 
-                let _ = ui_tx.send(UiUpdate::TaskUpdate(self.task_steps.clone())).await;
+                let _ = ui_tx
+                    .send(UiUpdate::TaskUpdate(self.task_steps.clone()))
+                    .await;
 
                 // Advance the upfront plan by one step per tool-call batch — a rough
                 // approximation of "one plan step per loop iteration" rather than
                 // trying to match individual tool calls to plan text.
                 if self.plan_cursor < self.plan_steps.len() {
                     let batch_failed = results.iter().any(|(r, _)| r.is_error);
-                    self.plan_steps[self.plan_cursor].status =
-                        if batch_failed { TaskStatus::Failed } else { TaskStatus::Completed };
+                    self.plan_steps[self.plan_cursor].status = if batch_failed {
+                        TaskStatus::Failed
+                    } else {
+                        TaskStatus::Completed
+                    };
                     self.plan_cursor += 1;
-                    let _ = ui_tx.send(UiUpdate::PlanUpdate(self.plan_steps.clone())).await;
+                    let _ = ui_tx
+                        .send(UiUpdate::PlanUpdate(self.plan_steps.clone()))
+                        .await;
                 }
 
                 // Write-Test-Fix: run verify_command after any file edit
-                let had_file_edit = tool_calls.iter().zip(results.iter())
-                    .any(|(tc, (r, _))| (tc.name == "edit_file" || tc.name == "write_file" || tc.name == "notebook_edit") && !r.is_error);
+                let had_file_edit = tool_calls.iter().zip(results.iter()).any(|(tc, (r, _))| {
+                    (tc.name == "edit_file"
+                        || tc.name == "write_file"
+                        || tc.name == "notebook_edit"
+                        || tc.name == "multi_edit")
+                        && !r.is_error
+                });
                 if had_file_edit {
                     if let Some(verify_result) = self.run_verify_command(ui_tx).await {
                         self.history.push(verify_result);
@@ -962,7 +1134,10 @@ impl Engine {
                 const MAX_STALL_NUDGES: usize = 2;
                 let text = text_buf.trim().to_string();
 
-                if !text.is_empty() && looks_like_unfinished_stall(&text) && self.stall_nudges < MAX_STALL_NUDGES {
+                if !text.is_empty()
+                    && looks_like_unfinished_stall(&text)
+                    && self.stall_nudges < MAX_STALL_NUDGES
+                {
                     self.stall_nudges += 1;
                     self.history.push(Message {
                         role: "assistant".into(),
@@ -973,17 +1148,11 @@ impl Engine {
                         images: vec![],
                         is_error: false,
                     });
-                    self.history.push(Message {
-                        role: "user".into(),
-                        content: "You said you would do that but made no tool call. Either make \
+                    self.history.push(Message::new_user(
+                        "You said you would do that but made no tool call. Either make \
                             the tool call now to actually do it, or say plainly that you're done \
-                            or blocked.".into(),
-                        tool_calls: vec![],
-                        tool_use_id: String::new(),
-                        tool_call_id: String::new(),
-                        images: vec![],
-                        is_error: false,
-                    });
+                            or blocked.",
+                    ));
                     continue;
                 }
 
@@ -1028,7 +1197,8 @@ impl Engine {
         loop {
             match action_rx.try_recv() {
                 Ok(Action::CancelStream) => {
-                    self.cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    self.cancel_flag
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
                     self.active_goal.clear();
                     self.tool_iterations = 0;
                     self.stall_nudges = 0;
@@ -1079,19 +1249,26 @@ impl Engine {
                         break;
                     }
                     let backoff_ms = NETWORK_RETRY_BASE_MS * (1 << (attempt - 1));
-                    let _ = ui_tx.send(UiUpdate::SystemMsg(format!(
-                        "Network error — retrying in {}ms (attempt {}/{}): {}",
-                        backoff_ms, attempt, NETWORK_RETRIES,
-                        last_err.as_ref().map(|e| e.to_string()).unwrap_or_default(),
-                    ))).await;
+                    let _ = ui_tx
+                        .send(UiUpdate::SystemMsg(format!(
+                            "Network error — retrying in {}ms (attempt {}/{}): {}",
+                            backoff_ms,
+                            attempt,
+                            NETWORK_RETRIES,
+                            last_err.as_ref().map(|e| e.to_string()).unwrap_or_default(),
+                        )))
+                        .await;
                     tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 }
             }
         }
-        let _ = ui_tx.send(UiUpdate::ErrorMsg(
-            last_err.map(|e| format!("Still failing after {NETWORK_RETRIES} retries: {e}"))
-                .unwrap_or_else(|| format!("Network error after {NETWORK_RETRIES} retries."))
-        )).await;
+        let _ = ui_tx
+            .send(UiUpdate::ErrorMsg(
+                last_err
+                    .map(|e| format!("Still failing after {NETWORK_RETRIES} retries: {e}"))
+                    .unwrap_or_else(|| format!("Network error after {NETWORK_RETRIES} retries.")),
+            ))
+            .await;
         None
     }
 
@@ -1113,7 +1290,9 @@ impl Engine {
                 step.status = TaskStatus::Completed;
             }
             self.plan_cursor = self.plan_steps.len();
-            let _ = ui_tx.send(UiUpdate::PlanUpdate(self.plan_steps.clone())).await;
+            let _ = ui_tx
+                .send(UiUpdate::PlanUpdate(self.plan_steps.clone()))
+                .await;
         }
 
         let _ = ui_tx.send(UiUpdate::GoalComplete { tool_count }).await;
@@ -1137,7 +1316,9 @@ impl Engine {
         while i < calls.len() {
             if is_parallel_safe(&calls[i].name) {
                 let start = i;
-                while i < calls.len() && is_parallel_safe(&calls[i].name) { i += 1; }
+                while i < calls.len() && is_parallel_safe(&calls[i].name) {
+                    i += 1;
+                }
                 let batch = &calls[start..i];
                 let group = (batch.len() > 1).then_some(start);
 
@@ -1145,7 +1326,8 @@ impl Engine {
                 // them — spawn_blocking starts running on the blocking pool as soon
                 // as it's called, so this is what actually makes them run
                 // concurrently rather than one-at-a-time.
-                let handles: Vec<Option<tokio::task::JoinHandle<executor::ToolResult>>> = batch.iter()
+                let handles: Vec<Option<tokio::task::JoinHandle<executor::ToolResult>>> = batch
+                    .iter()
                     .map(|c| (!denied.contains(&c.id)).then(|| self.spawn_tool(c, ui_tx)))
                     .collect();
 
@@ -1209,10 +1391,13 @@ impl Engine {
             i += 1;
 
             if denied.contains(&call.id) {
-                results.push((executor::ToolResult {
-                    output: "Command denied by user.".to_string(),
-                    is_error: true,
-                }, None));
+                results.push((
+                    executor::ToolResult {
+                        output: "Command denied by user.".to_string(),
+                        is_error: true,
+                    },
+                    None,
+                ));
                 continue;
             }
 
@@ -1221,7 +1406,13 @@ impl Engine {
             // approval funnel. The agentic loop below checks for it after this
             // batch finishes and ends the turn instead of continuing.
             if call.name == "mark_complete" {
-                results.push((executor::ToolResult { output: "Acknowledged.".into(), is_error: false }, None));
+                results.push((
+                    executor::ToolResult {
+                        output: "Acknowledged.".into(),
+                        is_error: false,
+                    },
+                    None,
+                ));
                 continue;
             }
 
@@ -1230,7 +1421,9 @@ impl Engine {
             if call.name == "ask_user" {
                 let input_map: std::collections::HashMap<String, String> =
                     serde_json::from_str(&call.input).unwrap_or_default();
-                let question = input_map.get("question").cloned()
+                let question = input_map
+                    .get("question")
+                    .cloned()
                     .unwrap_or_else(|| "Please answer:".to_string());
                 let answer = self.await_ask_user(ui_tx, action_rx, question).await;
                 let (output, is_error) = match answer {
@@ -1249,24 +1442,38 @@ impl Engine {
                 let skill_name = input_map.get("name").cloned().unwrap_or_default();
                 let query = input_map.get("query").cloned().unwrap_or_default();
 
-                let result = if let Some(skill) = self.skills.iter().find(|s| s.name == skill_name).cloned() {
+                let result = if let Some(skill) =
+                    self.skills.iter().find(|s| s.name == skill_name).cloned()
+                {
                     if self.cfg.skill_subagents {
-                        self.run_skill_as_subagent(&skill, &query, ui_tx, action_rx).await
+                        self.run_skill_as_subagent(&skill, &query, ui_tx, action_rx)
+                            .await
                     } else if skill.is_shell() {
                         self.run_shell_skill(&skill, &query).await
                     } else if skill.is_prompt() {
                         match skills::executor::expand_prompt(&skill, &query) {
-                            Ok(expanded) => executor::ToolResult { output: expanded, is_error: false },
-                            Err(e) => executor::ToolResult { output: e.to_string(), is_error: true },
+                            Ok(expanded) => executor::ToolResult {
+                                output: expanded,
+                                is_error: false,
+                            },
+                            Err(e) => executor::ToolResult {
+                                output: e.to_string(),
+                                is_error: true,
+                            },
                         }
                     } else {
                         executor::ToolResult {
-                            output: format!("skill '{skill_name}' has neither a shell chunk nor a prompt body"),
+                            output: format!(
+                                "skill '{skill_name}' has neither a shell chunk nor a prompt body"
+                            ),
                             is_error: true,
                         }
                     }
                 } else {
-                    executor::ToolResult { output: format!("skill '{skill_name}' not found"), is_error: true }
+                    executor::ToolResult {
+                        output: format!("skill '{skill_name}' not found"),
+                        is_error: true,
+                    }
                 };
                 results.push((result, None));
                 continue;
@@ -1276,8 +1483,10 @@ impl Engine {
             // These operate on the engine's background registry, not the
             // blocking executor. `bg_start` returns immediately with an id so
             // the model can keep working while the process runs.
-            if call.name == "bg_start" || call.name == "bg_status"
-                || call.name == "bg_log" || call.name == "bg_kill"
+            if call.name == "bg_start"
+                || call.name == "bg_status"
+                || call.name == "bg_log"
+                || call.name == "bg_kill"
             {
                 let input_map: std::collections::HashMap<String, String> =
                     serde_json::from_str(&call.input).unwrap_or_default();
@@ -1285,7 +1494,10 @@ impl Engine {
                     "bg_start" => {
                         let cmd = input_map.get("command").cloned().unwrap_or_default();
                         if cmd.trim().is_empty() {
-                            executor::ToolResult { output: "bg_start requires 'command'".into(), is_error: true }
+                            executor::ToolResult {
+                                output: "bg_start requires 'command'".into(),
+                                is_error: true,
+                            }
                         } else {
                             match self.background.start(&cmd, &self.work_dir) {
                                 Ok(id) => executor::ToolResult { output: format!(
@@ -1300,11 +1512,14 @@ impl Engine {
                         let id = input_map.get("id").cloned().unwrap_or_default();
                         let statuses = self.background.status(&id);
                         if statuses.is_empty() {
-                            executor::ToolResult { output: if id.is_empty() {
-                                "no background processes running".into()
-                            } else {
-                                format!("no background process with id '{id}'")
-                            }, is_error: false }
+                            executor::ToolResult {
+                                output: if id.is_empty() {
+                                    "no background processes running".into()
+                                } else {
+                                    format!("no background process with id '{id}'")
+                                },
+                                is_error: false,
+                            }
                         } else {
                             let mut lines = Vec::new();
                             for s in &statuses {
@@ -1322,7 +1537,10 @@ impl Engine {
                                     s.id, s.elapsed_secs, s.stdout_len, s.stderr_len, s.cmd
                                 ));
                             }
-                            executor::ToolResult { output: lines.join("\n"), is_error: false }
+                            executor::ToolResult {
+                                output: lines.join("\n"),
+                                is_error: false,
+                            }
                         }
                     }
                     "bg_log" => {
@@ -1333,19 +1551,36 @@ impl Engine {
                                 if out.trim().is_empty() && err.trim().is_empty() {
                                     text = "(no new output since last poll)".into();
                                 } else {
-                                    if !out.trim().is_empty() { text.push_str(&format!("[stdout]\n{out}")); }
-                                    if !err.trim().is_empty() { text.push_str(&format!("[stderr]\n{err}")); }
+                                    if !out.trim().is_empty() {
+                                        text.push_str(&format!("[stdout]\n{out}"));
+                                    }
+                                    if !err.trim().is_empty() {
+                                        text.push_str(&format!("[stderr]\n{err}"));
+                                    }
                                 }
-                                executor::ToolResult { output: text, is_error: false }
+                                executor::ToolResult {
+                                    output: text,
+                                    is_error: false,
+                                }
                             }
-                            Err(e) => executor::ToolResult { output: e, is_error: true },
+                            Err(e) => executor::ToolResult {
+                                output: e,
+                                is_error: true,
+                            },
                         }
                     }
-                    _ => { // bg_kill
+                    _ => {
+                        // bg_kill
                         let id = input_map.get("id").cloned().unwrap_or_default();
                         match self.background.kill(&id) {
-                            Ok(msg) => executor::ToolResult { output: msg, is_error: false },
-                            Err(e) => executor::ToolResult { output: e, is_error: true },
+                            Ok(msg) => executor::ToolResult {
+                                output: msg,
+                                is_error: false,
+                            },
+                            Err(e) => executor::ToolResult {
+                                output: e,
+                                is_error: true,
+                            },
                         }
                     }
                 };
@@ -1360,10 +1595,14 @@ impl Engine {
             if let Some((server, tool_name)) = mcp::parse_tool_name(&call.name) {
                 let result = match self.mcp_clients.get(server) {
                     Some(client) => {
-                        let args: serde_json::Value = serde_json::from_str(&call.input).unwrap_or_default();
+                        let args: serde_json::Value =
+                            serde_json::from_str(&call.input).unwrap_or_default();
                         match client.call_tool(tool_name, args).await {
                             Ok((output, is_error)) => executor::ToolResult { output, is_error },
-                            Err(e) => executor::ToolResult { output: e.to_string(), is_error: true },
+                            Err(e) => executor::ToolResult {
+                                output: e.to_string(),
+                                is_error: true,
+                            },
                         }
                     }
                     None => executor::ToolResult {
@@ -1383,7 +1622,10 @@ impl Engine {
             // "don't ask me about file operations", so the diff dialog would
             // just be noise.
             if !self.cfg.skip_permissions
-                && (call.name == "write_file" || call.name == "edit_file" || call.name == "notebook_edit")
+                && (call.name == "write_file"
+                    || call.name == "edit_file"
+                    || call.name == "notebook_edit"
+                    || call.name == "multi_edit")
             {
                 if let Some(path) = extract_file_path(&call.input, &self.work_dir) {
                     let old_content = std::fs::read_to_string(&path).unwrap_or_default();
@@ -1400,6 +1642,24 @@ impl Engine {
                             let new_str = input_map.get("new_string").cloned().unwrap_or_default();
                             old_content.replacen(&old_str, &new_str, 1)
                         }
+                        "multi_edit" => {
+                            // Apply every edit in order (mirrors the executor arm,
+                            // including the empty-old_string guard).
+                            let v: serde_json::Value =
+                                serde_json::from_str(&call.input).unwrap_or_default();
+                            let mut cur = old_content.clone();
+                            if let Some(edits) = v["edits"].as_array() {
+                                for edit in edits {
+                                    let old = edit["old_string"].as_str().unwrap_or("");
+                                    let new = edit["new_string"].as_str().unwrap_or("");
+                                    if old.is_empty() {
+                                        break;
+                                    }
+                                    cur = cur.replacen(old, new, 1);
+                                }
+                            }
+                            cur
+                        }
                         "notebook_edit" => {
                             // For notebooks, just show the raw input as the "new" side
                             let input_map: std::collections::HashMap<String, String> =
@@ -1410,17 +1670,23 @@ impl Engine {
                     };
 
                     if let Some(diff) = snapshots::diff_lines(&old_content, &new_content) {
-                        let _ = ui_tx.send(UiUpdate::DiffPreview {
-                            tool_id: call.id.clone(),
-                            path: path.clone(),
-                            diff,
-                        }).await;
+                        let _ = ui_tx
+                            .send(UiUpdate::DiffPreview {
+                                tool_id: call.id.clone(),
+                                path: path.clone(),
+                                diff,
+                            })
+                            .await;
 
                         // Wait for user to accept or reject
                         let accepted = loop {
                             match action_rx.recv().await {
-                                Some(Action::AcceptDiff { tool_id }) if tool_id == call.id => break true,
-                                Some(Action::RejectDiff { tool_id }) if tool_id == call.id => break false,
+                                Some(Action::AcceptDiff { tool_id }) if tool_id == call.id => {
+                                    break true
+                                }
+                                Some(Action::RejectDiff { tool_id }) if tool_id == call.id => {
+                                    break false
+                                }
                                 Some(Action::CancelStream) => break false,
                                 None => break false,
                                 _ => {} // ignore other actions while waiting
@@ -1428,10 +1694,14 @@ impl Engine {
                         };
 
                         if !accepted {
-                            results.push((executor::ToolResult {
-                                output: "Edit rejected by user — diff was not accepted.".to_string(),
-                                is_error: true,
-                            }, None));
+                            results.push((
+                                executor::ToolResult {
+                                    output: "Edit rejected by user — diff was not accepted."
+                                        .to_string(),
+                                    is_error: true,
+                                },
+                                None,
+                            ));
                             continue;
                         }
                     }
@@ -1484,7 +1754,6 @@ impl Engine {
     ) -> tokio::task::JoinHandle<executor::ToolResult> {
         let name = call.name.clone();
         let input = call.input.clone();
-        let tool_id = call.id.clone();
         let work_dir = self.work_dir.clone();
         let allowed = self.allowed_commands.clone();
         let marlin_dir = self.marlin_dir.clone();
@@ -1501,37 +1770,34 @@ impl Engine {
 
         tokio::task::spawn_blocking(move || {
             let idx_search = idx_clone.clone();
-            let search_fn: Option<Box<executor::SearchFn<'_>>> =
-                idx_search.map(|idx| {
-                    let f: Box<executor::SearchFn<'_>> = Box::new(move |q: &str, lim: usize| {
-                        let results = index::search(&idx, q, lim);
-                        index::format_results(&results, q)
-                    });
-                    f
+            let search_fn: Option<Box<executor::SearchFn<'_>>> = idx_search.map(|idx| {
+                let f: Box<executor::SearchFn<'_>> = Box::new(move |q: &str, lim: usize| {
+                    let results = index::search(&idx, q, lim);
+                    index::format_results(&results, q)
                 });
+                f
+            });
 
             let symbol_search_fn: Option<Box<executor::SymbolSearchFn<'_>>> =
                 idx_clone.map(|idx| {
-                    let f: Box<executor::SymbolSearchFn<'_>> = Box::new(move |sym: &str, lim: usize| {
-                        let results = index::search_symbols(&idx, sym, lim);
-                        index::format_symbol_results(&results, sym)
-                    });
+                    let f: Box<executor::SymbolSearchFn<'_>> =
+                        Box::new(move |sym: &str, lim: usize| {
+                            let results = index::search_symbols(&idx, sym, lim);
+                            index::format_symbol_results(&results, sym)
+                        });
                     f
                 });
 
             // Streaming callback for run_command: sends chunks to the TUI as they arrive
-            let stream_fn: Option<Box<executor::StreamFn<'_>>> =
-                if name == "run_command" {
-                    let tid = tool_id.clone();
-                    Some(Box::new(move |chunk: &str| {
-                        let _ = stream_tx.blocking_send(UiUpdate::ToolStreamChunk {
-                            tool_id: tid.clone(),
-                            chunk: chunk.to_string(),
-                        });
-                    }))
-                } else {
-                    None
-                };
+            let stream_fn: Option<Box<executor::StreamFn<'_>>> = if name == "run_command" {
+                Some(Box::new(move |chunk: &str| {
+                    let _ = stream_tx.blocking_send(UiUpdate::ToolStreamChunk {
+                        chunk: chunk.to_string(),
+                    });
+                }))
+            } else {
+                None
+            };
 
             executor::execute(
                 &name,
@@ -1572,7 +1838,12 @@ impl Engine {
     async fn run_shell_skill(&self, skill: &Skill, query: &str) -> executor::ToolResult {
         let cmds = match skills::executor::resolve_chunks(skill, query) {
             Ok(c) => c,
-            Err(e) => return executor::ToolResult { output: e.to_string(), is_error: true },
+            Err(e) => {
+                return executor::ToolResult {
+                    output: e.to_string(),
+                    is_error: true,
+                }
+            }
         };
 
         let mut outputs = Vec::with_capacity(cmds.len());
@@ -1599,7 +1870,10 @@ impl Engine {
         } else {
             format!("{prose}\n\n{}", outputs.join("\n\n"))
         };
-        executor::ToolResult { output, is_error: false }
+        executor::ToolResult {
+            output,
+            is_error: false,
+        }
     }
 
     /// Delegate a skill invocation to a subagent (see `engine::subagent`) instead
@@ -1618,13 +1892,23 @@ impl Engine {
     ) -> executor::ToolResult {
         let instructions = match subagent::build_task(skill, query) {
             Ok(s) => s,
-            Err(msg) => return executor::ToolResult { output: msg, is_error: true },
+            Err(msg) => {
+                return executor::ToolResult {
+                    output: msg,
+                    is_error: true,
+                }
+            }
         };
 
         let (provider_name, model) = self.subagent_model();
         let provider = match self.registry.get(&provider_name) {
             Ok(p) => p,
-            Err(e) => return executor::ToolResult { output: e.to_string(), is_error: true },
+            Err(e) => {
+                return executor::ToolResult {
+                    output: e.to_string(),
+                    is_error: true,
+                }
+            }
         };
 
         let result = subagent::run(
@@ -1640,9 +1924,13 @@ impl Engine {
             ui_tx,
             action_rx,
             &self.cancel_flag,
-        ).await;
+        )
+        .await;
 
-        executor::ToolResult { output: result.output, is_error: result.is_error }
+        executor::ToolResult {
+            output: result.output,
+            is_error: result.is_error,
+        }
     }
 
     /// Provider/model a subagent should use: `model_tiers.default` when
@@ -1650,10 +1938,17 @@ impl Engine {
     /// is enabled for the main conversation — this is a separate mechanism),
     /// else whatever the main conversation is using.
     fn subagent_model(&self) -> (String, String) {
-        self.cfg.model_tiers.as_ref()
+        self.cfg
+            .model_tiers
+            .as_ref()
             .filter(|t| t.enabled)
             .map(|t| (t.default.provider.clone(), t.default.model.clone()))
-            .unwrap_or_else(|| (self.cfg.active_provider.clone(), self.cfg.active_model.clone()))
+            .unwrap_or_else(|| {
+                (
+                    self.cfg.active_provider.clone(),
+                    self.cfg.active_model.clone(),
+                )
+            })
     }
 
     /// Preflight-check a resolved shell command against the real allow-list and
@@ -1663,7 +1958,10 @@ impl Engine {
         let inv = preflight::Invocation::shell("run_command", cmd);
         let verdict = preflight::check(&inv, &self.cfg, &self.allowed_commands);
         if let preflight::Verdict::Deny(reason) = &verdict {
-            return Err(executor::ToolResult { output: reason.clone(), is_error: true });
+            return Err(executor::ToolResult {
+                output: reason.clone(),
+                is_error: true,
+            });
         }
         Ok(verdict)
     }
@@ -1687,13 +1985,16 @@ impl Engine {
                 None,
                 None,
                 None,
-                None, Some(&logs_dir),
+                None,
+                Some(&logs_dir),
                 clean_env,
                 crate::config::AstMode::Off,
                 &sandbox_mode,
                 &[],
             )
-        }).await.unwrap_or_else(|e| executor::ToolResult {
+        })
+        .await
+        .unwrap_or_else(|e| executor::ToolResult {
             output: e.to_string(),
             is_error: true,
         })
@@ -1726,8 +2027,9 @@ impl Engine {
             let verdict = match tc.name.as_str() {
                 "run_command" => {
                     let cmd = extract_cmd_str(&tc.input);
-                    preflight::is_destructive_cmd(&cmd)
-                        .then(|| preflight::Verdict::NeedApproval(format!("destructive command: {cmd}")))
+                    preflight::is_destructive_cmd(&cmd).then(|| {
+                        preflight::Verdict::NeedApproval(format!("destructive command: {cmd}"))
+                    })
                 }
                 // Only pre-check here when skills run inline (cfg.skill_subagents off).
                 // When delegated to a subagent, its own tool-call loop (run_one_tool)
@@ -1738,26 +2040,35 @@ impl Engine {
                         serde_json::from_str(&tc.input).unwrap_or_default();
                     let skill_name = input_map.get("name").cloned().unwrap_or_default();
                     let query = input_map.get("query").cloned().unwrap_or_default();
-                    self.skills.iter()
+                    self.skills
+                        .iter()
                         .find(|s| s.name == skill_name && s.is_shell())
                         .and_then(|skill| skills::executor::resolve_chunks(skill, &query).ok())
-                        .and_then(|cmds| cmds.into_iter().find(|cmd| preflight::is_destructive_cmd(cmd)))
-                        .map(|cmd| preflight::Verdict::NeedApproval(format!("destructive skill command: {cmd}")))
+                        .and_then(|cmds| {
+                            cmds.into_iter()
+                                .find(|cmd| preflight::is_destructive_cmd(cmd))
+                        })
+                        .map(|cmd| {
+                            preflight::Verdict::NeedApproval(format!(
+                                "destructive skill command: {cmd}"
+                            ))
+                        })
                 }
-                "read_file" | "write_file" | "edit_file" | "notebook_edit" | "create_directory" => {
-                    extract_path_field(&tc.input).map(|path| {
-                        let resolved = executor::resolve_path(&path, &self.work_dir);
-                        let inv = preflight::Invocation::paths(tc.name.clone(), vec![resolved]);
-                        preflight::check(&inv, &self.cfg, &self.allowed_commands)
-                    })
-                }
+                "read_file" | "write_file" | "edit_file" | "notebook_edit" | "multi_edit"
+                | "create_directory" => extract_path_field(&tc.input).map(|path| {
+                    let resolved = executor::resolve_path(&path, &self.work_dir);
+                    let inv = preflight::Invocation::paths(tc.name.clone(), vec![resolved]);
+                    preflight::check(&inv, &self.cfg, &self.allowed_commands)
+                }),
                 _ => None,
             };
 
             match verdict {
                 None | Some(preflight::Verdict::Allow) => {}
                 Some(preflight::Verdict::Deny(reason)) => {
-                    let _ = ui_tx.send(UiUpdate::ErrorMsg(format!("Denied: {reason}"))).await;
+                    let _ = ui_tx
+                        .send(UiUpdate::ErrorMsg(format!("Denied: {reason}")))
+                        .await;
                     denied.insert(tc.id.clone());
                 }
                 Some(preflight::Verdict::NeedApproval(reason)) => {
@@ -1784,9 +2095,10 @@ impl Engine {
         loop {
             match action_rx.recv().await {
                 Some(Action::Approve) => break true,
-                Some(Action::Deny)    => break false,
+                Some(Action::Deny) => break false,
                 Some(Action::CancelStream) => {
-                    self.cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    self.cancel_flag
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
                     break false;
                 }
                 None => break false,
@@ -1809,7 +2121,8 @@ impl Engine {
             match action_rx.recv().await {
                 Some(Action::UserAnswer(answer)) => break Some(answer),
                 Some(Action::CancelStream) => {
-                    self.cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    self.cancel_flag
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
                     break None;
                 }
                 None => break None,
@@ -1825,7 +2138,11 @@ impl Engine {
         let work_dir = self.work_dir.clone();
         let clean_env = self.cfg.clean_env;
 
-        let _ = ui_tx.send(UiUpdate::SystemMsg(format!("[Marlin Verify] Running: {cmd}"))).await;
+        let _ = ui_tx
+            .send(UiUpdate::SystemMsg(format!(
+                "[Marlin Verify] Running: {cmd}"
+            )))
+            .await;
 
         let result = match tokio::task::spawn_blocking(move || {
             let mut command = std::process::Command::new("sh");
@@ -1833,11 +2150,15 @@ impl Engine {
             if clean_env {
                 command.env_clear();
                 for var in executor::CLEAN_ENV_VARS {
-                    if let Ok(val) = std::env::var(var) { command.env(var, val); }
+                    if let Ok(val) = std::env::var(var) {
+                        command.env(var, val);
+                    }
                 }
             }
             command.output()
-        }).await {
+        })
+        .await
+        {
             Ok(Ok(out)) => out,
             _ => return None,
         };
@@ -1847,28 +2168,33 @@ impl Engine {
         let combined = format!("{stdout}{stderr}").trim().to_string();
 
         if result.status.success() {
-            let _ = ui_tx.send(UiUpdate::SystemMsg("[Marlin Verify] ✓ Tests passed.".into())).await;
+            let _ = ui_tx
+                .send(UiUpdate::SystemMsg(
+                    "[Marlin Verify] ✓ Tests passed.".into(),
+                ))
+                .await;
             None
         } else {
-            let snippet: String = combined.lines().rev().take(60)
-                .collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+            let snippet: String = combined
+                .lines()
+                .rev()
+                .take(60)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
             let msg = format!(
                 "[Marlin Verify] Tests failed (exit {}). Fix the errors before continuing.\n\n{}",
                 result.status.code().unwrap_or(-1),
                 snippet
             );
-            let _ = ui_tx.send(UiUpdate::SystemMsg(
-                "[Marlin Verify] ✗ Tests failed — injecting error into context.".into()
-            )).await;
-            Some(Message {
-                role: "user".into(),
-                content: msg,
-                tool_calls: vec![],
-                tool_use_id: String::new(),
-                tool_call_id: String::new(),
-                images: vec![],
-                is_error: false,
-            })
+            let _ = ui_tx
+                .send(UiUpdate::SystemMsg(
+                    "[Marlin Verify] ✗ Tests failed — injecting error into context.".into(),
+                ))
+                .await;
+            Some(Message::new_user(msg))
         }
     }
 
@@ -1888,23 +2214,27 @@ impl Engine {
             return;
         }
         let work_dir = self.work_dir.clone();
-        let hash = tokio::task::spawn_blocking(move || {
-            crate::checkpoint::create(&work_dir)
-        }).await;
+        let hash = tokio::task::spawn_blocking(move || crate::checkpoint::create(&work_dir)).await;
         match hash {
             Ok(Ok(h)) if !h.is_empty() => {
-                let _ = ui_tx.send(UiUpdate::SystemMsg(
-                    format!("Checkpoint created ({h}) — /undo will roll this turn back.")
-                )).await;
+                let _ = ui_tx
+                    .send(UiUpdate::SystemMsg(format!(
+                        "Checkpoint created ({h}) — /undo will roll this turn back."
+                    )))
+                    .await;
             }
             Ok(Ok(_)) => {
                 // No changes to commit — nothing to checkpoint.
             }
             Ok(Err(e)) => {
-                let _ = ui_tx.send(UiUpdate::SystemMsg(format!("Checkpoint skipped: {e}"))).await;
+                let _ = ui_tx
+                    .send(UiUpdate::SystemMsg(format!("Checkpoint skipped: {e}")))
+                    .await;
             }
             Err(e) => {
-                let _ = ui_tx.send(UiUpdate::SystemMsg(format!("Checkpoint skipped: {e}"))).await;
+                let _ = ui_tx
+                    .send(UiUpdate::SystemMsg(format!("Checkpoint skipped: {e}")))
+                    .await;
             }
         }
     }
@@ -1919,8 +2249,12 @@ impl Engine {
         let compact_above = (self.token_budget as f64 * 0.70) as usize;
 
         let cur_tokens = estimate_tokens(&self.history, "");
-        if cur_tokens < compact_above { return; }
-        if self.history.len() <= KEEP_RECENT { return; }
+        if cur_tokens < compact_above {
+            return;
+        }
+        if self.history.len() <= KEEP_RECENT {
+            return;
+        }
         // Don't re-compact immediately after a previous compaction; wait for 5k more tokens
         if self.compact_guard_tokens > 0 && cur_tokens < self.compact_guard_tokens + 5_000 {
             return;
@@ -1940,30 +2274,25 @@ impl Engine {
 
         let summary_req = StreamRequest {
             model: compact_model,
-            messages: vec![Message {
-                role: "user".into(),
-                content: format!(
-                    "Produce a dense technical summary of this coding session fragment for an AI \
-                    coding assistant. Include: files created/modified (with key changes), commands \
-                    run and their outcomes, errors encountered and how they were resolved, decisions \
-                    made, and current task state. Be precise and comprehensive — this summary \
-                    replaces the original turns in context.\n\n{ctx}"
-                ),
-                tool_calls: vec![],
-                tool_use_id: String::new(),
-                tool_call_id: String::new(),
-                images: vec![],
-                is_error: false,
-            }],
+            messages: vec![Message::new_user(format!(
+                "Produce a dense technical summary of this coding session fragment for an AI \
+                coding assistant. Include: files created/modified (with key changes), commands \
+                run and their outcomes, errors encountered and how they were resolved, decisions \
+                made, and current task state. Be precise and comprehensive — this summary \
+                replaces the original turns in context.\n\n{ctx}"
+            ))],
             system_prompt: String::new(),
             max_tokens: 1500,
             tools: vec![],
             thinking: false,
         };
 
-        let _ = ui_tx.send(UiUpdate::SystemMsg(
-            format!("Compacting context (~{cur_tokens} tokens) — summarizing {split} older turns…")
-        )).await;        let mut stream = match provider.stream(summary_req).await {
+        let _ = ui_tx
+            .send(UiUpdate::SystemMsg(format!(
+                "Compacting context (~{cur_tokens} tokens) — summarizing {split} older turns…"
+            )))
+            .await;
+        let mut stream = match provider.stream(summary_req).await {
             Ok(s) => s,
             Err(_) => return,
         };
@@ -1971,30 +2300,31 @@ impl Engine {
         let mut summary = String::new();
         while let Some(chunk) = stream.recv().await {
             summary.push_str(&chunk.content);
-            if chunk.done { break; }
+            if chunk.done {
+                break;
+            }
         }
 
-        if summary.trim().is_empty() { return; }
+        if summary.trim().is_empty() {
+            return;
+        }
 
         let recent = self.history.split_off(split);
         self.history.clear();
-        self.history.push(Message {
-            role: "user".into(),
-            content: format!("[Marlin Context Summary — {split} turns condensed]\n{}", summary.trim()),
-            tool_calls: vec![],
-            tool_use_id: String::new(),
-            tool_call_id: String::new(),
-            images: vec![],
-            is_error: false,
-        });
+        self.history.push(Message::new_user(format!(
+            "[Marlin Context Summary — {split} turns condensed]\n{}",
+            summary.trim()
+        )));
         self.history.extend(recent);
 
         let new_tokens = estimate_tokens(&self.history, "");
         self.compact_guard_tokens = new_tokens;
 
-        let _ = ui_tx.send(UiUpdate::SystemMsg(
-            format!("Context compacted: {split} turns → 1 summary (~{new_tokens} tokens now).")
-        )).await;
+        let _ = ui_tx
+            .send(UiUpdate::SystemMsg(format!(
+                "Context compacted: {split} turns → 1 summary (~{new_tokens} tokens now)."
+            )))
+            .await;
     }
 
     /// Returns (provider, model) for cheap compaction calls, preferring haiku > sonnet > active.
@@ -2014,7 +2344,10 @@ impl Engine {
                 return (p.clone(), m.clone());
             }
         }
-        (self.cfg.active_provider.clone(), self.cfg.active_model.clone())
+        (
+            self.cfg.active_provider.clone(),
+            self.cfg.active_model.clone(),
+        )
     }
 
     // ── Model tier routing ────────────────────────────────────────────────────
@@ -2037,8 +2370,17 @@ impl Engine {
         }
 
         let score = self.rate_difficulty(message, &tiers).await;
-        let tier_label = if score <= tiers.default_max_difficulty { "default" } else { "complex" };
-        let _ = ui_tx.send(UiUpdate::TierSelected { score, tier: tier_label.into() }).await;
+        let tier_label = if score <= tiers.default_max_difficulty {
+            "default"
+        } else {
+            "complex"
+        };
+        let _ = ui_tx
+            .send(UiUpdate::TierSelected {
+                score,
+                tier: tier_label.into(),
+            })
+            .await;
 
         let selected: &ModelTier = if score <= tiers.default_max_difficulty {
             &tiers.default
@@ -2059,18 +2401,10 @@ impl Engine {
         };
         let req = StreamRequest {
             model: tiers.rater.model.clone(),
-            messages: vec![Message {
-                role: "user".into(),
-                content: format!(
-                    "Rate the difficulty of this coding task from 1 to 100 where 1 is trivial \
-                    and 100 is extremely complex architecture work. Reply with ONLY the number.\n\nTask: {message}"
-                ),
-                tool_calls: vec![],
-                tool_use_id: String::new(),
-                tool_call_id: String::new(),
-                images: vec![],
-                is_error: false,
-            }],
+            messages: vec![Message::new_user(format!(
+                "Rate the difficulty of this coding task from 1 to 100 where 1 is trivial \
+                and 100 is extremely complex architecture work. Reply with ONLY the number.\n\nTask: {message}"
+            ))],
             system_prompt: String::new(),
             max_tokens: 8,
             tools: vec![],
@@ -2078,14 +2412,20 @@ impl Engine {
         };
         let mut text = String::new();
         let stream_fut = async {
-            if let Ok(mut stream) = rater.stream(req).await {                while let Some(chunk) = stream.recv().await {
+            if let Ok(mut stream) = rater.stream(req).await {
+                while let Some(chunk) = stream.recv().await {
                     text.push_str(&chunk.content);
-                    if chunk.done { break; }
+                    if chunk.done {
+                        break;
+                    }
                 }
             }
         };
         // 10-second timeout — if the rater model hangs, fall back to default score.
-        if tokio::time::timeout(Duration::from_secs(10), stream_fut).await.is_err() {
+        if tokio::time::timeout(Duration::from_secs(10), stream_fut)
+            .await
+            .is_err()
+        {
             return 50;
         }
         text.trim().parse::<u8>().unwrap_or(50).clamp(1, 100)
@@ -2100,23 +2440,17 @@ impl Engine {
         self.plan_steps.clear();
         self.plan_cursor = 0;
 
-        let Ok(provider) = self.registry.get(&self.req_provider) else { return };
+        let Ok(provider) = self.registry.get(&self.req_provider) else {
+            return;
+        };
         let req = StreamRequest {
             model: self.req_model.clone(),
-            messages: vec![Message {
-                role: "user".into(),
-                content: format!(
-                    "Break the following coding task into 2-6 short, concrete, ordered \
-                    steps (imperative mood, under 8 words each). Reply with ONLY the \
-                    steps, one per line, no numbering or bullets, no other text. If the \
-                    task genuinely needs just one step, reply with one line.\n\nTask: {message}"
-                ),
-                tool_calls: vec![],
-                tool_use_id: String::new(),
-                tool_call_id: String::new(),
-                images: vec![],
-                is_error: false,
-            }],
+            messages: vec![Message::new_user(format!(
+                "Break the following coding task into 2-6 short, concrete, ordered \
+                steps (imperative mood, under 8 words each). Reply with ONLY the \
+                steps, one per line, no numbering or bullets, no other text. If the \
+                task genuinely needs just one step, reply with one line.\n\nTask: {message}"
+            ))],
             system_prompt: String::new(),
             max_tokens: 200,
             tools: vec![],
@@ -2128,19 +2462,27 @@ impl Engine {
             if let Ok(mut stream) = provider.stream(req).await {
                 while let Some(chunk) = stream.recv().await {
                     text.push_str(&chunk.content);
-                    if chunk.done { break; }
+                    if chunk.done {
+                        break;
+                    }
                 }
             }
         };
         // 10-second timeout — if the plan model hangs, proceed without a plan.
-        if tokio::time::timeout(Duration::from_secs(10), stream_fut).await.is_err() {
+        if tokio::time::timeout(Duration::from_secs(10), stream_fut)
+            .await
+            .is_err()
+        {
             return;
         }
 
         let steps: Vec<TaskStep> = text
             .lines()
             .map(|l| l.trim().trim_start_matches(['-', '*', '•']).trim())
-            .map(|l| l.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ')').trim())
+            .map(|l| {
+                l.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ')')
+                    .trim()
+            })
             .filter(|l| !l.is_empty())
             .take(8)
             .map(TaskStep::planned)
@@ -2148,15 +2490,21 @@ impl Engine {
 
         if !steps.is_empty() {
             self.plan_steps = steps;
-            let _ = ui_tx.send(UiUpdate::PlanUpdate(self.plan_steps.clone())).await;
+            let _ = ui_tx
+                .send(UiUpdate::PlanUpdate(self.plan_steps.clone()))
+                .await;
         }
     }
 
     // ── Nightly daemon ────────────────────────────────────────────────────────
 
     fn maybe_spawn_daemon(&self, ui_tx: mpsc::Sender<UiUpdate>) {
-        let Some(tiers) = &self.cfg.model_tiers else { return };
-        let Ok(provider) = self.registry.get(&tiers.rater.provider) else { return };
+        let Some(tiers) = &self.cfg.model_tiers else {
+            return;
+        };
+        let Ok(provider) = self.registry.get(&tiers.rater.provider) else {
+            return;
+        };
         let model = tiers.rater.model.clone();
         skills::daemon::spawn(self.marlin_dir.clone(), provider, model, ui_tx);
     }
@@ -2170,27 +2518,36 @@ impl Engine {
         self.mcp_tools.clear();
         for cfg in self.mcp_server_configs.clone() {
             match mcp::client::McpClient::spawn(&cfg).await {
-                Ok(client) => {
-                    match client.list_tools().await {
-                        Ok(tools) => {
-                            let count = tools.len();
-                            for tool in tools {
-                                self.mcp_tools.push((cfg.name.clone(), tool));
-                            }
-                            self.mcp_clients.insert(cfg.name.clone(), Arc::new(client));
-                            let _ = ui_tx.send(UiUpdate::SystemMsg(
-                                format!("mcp: connected '{}' ({count} tool(s))", cfg.name)
-                            )).await;
+                Ok(client) => match client.list_tools().await {
+                    Ok(tools) => {
+                        let count = tools.len();
+                        for tool in tools {
+                            self.mcp_tools.push((cfg.name.clone(), tool));
                         }
-                        Err(e) => {
-                            let _ = ui_tx.send(UiUpdate::ErrorMsg(
-                                format!("mcp: '{}' connected but tools/list failed: {e}", cfg.name)
-                            )).await;
-                        }
+                        self.mcp_clients.insert(cfg.name.clone(), Arc::new(client));
+                        let _ = ui_tx
+                            .send(UiUpdate::SystemMsg(format!(
+                                "mcp: connected '{}' ({count} tool(s))",
+                                cfg.name
+                            )))
+                            .await;
                     }
-                }
+                    Err(e) => {
+                        let _ = ui_tx
+                            .send(UiUpdate::ErrorMsg(format!(
+                                "mcp: '{}' connected but tools/list failed: {e}",
+                                cfg.name
+                            )))
+                            .await;
+                    }
+                },
                 Err(e) => {
-                    let _ = ui_tx.send(UiUpdate::ErrorMsg(format!("mcp: '{}' failed to start: {e}", cfg.name))).await;
+                    let _ = ui_tx
+                        .send(UiUpdate::ErrorMsg(format!(
+                            "mcp: '{}' failed to start: {e}",
+                            cfg.name
+                        )))
+                        .await;
                 }
             }
         }
@@ -2202,7 +2559,9 @@ impl Engine {
     /// fresh without a full rebuild on every edit. Returns the number of files
     /// re-indexed this round (0 when nothing changed).
     fn maybe_refresh_index(&mut self) -> usize {
-        let Some(_idx) = &self.code_index else { return 0 };
+        let Some(_idx) = &self.code_index else {
+            return 0;
+        };
         let work_dir = self.work_dir.clone();
         let (changed, next_state) = index::diff_against(&self.index_refresh, &work_dir);
         self.index_refresh = next_state;
@@ -2220,11 +2579,18 @@ impl Engine {
                 continue;
             }
             // Skip binary/junk extensions the walker itself skips.
-            if let Some(ext) = std::path::Path::new(rel).extension().and_then(|e| e.to_str()) {
+            if let Some(ext) = std::path::Path::new(rel)
+                .extension()
+                .and_then(|e| e.to_str())
+            {
                 let ext = ext.to_lowercase();
-                let skips = ["exe", "dll", "so", "dylib", "png", "jpg", "jpeg", "gif", "webp",
-                    "ico", "pdf", "zip", "tar", "gz", "wasm", "bin", "lock"];
-                if skips.contains(&ext.as_str()) { continue; }
+                let skips = [
+                    "exe", "dll", "so", "dylib", "png", "jpg", "jpeg", "gif", "webp", "ico", "pdf",
+                    "zip", "tar", "gz", "wasm", "bin", "lock",
+                ];
+                if skips.contains(&ext.as_str()) {
+                    continue;
+                }
             }
             if let Some(idx) = &mut self.code_index {
                 index::update_file(idx, &abs.to_string_lossy());
@@ -2248,9 +2614,15 @@ impl Engine {
         let skill_defs: Vec<SkillDef> = self.skills.iter().map(SkillDef::from).collect();
         let matched = skills::suggest::match_skills(query, &skill_defs);
         if matched.is_empty() {
-            self.skills.iter().map(|s| (s.name.clone(), String::new())).collect()
+            self.skills
+                .iter()
+                .map(|s| (s.name.clone(), String::new()))
+                .collect()
         } else {
-            matched.into_iter().map(|m| (m.name, m.description)).collect()
+            matched
+                .into_iter()
+                .map(|m| (m.name, m.description))
+                .collect()
         }
     }
 
@@ -2277,7 +2649,10 @@ impl Engine {
                 describe what you're about to do in plain text and stop; if you catch yourself writing \"let me now...\" \
                 or \"I'll...\", make that tool call instead. Plain text with no tool call is only for asking the user \
                 a question or reporting you're permanently blocked.\n");
-            s.push_str(&format!("Progress so far: {} tool calls made.\n", self.tool_iterations));
+            s.push_str(&format!(
+                "Progress so far: {} tool calls made.\n",
+                self.tool_iterations
+            ));
         }
 
         if !self.cfg.system_prompt.is_empty() {
@@ -2286,7 +2661,11 @@ impl Engine {
         }
 
         // Per-provider system prompt override takes precedence over global
-        if let Some(override_prompt) = self.cfg.provider_system_prompts.get(&self.cfg.active_provider) {
+        if let Some(override_prompt) = self
+            .cfg
+            .provider_system_prompts
+            .get(&self.cfg.active_provider)
+        {
             if !override_prompt.is_empty() {
                 s.push_str("\nProvider-specific instructions:\n");
                 s.push_str(override_prompt);
@@ -2308,7 +2687,9 @@ impl Engine {
                 s.push_str("  ast_get_node  <file> <node_id>        — Full JSON for one node. Use after skeleton to inspect a target.\n");
                 s.push_str("  ast_mutate    <file> <node_id> <op>   — Structural edit + automatic recompile + optimize.\n\n");
                 s.push_str("CRITICAL RULES:\n");
-                s.push_str("  1. Do NOT use edit_file for code mutations — use ast_mutate instead.\n");
+                s.push_str(
+                    "  1. Do NOT use edit_file for code mutations — use ast_mutate instead.\n",
+                );
                 s.push_str("  2. ast_mutate operations are: str-replace (old_json/new_json), append-stmt (statement_json), insert-before (index/statement_json).\n");
                 s.push_str("  3. Always supply lang and source_file to ast_mutate so the source is regenerated deterministically.\n");
                 s.push_str("  4. JSON values in node directives must be valid JSON, not source-code strings.\n");
@@ -2319,11 +2700,15 @@ impl Engine {
     }
 
     fn build_message_content(&self, text: &str) -> String {
-        if self.attachments.is_empty() { return text.to_string(); }
+        if self.attachments.is_empty() {
+            return text.to_string();
+        }
         let mut s = String::new();
         for (filename, content) in &self.attachments {
-            let ext = Path::new(filename).extension()
-                .and_then(|e| e.to_str()).unwrap_or("");
+            let ext = Path::new(filename)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
             s.push_str(&format!("File: {filename}\n```{ext}\n{content}\n```\n\n"));
         }
         s.push_str(text);
@@ -2331,7 +2716,9 @@ impl Engine {
     }
 
     fn save_session(&mut self) {
-        let Some(session) = &mut self.session else { return };
+        let Some(session) = &mut self.session else {
+            return;
+        };
         session.messages = self.history.iter().map(to_session_message).collect();
         history::save_session(&self.marlin_dir, session);
     }
@@ -2358,7 +2745,11 @@ impl Engine {
         // Slash command → execute instantly, capture output as a text field.
         if trimmed.starts_with('/') {
             // /compact is handled specially (no agentic loop, no prompt injection).
-            let cmd_name = trimmed.split_whitespace().next().unwrap_or("").to_lowercase();
+            let cmd_name = trimmed
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_lowercase();
             if cmd_name == "/compact" {
                 self.manual_compact(ui_tx).await;
                 return;
@@ -2366,11 +2757,13 @@ impl Engine {
             if let Some(prompt) = self.handle_slash_command(trimmed, ui_tx, action_rx).await {
                 // A prompt-type user command while steering — just show the
                 // expanded prompt as a text field; don't start a new agentic loop.
-                let _ = ui_tx.send(UiUpdate::SteerResult(format!(
-                    "[steer] /{} expanded prompt:\n{}",
-                    cmd_name.trim_start_matches('/'),
-                    prompt
-                ))).await;
+                let _ = ui_tx
+                    .send(UiUpdate::SteerResult(format!(
+                        "[steer] /{} expanded prompt:\n{}",
+                        cmd_name.trim_start_matches('/'),
+                        prompt
+                    )))
+                    .await;
             }
             return;
         }
@@ -2386,9 +2779,12 @@ impl Engine {
     async fn manual_compact(&mut self, ui_tx: &mpsc::Sender<UiUpdate>) {
         const KEEP_RECENT: usize = 8;
         if self.history.len() <= KEEP_RECENT {
-            let _ = ui_tx.send(UiUpdate::SteerResult(
-                format!("[compact] nothing to compact — only {} turn(s) in context.", self.history.len())
-            )).await;
+            let _ = ui_tx
+                .send(UiUpdate::SteerResult(format!(
+                    "[compact] nothing to compact — only {} turn(s) in context.",
+                    self.history.len()
+                )))
+                .await;
             return;
         }
 
@@ -2399,9 +2795,11 @@ impl Engine {
         let provider = match self.registry.get(&compact_provider) {
             Ok(p) => p,
             Err(_) => {
-                let _ = ui_tx.send(UiUpdate::SteerResult(
-                    format!("[compact] failed: provider '{compact_provider}' unavailable.")
-                )).await;
+                let _ = ui_tx
+                    .send(UiUpdate::SteerResult(format!(
+                        "[compact] failed: provider '{compact_provider}' unavailable."
+                    )))
+                    .await;
                 return;
             }
         };
@@ -2409,37 +2807,31 @@ impl Engine {
         let ctx = compact_serialize(&old);
         let summary_req = StreamRequest {
             model: compact_model,
-            messages: vec![Message {
-                role: "user".into(),
-                content: format!(
-                    "Produce a dense technical summary of this coding session fragment for an AI \
-                    coding assistant. Include: files created/modified (with key changes), commands \
-                    run and their outcomes, errors encountered and how they were resolved, decisions \
-                    made, and current task state. Be precise and comprehensive — this summary \
-                    replaces the original turns in context.\n\n{ctx}"
-                ),
-                tool_calls: vec![],
-                tool_use_id: String::new(),
-                tool_call_id: String::new(),
-                images: vec![],
-                is_error: false,
-            }],
+            messages: vec![Message::new_user(format!(
+                "Produce a dense technical summary of this coding session fragment for an AI \
+                coding assistant. Include: files created/modified (with key changes), commands \
+                run and their outcomes, errors encountered and how they were resolved, decisions \
+                made, and current task state. Be precise and comprehensive — this summary \
+                replaces the original turns in context.\n\n{ctx}"
+            ))],
             system_prompt: String::new(),
             max_tokens: 1500,
             tools: vec![],
             thinking: false,
         };
 
-        let _ = ui_tx.send(UiUpdate::SteerResult(
-            format!("[compact] summarizing {split} older turns…")
-        )).await;
+        let _ = ui_tx
+            .send(UiUpdate::SteerResult(format!(
+                "[compact] summarizing {split} older turns…"
+            )))
+            .await;
 
         let mut stream = match provider.stream(summary_req).await {
             Ok(s) => s,
             Err(e) => {
-                let _ = ui_tx.send(UiUpdate::SteerResult(
-                    format!("[compact] failed: {e}")
-                )).await;
+                let _ = ui_tx
+                    .send(UiUpdate::SteerResult(format!("[compact] failed: {e}")))
+                    .await;
                 return;
             }
         };
@@ -2447,35 +2839,36 @@ impl Engine {
         let mut summary = String::new();
         while let Some(chunk) = stream.recv().await {
             summary.push_str(&chunk.content);
-            if chunk.done { break; }
+            if chunk.done {
+                break;
+            }
         }
 
         if summary.trim().is_empty() {
-            let _ = ui_tx.send(UiUpdate::SteerResult(
-                "[compact] failed: model returned an empty summary.".to_string()
-            )).await;
+            let _ = ui_tx
+                .send(UiUpdate::SteerResult(
+                    "[compact] failed: model returned an empty summary.".to_string(),
+                ))
+                .await;
             return;
         }
 
         let recent = self.history.split_off(split);
         self.history.clear();
-        self.history.push(Message {
-            role: "user".into(),
-            content: format!("[Marlin Context Summary — {split} turns condensed]\n{}", summary.trim()),
-            tool_calls: vec![],
-            tool_use_id: String::new(),
-            tool_call_id: String::new(),
-            images: vec![],
-            is_error: false,
-        });
+        self.history.push(Message::new_user(format!(
+            "[Marlin Context Summary — {split} turns condensed]\n{}",
+            summary.trim()
+        )));
         self.history.extend(recent);
 
         let new_tokens = estimate_tokens(&self.history, "");
         self.compact_guard_tokens = new_tokens;
 
-        let _ = ui_tx.send(UiUpdate::SteerResult(
-            format!("[compact] done: {split} turns → 1 summary (~{new_tokens} tokens now).")
-        )).await;
+        let _ = ui_tx
+            .send(UiUpdate::SteerResult(format!(
+                "[compact] done: {split} turns → 1 summary (~{new_tokens} tokens now)."
+            )))
+            .await;
     }
 
     async fn handle_slash_command(
@@ -2494,10 +2887,14 @@ impl Engine {
         let rest = parts.get(1).copied().unwrap_or("").trim();
 
         macro_rules! sys {
-            ($msg:expr) => {{ ui_tx.send(UiUpdate::SystemMsg($msg.into())).await.ok(); }};
+            ($msg:expr) => {{
+                ui_tx.send(UiUpdate::SystemMsg($msg.into())).await.ok();
+            }};
         }
         macro_rules! err {
-            ($msg:expr) => {{ ui_tx.send(UiUpdate::ErrorMsg($msg.into())).await.ok(); }};
+            ($msg:expr) => {{
+                ui_tx.send(UiUpdate::ErrorMsg($msg.into())).await.ok();
+            }};
         }
         macro_rules! save_cfg {
             () => {{
@@ -2526,7 +2923,10 @@ impl Engine {
 
             "/provider" | "/p" => {
                 if args.is_empty() {
-                    sys!(format!("Usage: /provider <name|list|new <name>>  — available: {}", self.registry.names().join(", ")));
+                    sys!(format!(
+                        "Usage: /provider <name|list|new <name>>  — available: {}",
+                        self.registry.names().join(", ")
+                    ));
                     return None;
                 }
                 let subcmd = args[0].to_lowercase();
@@ -2535,9 +2935,14 @@ impl Engine {
                         let names: Vec<String> = self.registry.names();
                         let user: Vec<crate::providers::user_providers::UserProvider> =
                             crate::providers::user_providers::load_all(&self.marlin_dir);
-                        let mut lines: Vec<String> = names.iter()
+                        let mut lines: Vec<String> = names
+                            .iter()
                             .map(|n| {
-                                let marker = if *n == self.cfg.active_provider { " *" } else { "" };
+                                let marker = if *n == self.cfg.active_provider {
+                                    " *"
+                                } else {
+                                    ""
+                                };
                                 format!("  {n}{marker}")
                             })
                             .collect();
@@ -2551,7 +2956,10 @@ impl Engine {
 
                     "new" | "create" => {
                         let name = args.get(1).copied().unwrap_or("my_provider");
-                        match crate::providers::user_providers::save_template(&self.marlin_dir, name) {
+                        match crate::providers::user_providers::save_template(
+                            &self.marlin_dir,
+                            name,
+                        ) {
                             Ok(path) => {
                                 sys!(format!(
                                     "Provider template created:\n  {}\n\nEdit it and restart Marlin to activate.",
@@ -2568,8 +2976,17 @@ impl Engine {
                             return None;
                         }
                         self.cfg.active_provider = name.to_string();
-                        let model = self.cfg.providers.get(name)
-                            .and_then(|p| if p.model.is_empty() { None } else { Some(p.model.clone()) })
+                        let model = self
+                            .cfg
+                            .providers
+                            .get(name)
+                            .and_then(|p| {
+                                if p.model.is_empty() {
+                                    None
+                                } else {
+                                    Some(p.model.clone())
+                                }
+                            })
                             .unwrap_or_default();
                         self.cfg.active_model = model.clone();
                         save_cfg!();
@@ -2591,7 +3008,8 @@ impl Engine {
                 if let Some(pcfg) = self.cfg.providers.get_mut(&self.cfg.active_provider) {
                     pcfg.model = model.clone();
                 }
-                self.cfg.remember_model(&self.cfg.active_provider.clone(), &model);
+                self.cfg
+                    .remember_model(&self.cfg.active_provider.clone(), &model);
                 save_cfg!();
                 sys!(format!("Model set to: {model}"));
                 let _ = ui_tx.send(UiUpdate::StatusUpdate(self.status_info())).await;
@@ -2608,7 +3026,11 @@ impl Engine {
                 }
                 let provider = args[0].to_lowercase();
                 let key = args[1];
-                match crate::providers::user_providers::set_api_key(&self.marlin_dir, &provider, key) {
+                match crate::providers::user_providers::set_api_key(
+                    &self.marlin_dir,
+                    &provider,
+                    key,
+                ) {
                     Ok(true) => {}
                     Ok(false) => {
                         self.cfg.set_key(&provider, key);
@@ -2639,14 +3061,21 @@ impl Engine {
                 // Whether this provider already has a saved key, checked
                 // *before* the switch — used below to warn if we're about to
                 // start sending it to a new (non-local) host.
-                let has_existing_key = self.cfg.providers.get(&provider)
+                let has_existing_key = self
+                    .cfg
+                    .providers
+                    .get(&provider)
                     .map(|p| !p.api_key.is_empty())
                     .unwrap_or(false)
                     || crate::providers::user_providers::load_all(&self.marlin_dir)
                         .iter()
                         .any(|p| p.name.eq_ignore_ascii_case(&provider) && !p.api_key.is_empty());
 
-                match crate::providers::user_providers::set_endpoint(&self.marlin_dir, &provider, new_endpoint) {
+                match crate::providers::user_providers::set_endpoint(
+                    &self.marlin_dir,
+                    &provider,
+                    new_endpoint,
+                ) {
                     Ok(true) => {}
                     Ok(false) => {
                         self.cfg.set_endpoint(&provider, new_endpoint);
@@ -2658,9 +3087,14 @@ impl Engine {
                     }
                 }
                 self.registry = Registry::new(&self.cfg, Some(&self.marlin_dir));
-                sys!(format!("Endpoint updated for {}: {}", provider, new_endpoint));
+                sys!(format!(
+                    "Endpoint updated for {}: {}",
+                    provider, new_endpoint
+                ));
 
-                if has_existing_key && !crate::providers::user_providers::endpoint_is_private_host(new_endpoint) {
+                if has_existing_key
+                    && !crate::providers::user_providers::endpoint_is_private_host(new_endpoint)
+                {
                     sys!(format!(
                         "⚠ {provider} has a saved API key — it will now be sent to {new_endpoint} on every request. Only proceed if you trust this endpoint."
                     ));
@@ -2684,12 +3118,20 @@ impl Engine {
             "/tokens" => {
                 if args.is_empty() {
                     let system_prompt = self.effective_system_prompt();
-                    let tools = all_tools(&self.ast_mode, &self.skill_tool_list(&self.active_goal), &self.external_tools, self.cfg.skill_subagents, &self.mcp_tools);
+                    let tools = all_tools(
+                        &self.ast_mode,
+                        &self.skill_tool_list(&self.active_goal),
+                        &self.external_tools,
+                        self.cfg.skill_subagents,
+                        &self.mcp_tools,
+                    );
                     let report = budget::compute(&system_prompt, &tools);
                     sys!(format!(
                         "Max output tokens: {}  (use /tokens <n> to change)\n\n\
                          Base prompt injection (target ~{}t, warning only):\n{}",
-                        self.cfg.max_tokens, budget::WARN_THRESHOLD, report.format()
+                        self.cfg.max_tokens,
+                        budget::WARN_THRESHOLD,
+                        report.format()
                     ));
                     return None;
                 }
@@ -2715,10 +3157,15 @@ impl Engine {
                         self.token_budget = n;
                         self.cfg.token_budget = n;
                         save_cfg!();
-                        let _ = ui_tx.send(UiUpdate::TokenUsage {
-                            used: estimate_tokens(&self.history, &self.effective_system_prompt()),
-                            budget: self.token_budget,
-                        }).await;
+                        let _ = ui_tx
+                            .send(UiUpdate::TokenUsage {
+                                used: estimate_tokens(
+                                    &self.history,
+                                    &self.effective_system_prompt(),
+                                ),
+                                budget: self.token_budget,
+                            })
+                            .await;
                         sys!(format!("Context budget: {n} tokens"));
                     }
                 } else {
@@ -2730,7 +3177,11 @@ impl Engine {
                 let names = self.registry.names();
                 let mut lines: Vec<String> = Vec::new();
                 for n in &names {
-                    let mark = if n == &self.cfg.active_provider { "▶ " } else { "  " };
+                    let mark = if n == &self.cfg.active_provider {
+                        "▶ "
+                    } else {
+                        "  "
+                    };
                     if let Ok(p) = self.registry.get(n) {
                         let models = p.models();
                         let preview: Vec<String> = models.iter().take(2).cloned().collect();
@@ -2740,23 +3191,30 @@ impl Engine {
                 sys!(format!("Providers:\n{}", lines.join("\n")));
             }
 
-            "/models" => {
-                match self.registry.get(&self.cfg.active_provider) {
-                    Ok(p) => sys!(format!("Models for {}:\n{}", self.cfg.active_provider, p.models().join("\n"))),
-                    Err(e) => err!(e.to_string()),
-                }
-            }
+            "/models" => match self.registry.get(&self.cfg.active_provider) {
+                Ok(p) => sys!(format!(
+                    "Models for {}:\n{}",
+                    self.cfg.active_provider,
+                    p.models().join("\n")
+                )),
+                Err(e) => err!(e.to_string()),
+            },
 
             "/attach" | "/a" => {
                 if args.is_empty() {
                     if self.attachments.is_empty() && self.image_attachments.is_empty() {
                         sys!("No files attached. Usage: /attach <file>");
                     } else {
-                        let mut names: Vec<String> = self.attachments.iter()
+                        let mut names: Vec<String> = self
+                            .attachments
+                            .iter()
                             .map(|(f, c)| format!("{} ({} lines)", f, c.lines().count()))
                             .collect();
-                        names.extend(self.image_attachments.iter()
-                            .map(|(f, _, _)| format!("{} (image)", f)));
+                        names.extend(
+                            self.image_attachments
+                                .iter()
+                                .map(|(f, _, _)| format!("{} (image)", f)),
+                        );
                         sys!(format!("Attached:\n{}", names.join("\n")));
                     }
                     return None;
@@ -2769,8 +3227,13 @@ impl Engine {
                             let b64 = B64.encode(bytes);
                             self.image_attachments.retain(|(f, _, _)| f != &path);
                             self.image_attachments.push((path.clone(), mime, b64));
-                            sys!(format!("Attached image: {} — send your next message to include it",
-                                Path::new(&path).file_name().unwrap_or_default().to_string_lossy()));
+                            sys!(format!(
+                                "Attached image: {} — send your next message to include it",
+                                Path::new(&path)
+                                    .file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                            ));
                         }
                         Err(e) => err!(format!("attach error: {e}")),
                     }
@@ -2781,8 +3244,13 @@ impl Engine {
                         let lines = content.lines().count();
                         self.attachments.retain(|(f, _)| f != &path);
                         self.attachments.push((path.clone(), content));
-                        sys!(format!("Attached: {} ({lines} lines) — send your next message to include it",
-                            Path::new(&path).file_name().unwrap_or_default().to_string_lossy()));
+                        sys!(format!(
+                            "Attached: {} ({lines} lines) — send your next message to include it",
+                            Path::new(&path)
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                        ));
                     }
                     Err(e) => err!(format!("attach error: {e}")),
                 }
@@ -2815,7 +3283,10 @@ impl Engine {
                     sys!("Usage: /exec <shell command>");
                     return None;
                 }
-                if self.cfg.sandbox_mode == SandboxMode::Off && !self.cfg.skip_permissions && !self.is_allowed(rest) {
+                if self.cfg.sandbox_mode == SandboxMode::Off
+                    && !self.cfg.skip_permissions
+                    && !self.is_allowed(rest)
+                {
                     let first = rest.split_whitespace().next().unwrap_or(rest);
                     err!(format!("Command not allowed: {rest:?}\nUse /allow {first} or /sandbox [permissive|docker|gvisor]."));
                     return None;
@@ -2824,11 +3295,20 @@ impl Engine {
                 let cmd = rest.to_string();
                 let wd = self.work_dir.clone();
                 let out = tokio::task::spawn_blocking(move || {
-                    std::process::Command::new("sh").arg("-c").arg(&cmd).current_dir(&wd).output()
-                }).await;
+                    std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(&cmd)
+                        .current_dir(&wd)
+                        .output()
+                })
+                .await;
                 match out {
                     Ok(Ok(o)) => {
-                        let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+                        let text = format!(
+                            "{}{}",
+                            String::from_utf8_lossy(&o.stdout),
+                            String::from_utf8_lossy(&o.stderr)
+                        );
                         sys!(format!("[exec]\n{}", text.trim()));
                     }
                     _ => err!("exec failed"),
@@ -2840,7 +3320,10 @@ impl Engine {
                     if self.allowed_commands.is_empty() {
                         sys!("No commands allowed. Use /allow <prefix> to permit.");
                     } else {
-                        sys!(format!("Allowed prefixes: {}", self.allowed_commands.join(", ")));
+                        sys!(format!(
+                            "Allowed prefixes: {}",
+                            self.allowed_commands.join(", ")
+                        ));
                     }
                     return None;
                 }
@@ -2851,73 +3334,77 @@ impl Engine {
                 sys!(format!("Allowed: {pattern:?}"));
             }
 
-            "/sandbox" => {
-                match args.first().copied() {
-                    Some("off") => {
-                        self.cfg.sandbox_mode = SandboxMode::Off;
-                        save_cfg!();
-                        sys!("Sandbox off — shell commands require /allow.");
-                    }
-                    Some("on") | Some("permissive") => {
-                        self.cfg.sandbox_mode = SandboxMode::Permissive;
-                        save_cfg!();
-                        sys!("Sandbox permissive — all commands allowed, running directly on host.");
-                    }
-                    Some("mxc") => {
-                        if !executor::detect_mxc() {
-                            err!(format!(
-                                "MXC binary ({}) not found in PATH. \
+            "/sandbox" => match args.first().copied() {
+                Some("off") => {
+                    self.cfg.sandbox_mode = SandboxMode::Off;
+                    save_cfg!();
+                    sys!("Sandbox off — shell commands require /allow.");
+                }
+                Some("on") | Some("permissive") => {
+                    self.cfg.sandbox_mode = SandboxMode::Permissive;
+                    save_cfg!();
+                    sys!("Sandbox permissive — all commands allowed, running directly on host.");
+                }
+                Some("mxc") => {
+                    if !executor::detect_mxc() {
+                        err!(format!(
+                            "MXC binary ({}) not found in PATH. \
                                 Install from https://github.com/microsoft/mxc and retry.",
-                                executor::mxc_binary_name()
-                            ));
-                        } else {
-                            self.cfg.sandbox_mode = SandboxMode::Mxc;
-                            save_cfg!();
-                            sys!(format!(
-                                "Sandbox mxc — AI commands run via Microsoft eXecution Containers \
-                                ({}, network blocked, only workdir mounted rw).",
-                                executor::mxc_binary_name()
-                            ));
-                        }
-                    }
-                    _ => {
-                        let mode = self.cfg.sandbox_mode.label();
-                        let mxc = if executor::detect_mxc() {
-                            format!("available ({})", executor::mxc_binary_name())
-                        } else {
-                            format!("not found ({})", executor::mxc_binary_name())
-                        };
+                            executor::mxc_binary_name()
+                        ));
+                    } else {
+                        self.cfg.sandbox_mode = SandboxMode::Mxc;
+                        save_cfg!();
                         sys!(format!(
-                            "Sandbox: {mode}  |  mxc: {mxc}\n\
-                             /sandbox [off|permissive|mxc]"
+                            "Sandbox mxc — AI commands run via Microsoft eXecution Containers \
+                                ({}, network blocked, only workdir mounted rw).",
+                            executor::mxc_binary_name()
                         ));
                     }
                 }
-            }
-
-            "/permissions" => {
-                match args.first().copied() {
-                    Some("skip") => {
-                        self.cfg.skip_permissions = true;
-                        save_cfg!();
-                        sys!("Permissions skipped — all operations proceed without checks.");
-                    }
-                    Some("require") => {
-                        self.cfg.skip_permissions = false;
-                        save_cfg!();
-                        sys!("Permissions required — file and command checks enabled.");
-                    }
-                    _ => {
-                        let state = if self.cfg.skip_permissions { "skip" } else { "require" };
-                        sys!(format!("Permissions: {state}  (use /permissions skip|require)"));
-                    }
+                _ => {
+                    let mode = self.cfg.sandbox_mode.label();
+                    let mxc = if executor::detect_mxc() {
+                        format!("available ({})", executor::mxc_binary_name())
+                    } else {
+                        format!("not found ({})", executor::mxc_binary_name())
+                    };
+                    sys!(format!(
+                        "Sandbox: {mode}  |  mxc: {mxc}\n\
+                             /sandbox [off|permissive|mxc]"
+                    ));
                 }
-            }
+            },
+
+            "/permissions" => match args.first().copied() {
+                Some("skip") => {
+                    self.cfg.skip_permissions = true;
+                    save_cfg!();
+                    sys!("Permissions skipped — all operations proceed without checks.");
+                }
+                Some("require") => {
+                    self.cfg.skip_permissions = false;
+                    save_cfg!();
+                    sys!("Permissions required — file and command checks enabled.");
+                }
+                _ => {
+                    let state = if self.cfg.skip_permissions {
+                        "skip"
+                    } else {
+                        "require"
+                    };
+                    sys!(format!(
+                        "Permissions: {state}  (use /permissions skip|require)"
+                    ));
+                }
+            },
 
             "/verify" => {
                 if rest.is_empty() {
                     match &self.cfg.verify_command {
-                        Some(cmd) => sys!(format!("Verify command: {cmd}  (use /verify off to clear)")),
+                        Some(cmd) => {
+                            sys!(format!("Verify command: {cmd}  (use /verify off to clear)"))
+                        }
                         None => sys!("No verify command set.  Usage: /verify <shell-command>"),
                     }
                 } else if rest == "off" || rest == "none" {
@@ -2933,11 +3420,13 @@ impl Engine {
 
             "/ast" => {
                 let new_mode = match args.first().copied() {
-                    Some("off")     => Some(AstMode::Off),
-                    Some("sexpr")   => Some(AstMode::SExpr),
+                    Some("off") => Some(AstMode::Off),
+                    Some("sexpr") => Some(AstMode::SExpr),
                     Some("harness") => Some(AstMode::Harness),
                     Some(other) => {
-                        err!(format!("Unknown AST mode {other:?} — use: off, sexpr, harness"));
+                        err!(format!(
+                            "Unknown AST mode {other:?} — use: off, sexpr, harness"
+                        ));
                         return None;
                     }
                     None => None,
@@ -2955,75 +3444,81 @@ impl Engine {
                         _         => {}
                     }
                 } else {
-                    sys!(format!("AST mode: {}  (use /ast off|sexpr|harness)", self.ast_mode.label()));
+                    sys!(format!(
+                        "AST mode: {}  (use /ast off|sexpr|harness)",
+                        self.ast_mode.label()
+                    ));
                 }
             }
 
-            "/clean-env" => {
-                match args.first().copied() {
-                    Some("on") => {
-                        self.cfg.clean_env = true;
-                        save_cfg!();
-                        sys!("Clean-env sandboxing ON — subprocesses get a stripped environment.");
-                    }
-                    Some("off") => {
-                        self.cfg.clean_env = false;
-                        save_cfg!();
-                        sys!("Clean-env sandboxing OFF.");
-                    }
-                    _ => {
-                        let state = if self.cfg.clean_env { "on" } else { "off" };
-                        sys!(format!("Clean-env: {state}  (use /clean-env on|off)"));
-                    }
+            "/clean-env" => match args.first().copied() {
+                Some("on") => {
+                    self.cfg.clean_env = true;
+                    save_cfg!();
+                    sys!("Clean-env sandboxing ON — subprocesses get a stripped environment.");
                 }
-            }
+                Some("off") => {
+                    self.cfg.clean_env = false;
+                    save_cfg!();
+                    sys!("Clean-env sandboxing OFF.");
+                }
+                _ => {
+                    let state = if self.cfg.clean_env { "on" } else { "off" };
+                    sys!(format!("Clean-env: {state}  (use /clean-env on|off)"));
+                }
+            },
 
-            "/thinking" => {
-                match args.first().copied() {
-                    Some("on") => {
-                        self.cfg.thinking = true;
-                        save_cfg!();
-                        sys!("Extended thinking ON — the model will reason before answering (Claude extended thinking / OpenAI reasoning models).");
-                    }
-                    Some("off") => {
-                        self.cfg.thinking = false;
-                        save_cfg!();
-                        sys!("Extended thinking OFF.");
-                    }
-                    _ => {
-                        let state = if self.cfg.thinking { "on" } else { "off" };
-                        sys!(format!("Extended thinking: {state}  (use /thinking on|off)"));
-                    }
+            "/thinking" => match args.first().copied() {
+                Some("on") => {
+                    self.cfg.thinking = true;
+                    save_cfg!();
+                    sys!("Extended thinking ON — the model will reason before answering (Claude extended thinking / OpenAI reasoning models).");
                 }
-            }
+                Some("off") => {
+                    self.cfg.thinking = false;
+                    save_cfg!();
+                    sys!("Extended thinking OFF.");
+                }
+                _ => {
+                    let state = if self.cfg.thinking { "on" } else { "off" };
+                    sys!(format!(
+                        "Extended thinking: {state}  (use /thinking on|off)"
+                    ));
+                }
+            },
 
-            "/checkpoints" => {
-                match args.first().copied() {
-                    Some("on") => {
-                        if !crate::checkpoint::available(&self.work_dir) {
-                            err!("This directory isn't a git repository — checkpoints require git.");
-                        } else {
-                            self.cfg.checkpoints = true;
-                            save_cfg!();
-                            sys!("Git checkpoints ON — a checkpoint commit is created before each turn; /undo rolls it back.");
-                        }
-                    }
-                    Some("off") => {
-                        self.cfg.checkpoints = false;
+            "/checkpoints" => match args.first().copied() {
+                Some("on") => {
+                    if !crate::checkpoint::available(&self.work_dir) {
+                        err!("This directory isn't a git repository — checkpoints require git.");
+                    } else {
+                        self.cfg.checkpoints = true;
                         save_cfg!();
-                        sys!("Git checkpoints OFF.");
-                    }
-                    _ => {
-                        let state = if self.cfg.checkpoints { "on" } else { "off" };
-                        let git = if crate::checkpoint::available(&self.work_dir) { "git repo detected" } else { "not a git repo" };
-                        sys!(format!("Checkpoints: {state}  ({git})  — use /checkpoints on|off"));
+                        sys!("Git checkpoints ON — a checkpoint commit is created before each turn; /undo rolls it back.");
                     }
                 }
-            }
+                Some("off") => {
+                    self.cfg.checkpoints = false;
+                    save_cfg!();
+                    sys!("Git checkpoints OFF.");
+                }
+                _ => {
+                    let state = if self.cfg.checkpoints { "on" } else { "off" };
+                    let git = if crate::checkpoint::available(&self.work_dir) {
+                        "git repo detected"
+                    } else {
+                        "not a git repo"
+                    };
+                    sys!(format!(
+                        "Checkpoints: {state}  ({git})  — use /checkpoints on|off"
+                    ));
+                }
+            },
 
             "/undo" => {
                 let work_dir = self.work_dir.clone();
-                match tokio::task::spawn_blocking(move || crate::checkpoint::undo(&work_dir)).await {
+                match tokio::task::spawn_blocking(move || crate::checkpoint::undo(&work_dir)).await
+                {
                     Ok(Ok(msg)) => sys!(format!("Undo complete: {msg}")),
                     Ok(Err(e)) => err!(format!("Undo failed: {e}")),
                     Err(e) => err!(format!("Undo failed: {e}")),
@@ -3032,7 +3527,10 @@ impl Engine {
 
             "/color" => {
                 if args.is_empty() {
-                    let current = self.cfg.status_colors.get(&self.work_dir)
+                    let current = self
+                        .cfg
+                        .status_colors
+                        .get(&self.work_dir)
                         .map(|c| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]))
                         .unwrap_or_else(|| "default".into());
                     sys!(format!(
@@ -3082,7 +3580,9 @@ impl Engine {
                     }
                     Some(name) => {
                         // Try to load a named theme from ~/.marlin/themes/<name>.toml
-                        if let Some(palette) = crate::config::load_named_theme(&self.marlin_dir, name) {
+                        if let Some(palette) =
+                            crate::config::load_named_theme(&self.marlin_dir, name)
+                        {
                             crate::tui::styles::load_palette(palette);
                             // Persist the named theme so it survives a restart.
                             self.cfg.theme = name.to_string();
@@ -3093,10 +3593,14 @@ impl Engine {
                             if named.is_empty() {
                                 err!(format!("Theme '{name}' not found. Add ~/.marlin/themes/{name}.toml to create it."));
                             } else {
-                                let list: Vec<String> = named.iter()
+                                let list: Vec<String> = named
+                                    .iter()
                                     .map(|(n, d)| format!("  {n}  —  {d}"))
                                     .collect();
-                                err!(format!("Theme '{name}' not found. Available named themes:\n{}", list.join("\n")));
+                                err!(format!(
+                                    "Theme '{name}' not found. Available named themes:\n{}",
+                                    list.join("\n")
+                                ));
                             }
                         }
                     }
@@ -3105,7 +3609,11 @@ impl Engine {
                         let named_list = if named.is_empty() {
                             "  (none — add .toml files to ~/.marlin/themes/)".into()
                         } else {
-                            named.iter().map(|(n, d)| format!("  {n}  —  {d}")).collect::<Vec<_>>().join("\n")
+                            named
+                                .iter()
+                                .map(|(n, d)| format!("  {n}  —  {d}"))
+                                .collect::<Vec<_>>()
+                                .join("\n")
                         };
                         sys!(format!(
                             "Theme: {}  (use /theme dark|light|<name>)\n\nNamed themes:\n{}",
@@ -3124,16 +3632,32 @@ impl Engine {
                         if self.user_commands.is_empty() {
                             sys!("No user commands. Add TOML files to ~/.marlin/commands/");
                         } else {
-                            let lines: Vec<String> = self.user_commands.iter().map(|c| {
-                                let args_hint = if c.args.is_empty() { String::new() } else { format!(" {}", c.args) };
-                                format!("  /{}{:<20} — {}", c.name, args_hint, c.description)
-                            }).collect();
-                            sys!(format!("User commands ({}):\n{}", self.user_commands.len(), lines.join("\n")));
+                            let lines: Vec<String> = self
+                                .user_commands
+                                .iter()
+                                .map(|c| {
+                                    let args_hint = if c.args.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(" {}", c.args)
+                                    };
+                                    format!("  /{}{:<20} — {}", c.name, args_hint, c.description)
+                                })
+                                .collect();
+                            sys!(format!(
+                                "User commands ({}):\n{}",
+                                self.user_commands.len(),
+                                lines.join("\n")
+                            ));
                         }
                     }
 
                     "new" | "create" => {
-                        let name = if subargs.is_empty() { "my_command" } else { subargs[0] };
+                        let name = if subargs.is_empty() {
+                            "my_command"
+                        } else {
+                            subargs[0]
+                        };
                         let cmd = crate::commands::UserCommand {
                             name: name.to_string(),
                             description: "Describe what this command does".into(),
@@ -3158,10 +3682,16 @@ impl Engine {
 
                     "reload" => {
                         self.user_commands = crate::commands::load_all(&self.marlin_dir);
-                        let defs: Vec<crate::commands::UserCommandDef> =
-                            self.user_commands.iter().map(crate::commands::UserCommandDef::from).collect();
+                        let defs: Vec<crate::commands::UserCommandDef> = self
+                            .user_commands
+                            .iter()
+                            .map(crate::commands::UserCommandDef::from)
+                            .collect();
                         let _ = ui_tx.send(UiUpdate::UserCommandsLoaded(defs)).await;
-                        sys!(format!("Reloaded {} user command(s).", self.user_commands.len()));
+                        sys!(format!(
+                            "Reloaded {} user command(s).",
+                            self.user_commands.len()
+                        ));
                     }
 
                     _ => {
@@ -3179,22 +3709,33 @@ impl Engine {
                         if self.external_tools.is_empty() {
                             sys!("No user tools. Add TOML files to ~/.marlin/tools/");
                         } else {
-                            let lines: Vec<String> = self.external_tools.iter().map(|t| {
-                                format!("  {:<24} — {}", t.name, t.description)
-                            }).collect();
-                            sys!(format!("User tools ({}):\n{}", self.external_tools.len(), lines.join("\n")));
+                            let lines: Vec<String> = self
+                                .external_tools
+                                .iter()
+                                .map(|t| format!("  {:<24} — {}", t.name, t.description))
+                                .collect();
+                            sys!(format!(
+                                "User tools ({}):\n{}",
+                                self.external_tools.len(),
+                                lines.join("\n")
+                            ));
                         }
                     }
 
                     "new" | "create" => {
-                        let name = if subargs.is_empty() { "my_tool" } else { subargs[0] };
+                        let name = if subargs.is_empty() {
+                            "my_tool"
+                        } else {
+                            subargs[0]
+                        };
                         match crate::tools::external::save_template(&self.marlin_dir, name) {
                             Ok(path) => {
                                 sys!(format!(
                                     "Tool template created:\n  {}\n\nEdit it, then /tool reload to activate.",
                                     path.display()
                                 ));
-                                self.external_tools = crate::tools::external::load_all(&self.marlin_dir);
+                                self.external_tools =
+                                    crate::tools::external::load_all(&self.marlin_dir);
                             }
                             Err(e) => err!(format!("Failed to create tool: {e}")),
                         }
@@ -3202,7 +3743,10 @@ impl Engine {
 
                     "reload" => {
                         self.external_tools = crate::tools::external::load_all(&self.marlin_dir);
-                        sys!(format!("Reloaded {} user tool(s).", self.external_tools.len()));
+                        sys!(format!(
+                            "Reloaded {} user tool(s).",
+                            self.external_tools.len()
+                        ));
                     }
 
                     _ => {
@@ -3220,18 +3764,32 @@ impl Engine {
                         if self.mcp_server_configs.is_empty() {
                             sys!("No MCP servers configured. Add JSON files to ~/.marlin/mcp/, or /mcp new <name> <command> [args...].");
                         } else {
-                            let lines: Vec<String> = self.mcp_server_configs.iter().map(|cfg| {
-                                if self.mcp_clients.contains_key(&cfg.name) {
-                                    let tools: Vec<&str> = self.mcp_tools.iter()
-                                        .filter(|(s, _)| s == &cfg.name)
-                                        .map(|(_, t)| t.name.as_str())
-                                        .collect();
-                                    format!("  {:<20} connected — {}", cfg.name, tools.join(", "))
-                                } else {
-                                    format!("  {:<20} not connected", cfg.name)
-                                }
-                            }).collect();
-                            sys!(format!("MCP servers ({}):\n{}", self.mcp_server_configs.len(), lines.join("\n")));
+                            let lines: Vec<String> = self
+                                .mcp_server_configs
+                                .iter()
+                                .map(|cfg| {
+                                    if self.mcp_clients.contains_key(&cfg.name) {
+                                        let tools: Vec<&str> = self
+                                            .mcp_tools
+                                            .iter()
+                                            .filter(|(s, _)| s == &cfg.name)
+                                            .map(|(_, t)| t.name.as_str())
+                                            .collect();
+                                        format!(
+                                            "  {:<20} connected — {}",
+                                            cfg.name,
+                                            tools.join(", ")
+                                        )
+                                    } else {
+                                        format!("  {:<20} not connected", cfg.name)
+                                    }
+                                })
+                                .collect();
+                            sys!(format!(
+                                "MCP servers ({}):\n{}",
+                                self.mcp_server_configs.len(),
+                                lines.join("\n")
+                            ));
                         }
                     }
 
@@ -3242,10 +3800,14 @@ impl Engine {
                         }
                         let name = subargs[0];
                         let command = subargs[1];
-                        let cmd_args: Vec<String> = subargs[2..].iter().map(|s| s.to_string()).collect();
+                        let cmd_args: Vec<String> =
+                            subargs[2..].iter().map(|s| s.to_string()).collect();
                         match mcp::save_template(&self.marlin_dir, name, command, cmd_args) {
                             Ok(path) => {
-                                sys!(format!("MCP server config created:\n  {}\n\n/mcp reload to connect.", path.display()));
+                                sys!(format!(
+                                    "MCP server config created:\n  {}\n\n/mcp reload to connect.",
+                                    path.display()
+                                ));
                                 self.mcp_server_configs = mcp::load_all(&self.marlin_dir);
                             }
                             Err(e) => err!(format!("Failed to create MCP server config: {e}")),
@@ -3257,7 +3819,9 @@ impl Engine {
                         self.connect_mcp_servers(ui_tx).await;
                         sys!(format!(
                             "Reconnected: {}/{} server(s), {} tool(s) total.",
-                            self.mcp_clients.len(), self.mcp_server_configs.len(), self.mcp_tools.len()
+                            self.mcp_clients.len(),
+                            self.mcp_server_configs.len(),
+                            self.mcp_tools.len()
                         ));
                     }
 
@@ -3269,9 +3833,13 @@ impl Engine {
                 if args.first().copied() == Some("status") {
                     if let Some(idx) = &self.code_index {
                         let symbol_count: usize = idx.files.iter().map(|f| f.symbols.len()).sum();
-                        sys!(format!("Index: {} files, {} terms, {} symbols, built {}.",
-                            idx.file_count, idx.term_count, symbol_count,
-                            idx.built_at.format("%b %d %H:%M")));
+                        sys!(format!(
+                            "Index: {} files, {} terms, {} symbols, built {}.",
+                            idx.file_count,
+                            idx.term_count,
+                            symbol_count,
+                            idx.built_at.format("%b %d %H:%M")
+                        ));
                     } else {
                         sys!("No index built. Run /index to build one.");
                     }
@@ -3318,19 +3886,32 @@ impl Engine {
                 let abs_path = self.resolve_path(args[0]);
                 let snaps = snapshots::list(&self.marlin_dir, &self.work_dir, &abs_path);
                 if snaps.is_empty() {
-                    sys!(format!("No snapshots for {} — Marlin snapshots files before every AI edit.", args[0]));
+                    sys!(format!(
+                        "No snapshots for {} — Marlin snapshots files before every AI edit.",
+                        args[0]
+                    ));
                     return None;
                 }
                 if args.len() < 2 {
-                    let lines: Vec<String> = snaps.iter().enumerate().map(|(i, s)| {
-                        format!("  {:2}.  {}  [{}]  {}",
-                            i + 1,
-                            s.timestamp.format("%b %d %H:%M:%S"),
-                            s.tool,
-                            snapshots::human_size(s.size))
-                    }).collect();
-                    sys!(format!("Snapshots for {} (newest first):\n{}\n\nUse /revert {} <n> to restore.",
-                        args[0], lines.join("\n"), args[0]));
+                    let lines: Vec<String> = snaps
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| {
+                            format!(
+                                "  {:2}.  {}  [{}]  {}",
+                                i + 1,
+                                s.timestamp.format("%b %d %H:%M:%S"),
+                                s.tool,
+                                snapshots::human_size(s.size)
+                            )
+                        })
+                        .collect();
+                    sys!(format!(
+                        "Snapshots for {} (newest first):\n{}\n\nUse /revert {} <n> to restore.",
+                        args[0],
+                        lines.join("\n"),
+                        args[0]
+                    ));
                     return None;
                 }
                 let n: usize = args[1].parse().unwrap_or(0);
@@ -3340,22 +3921,25 @@ impl Engine {
                 }
                 let snap = &snaps[n - 1];
                 match snapshots::restore(&self.marlin_dir, &self.work_dir, &abs_path, &snap.id) {
-                    Ok(_) => sys!(format!("Restored {} → snapshot from {} ({}, {}).",
-                        args[0], snap.timestamp.format("%b %d %H:%M:%S"), snap.tool, snapshots::human_size(snap.size))),
+                    Ok(_) => sys!(format!(
+                        "Restored {} → snapshot from {} ({}, {}).",
+                        args[0],
+                        snap.timestamp.format("%b %d %H:%M:%S"),
+                        snap.tool,
+                        snapshots::human_size(snap.size)
+                    )),
                     Err(e) => err!(format!("Restore failed: {e}")),
                 }
             }
 
-            "/resume" => {
-                match history::list_sessions(&self.marlin_dir) {
-                    Ok(sessions) if !sessions.is_empty() => {
-                        let s = &sessions[0];
-                        self.history = s.messages.iter().map(from_session_message).collect();
-                        sys!(format!("Resumed: {}", s.summary()));
-                    }
-                    _ => sys!("No saved sessions to resume."),
+            "/resume" => match history::list_sessions(&self.marlin_dir) {
+                Ok(sessions) if !sessions.is_empty() => {
+                    let s = &sessions[0];
+                    self.history = s.messages.iter().map(from_session_message).collect();
+                    sys!(format!("Resumed: {}", s.summary()));
                 }
-            }
+                _ => sys!("No saved sessions to resume."),
+            },
 
             "/history" => {
                 if args.first().copied() == Some("clear") {
@@ -3383,7 +3967,9 @@ impl Engine {
                     }
                 }
                 let limit = sessions.len().min(20);
-                let lines: Vec<String> = sessions[..limit].iter().enumerate()
+                let lines: Vec<String> = sessions[..limit]
+                    .iter()
+                    .enumerate()
                     .map(|(i, s)| format!("  {:2}.  {}  [{}]", i + 1, s.summary(), s.project))
                     .collect();
                 sys!(format!("Saved sessions (newest first):\n{}\n\nUse /history <n> to load, /history clear to delete all.",
@@ -3391,7 +3977,10 @@ impl Engine {
             }
 
             "/cat" => {
-                if args.is_empty() { sys!("Usage: /cat <file>"); return None; }
+                if args.is_empty() {
+                    sys!("Usage: /cat <file>");
+                    return None;
+                }
                 let path = self.resolve_path(args[0]);
                 match std::fs::read_to_string(&path) {
                     Ok(content) => sys!(format!("[{path}]\n{content}")),
@@ -3402,7 +3991,10 @@ impl Engine {
             // /open is an alias for /view — both just open the read-only file
             // pane; there's no separate file-browser behind /open (yet).
             "/view" | "/open" => {
-                if args.is_empty() { sys!(format!("Usage: {cmd} <file>")); return None; }
+                if args.is_empty() {
+                    sys!(format!("Usage: {cmd} <file>"));
+                    return None;
+                }
                 let path = self.resolve_path(args[0]);
                 let result = std::fs::read_to_string(&path)
                     .map(|content| (path, content))
@@ -3411,7 +4003,10 @@ impl Engine {
             }
 
             "/edit" => {
-                if args.is_empty() { sys!("Usage: /edit <file>"); return None; }
+                if args.is_empty() {
+                    sys!("Usage: /edit <file>");
+                    return None;
+                }
                 let path = self.resolve_path(args[0]);
                 // A missing file opens an empty buffer (Ctrl+S creates it) — anything
                 // else (permission denied, etc.) is a real error to report.
@@ -3424,7 +4019,10 @@ impl Engine {
             }
 
             "/diff-mode" => {
-                if args.is_empty() { sys!("Usage: /diff-mode <file>"); return None; }
+                if args.is_empty() {
+                    sys!("Usage: /diff-mode <file>");
+                    return None;
+                }
                 let path = self.resolve_path(args[0]);
                 let snaps = snapshots::list(&self.marlin_dir, &self.work_dir, &path);
                 let Some(latest) = snaps.first() else {
@@ -3445,16 +4043,23 @@ impl Engine {
                 // large files — route through the blocking pool like every other
                 // tool's disk/CPU work (see spawn_tool), instead of running inline
                 // on this async task and stalling it for the duration.
-                let outcome = tokio::task::spawn_blocking(move || -> Result<Vec<snapshots::DiffLine>, String> {
-                    let old_content = snapshots::read(&marlin_dir, &work_dir, &path_for_task, &snap_id)
-                        .map_err(|e| format!("Failed to read snapshot: {e}"))?;
-                    let new_content = std::fs::read_to_string(&path_for_task).map_err(|e| e.to_string())?;
-                    snapshots::diff_lines(&old_content, &new_content)
-                        .ok_or_else(|| "File too large to diff.".to_string())
-                }).await;
+                let outcome = tokio::task::spawn_blocking(
+                    move || -> Result<Vec<snapshots::DiffLine>, String> {
+                        let old_content =
+                            snapshots::read(&marlin_dir, &work_dir, &path_for_task, &snap_id)
+                                .map_err(|e| format!("Failed to read snapshot: {e}"))?;
+                        let new_content =
+                            std::fs::read_to_string(&path_for_task).map_err(|e| e.to_string())?;
+                        snapshots::diff_lines(&old_content, &new_content)
+                            .ok_or_else(|| "File too large to diff.".to_string())
+                    },
+                )
+                .await;
 
                 match outcome {
-                    Ok(Ok(diff)) => { let _ = ui_tx.send(UiUpdate::OpenDiff { path, diff }).await; }
+                    Ok(Ok(diff)) => {
+                        let _ = ui_tx.send(UiUpdate::OpenDiff { path, diff }).await;
+                    }
                     Ok(Err(e)) => err!(e),
                     Err(e) => err!(format!("diff task failed: {e}")),
                 }
@@ -3469,11 +4074,17 @@ impl Engine {
                 match std::fs::read_dir(&dir) {
                     Err(e) => err!(e.to_string()),
                     Ok(entries) => {
-                        let mut names: Vec<String> = entries.filter_map(|e| e.ok())
+                        let mut names: Vec<String> = entries
+                            .filter_map(|e| e.ok())
                             .map(|e| {
                                 let n = e.file_name().to_string_lossy().to_string();
-                                if e.file_type().map(|t| t.is_dir()).unwrap_or(false) { n + "/" } else { n }
-                            }).collect();
+                                if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                                    n + "/"
+                                } else {
+                                    n
+                                }
+                            })
+                            .collect();
                         names.sort();
                         sys!(format!("[{dir}]\n{}", names.join("\n")));
                     }
@@ -3493,8 +4104,11 @@ impl Engine {
                         // Update the session so save_session writes with the
                         // correct project name and work_dir after a /cd.
                         if let Some(session) = &mut self.session {
-                            let project_name = Path::new(&new_dir).file_name()
-                                .unwrap_or_default().to_string_lossy().to_string();
+                            let project_name = Path::new(&new_dir)
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string();
                             session.project = project_name;
                             session.work_dir = new_dir.clone();
                         }
@@ -3522,11 +4136,23 @@ impl Engine {
                         if self.skills.is_empty() {
                             sys!("No skills installed. Add .qmd files to ~/.marlin/skills/");
                         } else {
-                            let lines: Vec<String> = self.skills.iter().map(|s| {
-                                let tag = if s.format == skills::SkillFormat::Toml { " [.toml, deprecated — /skill migrate]" } else { "" };
-                                format!("  {:20} — {}{tag}", s.name, s.description)
-                            }).collect();
-                            sys!(format!("Skills ({}):\n{}", self.skills.len(), lines.join("\n")));
+                            let lines: Vec<String> = self
+                                .skills
+                                .iter()
+                                .map(|s| {
+                                    let tag = if s.format == skills::SkillFormat::Toml {
+                                        " [.toml, deprecated — /skill migrate]"
+                                    } else {
+                                        ""
+                                    };
+                                    format!("  {:20} — {}{tag}", s.name, s.description)
+                                })
+                                .collect();
+                            sys!(format!(
+                                "Skills ({}):\n{}",
+                                self.skills.len(),
+                                lines.join("\n")
+                            ));
                         }
                     }
 
@@ -3541,10 +4167,17 @@ impl Engine {
                         } else {
                             self.active_goal.clone()
                         };
-                        if let Some(skill) = self.skills.iter().find(|s| s.name == skill_name).cloned() {
+                        if let Some(skill) =
+                            self.skills.iter().find(|s| s.name == skill_name).cloned()
+                        {
                             if self.cfg.skill_subagents {
-                                sys!(format!("Running skill '{}' with query: {query} (subagent)", skill.name));
-                                let result = self.run_skill_as_subagent(&skill, &query, ui_tx, action_rx).await;
+                                sys!(format!(
+                                    "Running skill '{}' with query: {query} (subagent)",
+                                    skill.name
+                                ));
+                                let result = self
+                                    .run_skill_as_subagent(&skill, &query, ui_tx, action_rx)
+                                    .await;
                                 if result.is_error {
                                     err!(format!("[skill: {skill_name}]\n{}", result.output));
                                 } else {
@@ -3554,13 +4187,19 @@ impl Engine {
                                 match skills::executor::resolve_chunks(&skill, &query) {
                                     Err(e) => err!(format!("Skill error: {e}")),
                                     Ok(cmds) => {
-                                        sys!(format!("Running skill '{}' with query: {query}", skill.name));
+                                        sys!(format!(
+                                            "Running skill '{}' with query: {query}",
+                                            skill.name
+                                        ));
                                         let mut outputs = Vec::with_capacity(cmds.len());
                                         let mut failed = false;
                                         for cmd in cmds {
                                             let verdict = match self.preflight_shell(&cmd) {
                                                 Err(result) => {
-                                                    err!(format!("[skill: {skill_name}]\n{}", result.output));
+                                                    err!(format!(
+                                                        "[skill: {skill_name}]\n{}",
+                                                        result.output
+                                                    ));
                                                     failed = true;
                                                     break;
                                                 }
@@ -3568,7 +4207,8 @@ impl Engine {
                                             };
                                             let proceed = match verdict {
                                                 preflight::Verdict::NeedApproval(reason) => {
-                                                    self.await_approval(ui_tx, action_rx, reason).await
+                                                    self.await_approval(ui_tx, action_rx, reason)
+                                                        .await
                                                 }
                                                 _ => true,
                                             };
@@ -3579,7 +4219,10 @@ impl Engine {
                                             }
                                             let result = self.run_shell(cmd).await;
                                             if result.is_error {
-                                                err!(format!("[skill: {skill_name}]\n{}", result.output));
+                                                err!(format!(
+                                                    "[skill: {skill_name}]\n{}",
+                                                    result.output
+                                                ));
                                                 failed = true;
                                                 break;
                                             }
@@ -3587,12 +4230,17 @@ impl Engine {
                                         }
                                         if !failed {
                                             let prose = if skill.is_prompt() {
-                                                skills::executor::expand_prompt(&skill, &query).unwrap_or_default()
+                                                skills::executor::expand_prompt(&skill, &query)
+                                                    .unwrap_or_default()
                                             } else {
                                                 String::new()
                                             };
                                             let body = outputs.join("\n\n");
-                                            let out = if prose.is_empty() { body } else { format!("{prose}\n\n{body}") };
+                                            let out = if prose.is_empty() {
+                                                body
+                                            } else {
+                                                format!("{prose}\n\n{body}")
+                                            };
                                             sys!(format!("[skill: {skill_name}]\n{out}"));
                                         }
                                     }
@@ -3612,27 +4260,34 @@ impl Engine {
                         }
                     }
 
-                    "migrate" => {
-                        match skills::migrate_all(&self.marlin_dir) {
-                            Ok(0) => sys!("No .toml skills to migrate."),
-                            Ok(n) => {
-                                sys!(format!("Migrated {n} skill(s) to .qmd."));
-                                let (loaded, diagnostics) = skills::load_all(&self.marlin_dir);
-                                self.skills = loaded;
-                                for d in &diagnostics { err!(d.clone()); }
+                    "migrate" => match skills::migrate_all(&self.marlin_dir) {
+                        Ok(0) => sys!("No .toml skills to migrate."),
+                        Ok(n) => {
+                            sys!(format!("Migrated {n} skill(s) to .qmd."));
+                            let (loaded, diagnostics) = skills::load_all(&self.marlin_dir);
+                            self.skills = loaded;
+                            for d in &diagnostics {
+                                err!(d.clone());
                             }
-                            Err(e) => err!(format!("Migration failed: {e}")),
                         }
-                    }
+                        Err(e) => err!(format!("Migration failed: {e}")),
+                    },
 
                     "new" | "create" => {
-                        let name = if subargs.is_empty() { "my_skill" } else { subargs[0] };
+                        let name = if subargs.is_empty() {
+                            "my_skill"
+                        } else {
+                            subargs[0]
+                        };
                         let skill = skills::Skill {
                             name: name.to_string(),
                             description: "Describe what this skill does".into(),
                             triggers: vec!["keyword1".into(), "keyword2".into()],
                             body: String::new(),
-                            chunks: vec![skills::Chunk { lang: "sh".into(), source: "echo {query}".into() }],
+                            chunks: vec![skills::Chunk {
+                                lang: "sh".into(),
+                                source: "echo {query}".into(),
+                            }],
                             format: skills::SkillFormat::Qmd,
                         };
                         match skills::save_skill(&self.marlin_dir, &skill) {
@@ -3640,7 +4295,9 @@ impl Engine {
                                 sys!(format!("Skill template created:\n  {}\n\nEdit the file to customise it, then /skill reload.", path.display()));
                                 let (loaded, diagnostics) = skills::load_all(&self.marlin_dir);
                                 self.skills = loaded;
-                                for d in &diagnostics { err!(d.clone()); }
+                                for d in &diagnostics {
+                                    err!(d.clone());
+                                }
                             }
                             Err(e) => err!(format!("Failed to create skill: {e}")),
                         }
@@ -3654,16 +4311,21 @@ impl Engine {
                                 Err(e) => err!(format!("Error reading suggestions: {e}")),
                             }
                         } else {
-                            let context = self.history.iter().rev()
+                            let context = self
+                                .history
+                                .iter()
+                                .rev()
                                 .find(|m| m.role == "user")
                                 .map(|m| m.content.as_str())
                                 .unwrap_or("");
-                            let skill_defs: Vec<SkillDef> = self.skills.iter().map(SkillDef::from).collect();
+                            let skill_defs: Vec<SkillDef> =
+                                self.skills.iter().map(SkillDef::from).collect();
                             let hits = skills::suggest::match_skills(context, &skill_defs);
                             if hits.is_empty() {
                                 sys!("No skill suggestions yet. Nightly analysis runs after 20h of activity (requires model_tiers config).");
                             } else {
-                                let lines: Vec<String> = hits.iter()
+                                let lines: Vec<String> = hits
+                                    .iter()
                                     .map(|m| format!("  {:20} — {}", m.name, m.description))
                                     .collect();
                                 sys!(format!("Suggested skills:\n{}", lines.join("\n")));
@@ -3674,9 +4336,12 @@ impl Engine {
                     "reload" => {
                         let (loaded, diagnostics) = skills::load_all(&self.marlin_dir);
                         self.skills = loaded;
-                        let skill_defs: Vec<SkillDef> = self.skills.iter().map(SkillDef::from).collect();
+                        let skill_defs: Vec<SkillDef> =
+                            self.skills.iter().map(SkillDef::from).collect();
                         let _ = ui_tx.send(UiUpdate::SkillsLoaded(skill_defs)).await;
-                        for d in &diagnostics { err!(d.clone()); }
+                        for d in &diagnostics {
+                            err!(d.clone());
+                        }
                         sys!(format!("Reloaded {} skill(s).", self.skills.len()));
                     }
 
@@ -3686,23 +4351,24 @@ impl Engine {
                 }
             }
 
-            "/tiers" => {
-                match args.first().copied() {
-                    Some("on") => {
-                        if self.cfg.model_tiers.is_none() {
-                            self.cfg.model_tiers = Some(crate::config::ModelTiers::default());
-                        }
-                        self.cfg.model_tiers.as_mut().unwrap().enabled = true;
-                        save_cfg!();
-                        sys!("Model tier routing enabled. Edit ~/.marlin/config.json (model_tiers) to configure.");
+            "/tiers" => match args.first().copied() {
+                Some("on") => {
+                    if self.cfg.model_tiers.is_none() {
+                        self.cfg.model_tiers = Some(crate::config::ModelTiers::default());
                     }
-                    Some("off") => {
-                        if let Some(t) = self.cfg.model_tiers.as_mut() { t.enabled = false; }
-                        save_cfg!();
-                        sys!("Model tier routing disabled — using active_provider/active_model.");
+                    self.cfg.model_tiers.as_mut().unwrap().enabled = true;
+                    save_cfg!();
+                    sys!("Model tier routing enabled. Edit ~/.marlin/config.json (model_tiers) to configure.");
+                }
+                Some("off") => {
+                    if let Some(t) = self.cfg.model_tiers.as_mut() {
+                        t.enabled = false;
                     }
-                    _ => {
-                        let state = self.cfg.model_tiers.as_ref()
+                    save_cfg!();
+                    sys!("Model tier routing disabled — using active_provider/active_model.");
+                }
+                _ => {
+                    let state = self.cfg.model_tiers.as_ref()
                             .map(|t| if t.enabled {
                                 format!(
                                     "enabled\n  default (≤{}): {} / {}\n  complex (>{}): {} / {}\n  rater: {} / {}",
@@ -3716,35 +4382,38 @@ impl Engine {
                                 "disabled".into()
                             })
                             .unwrap_or_else(|| "not configured (use /tiers on to enable)".into());
-                        sys!(format!("Model tiers: {state}\n\nUse /tiers on|off"));
-                    }
+                    sys!(format!("Model tiers: {state}\n\nUse /tiers on|off"));
                 }
-            }
+            },
 
-            "/subagents" => {
-                match args.first().copied() {
-                    Some("on") => {
-                        self.cfg.skill_subagents = true;
-                        save_cfg!();
-                        sys!("Skill subagents ON — running a skill delegates to a nested agent loop.");
-                    }
-                    Some("off") => {
-                        self.cfg.skill_subagents = false;
-                        save_cfg!();
-                        sys!("Skill subagents OFF — skills run inline again (old direct-execution behavior).");
-                    }
-                    _ => {
-                        let state = if self.cfg.skill_subagents { "on" } else { "off" };
-                        sys!(format!("Skill subagents: {state}  (use /subagents on|off)"));
-                    }
+            "/subagents" => match args.first().copied() {
+                Some("on") => {
+                    self.cfg.skill_subagents = true;
+                    save_cfg!();
+                    sys!("Skill subagents ON — running a skill delegates to a nested agent loop.");
                 }
-            }
+                Some("off") => {
+                    self.cfg.skill_subagents = false;
+                    save_cfg!();
+                    sys!("Skill subagents OFF — skills run inline again (old direct-execution behavior).");
+                }
+                _ => {
+                    let state = if self.cfg.skill_subagents {
+                        "on"
+                    } else {
+                        "off"
+                    };
+                    sys!(format!("Skill subagents: {state}  (use /subagents on|off)"));
+                }
+            },
 
             "/config" | "/settings" => {
-                let _ = ui_tx.send(UiUpdate::ConfigState {
-                    state: self.config_state(),
-                    open: true,
-                }).await;
+                let _ = ui_tx
+                    .send(UiUpdate::ConfigState {
+                        state: self.config_state(),
+                        open: true,
+                    })
+                    .await;
             }
 
             "/preflight" => {
@@ -3753,7 +4422,10 @@ impl Engine {
 
                 if scope == "startup" || scope == "all" {
                     let startup_lines = preflight::startup(
-                        &self.cfg, &self.marlin_dir, &self.work_dir, self.code_index.as_ref(),
+                        &self.cfg,
+                        &self.marlin_dir,
+                        &self.work_dir,
+                        self.code_index.as_ref(),
                     );
                     lines.push(format!("startup: {} note(s)", startup_lines.len()));
                     lines.extend(startup_lines.into_iter().map(|l| format!("  {l}")));
@@ -3778,7 +4450,11 @@ impl Engine {
                 match format {
                     "html" => {
                         let html = self.export_html();
-                        let out_path = if path.ends_with(".html") { path.to_string() } else { format!("{path}.html") };
+                        let out_path = if path.ends_with(".html") {
+                            path.to_string()
+                        } else {
+                            format!("{path}.html")
+                        };
                         match std::fs::write(&out_path, &html) {
                             Ok(_) => sys!(format!("Exported session to {out_path}")),
                             Err(e) => err!(format!("Failed to write {out_path}: {e}")),
@@ -3786,7 +4462,11 @@ impl Engine {
                     }
                     "json" => {
                         let json = self.export_json();
-                        let out_path = if path.ends_with(".json") { path.to_string() } else { format!("{path}.json") };
+                        let out_path = if path.ends_with(".json") {
+                            path.to_string()
+                        } else {
+                            format!("{path}.json")
+                        };
                         match std::fs::write(&out_path, &json) {
                             Ok(_) => sys!(format!("Exported session to {out_path}")),
                             Err(e) => err!(format!("Failed to write {out_path}: {e}")),
@@ -3799,11 +4479,18 @@ impl Engine {
             _ => {
                 // Check user-defined commands before reporting unknown.
                 let cmd_name = cmd.trim_start_matches('/');
-                if let Some(ucmd) = self.user_commands.iter().find(|c| c.name == cmd_name).cloned() {
+                if let Some(ucmd) = self
+                    .user_commands
+                    .iter()
+                    .find(|c| c.name == cmd_name)
+                    .cloned()
+                {
                     let args_str = rest.to_string();
                     match ucmd.run.kind {
                         crate::commands::CommandKind::Shell => {
-                            let command = ucmd.run.command
+                            let command = ucmd
+                                .run
+                                .command
                                 .replace("{args}", &executor::shell_quote(&args_str));
                             match self.preflight_shell(&command) {
                                 Err(result) => err!(format!("[/{}]\n{}", ucmd.name, result.output)),
@@ -3830,7 +4517,10 @@ impl Engine {
                         }
                         crate::commands::CommandKind::Prompt => {
                             let prompt = ucmd.run.template.replace("{input}", &args_str);
-                            sys!(format!("/{}: injecting prompt into conversation…", ucmd.name));
+                            sys!(format!(
+                                "/{}: injecting prompt into conversation…",
+                                ucmd.name
+                            ));
                             return Some(prompt);
                         }
                     }
@@ -3858,7 +4548,9 @@ impl Engine {
     }
 
     fn config_state(&self) -> ConfigState {
-        let mut models = self.registry.get(&self.cfg.active_provider)
+        let mut models = self
+            .registry
+            .get(&self.cfg.active_provider)
             .map(|p| p.models())
             .unwrap_or_default();
         if let Some(pc) = self.cfg.providers.get(&self.cfg.active_provider) {
@@ -3869,7 +4561,9 @@ impl Engine {
             }
         }
         let named_themes: Vec<String> = crate::config::list_themes(&self.marlin_dir)
-            .into_iter().map(|(n, _)| n).collect();
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
         ConfigState {
             provider: self.cfg.active_provider.clone(),
             providers: self.registry.names(),
@@ -3895,11 +4589,22 @@ impl Engine {
         match key {
             "provider" => {
                 if self.registry.get(value).is_err() {
-                    let _ = ui_tx.send(UiUpdate::ErrorMsg(format!("Unknown provider: {value}"))).await;
+                    let _ = ui_tx
+                        .send(UiUpdate::ErrorMsg(format!("Unknown provider: {value}")))
+                        .await;
                 } else {
                     self.cfg.active_provider = value.to_string();
-                    let model = self.cfg.providers.get(value)
-                        .and_then(|p| if p.model.is_empty() { None } else { Some(p.model.clone()) })
+                    let model = self
+                        .cfg
+                        .providers
+                        .get(value)
+                        .and_then(|p| {
+                            if p.model.is_empty() {
+                                None
+                            } else {
+                                Some(p.model.clone())
+                            }
+                        })
                         .unwrap_or_default();
                     self.cfg.active_model = model.clone();
                     let _ = self.cfg.save();
@@ -3917,21 +4622,41 @@ impl Engine {
                 if name.is_empty() {
                     // Submitted with nothing typed — silently ignore.
                 } else if self.registry.get(name).is_ok() {
-                    let _ = ui_tx.send(UiUpdate::ErrorMsg(format!("Provider already exists: {name}"))).await;
+                    let _ = ui_tx
+                        .send(UiUpdate::ErrorMsg(format!(
+                            "Provider already exists: {name}"
+                        )))
+                        .await;
                 } else {
-                    match crate::providers::user_providers::save_new(&self.marlin_dir, name, endpoint, model, api_key) {
+                    match crate::providers::user_providers::save_new(
+                        &self.marlin_dir,
+                        name,
+                        endpoint,
+                        model,
+                        api_key,
+                    ) {
                         Ok(_) => {
                             self.registry = Registry::new(&self.cfg, Some(&self.marlin_dir));
                             self.cfg.active_provider = name.to_string();
-                            self.cfg.active_model = self.registry.get(name)
+                            self.cfg.active_model = self
+                                .registry
+                                .get(name)
                                 .map(|p| p.models().first().cloned().unwrap_or_default())
                                 .unwrap_or_default();
                             let _ = self.cfg.save();
                             let _ = ui_tx.send(UiUpdate::StatusUpdate(self.status_info())).await;
-                            let _ = ui_tx.send(UiUpdate::SystemMsg(format!("Provider '{name}' created and selected."))).await;
+                            let _ = ui_tx
+                                .send(UiUpdate::SystemMsg(format!(
+                                    "Provider '{name}' created and selected."
+                                )))
+                                .await;
                         }
                         Err(e) => {
-                            let _ = ui_tx.send(UiUpdate::ErrorMsg(format!("Failed to create provider: {e}"))).await;
+                            let _ = ui_tx
+                                .send(UiUpdate::ErrorMsg(format!(
+                                    "Failed to create provider: {e}"
+                                )))
+                                .await;
                         }
                     }
                 }
@@ -3941,20 +4666,27 @@ impl Engine {
                 if let Some(pcfg) = self.cfg.providers.get_mut(&self.cfg.active_provider) {
                     pcfg.model = value.to_string();
                 }
-                self.cfg.remember_model(&self.cfg.active_provider.clone(), value);
+                self.cfg
+                    .remember_model(&self.cfg.active_provider.clone(), value);
                 let _ = self.cfg.save();
                 let _ = ui_tx.send(UiUpdate::StatusUpdate(self.status_info())).await;
             }
             "api_key" => {
                 let provider = self.cfg.active_provider.clone();
-                match crate::providers::user_providers::set_api_key(&self.marlin_dir, &provider, value) {
+                match crate::providers::user_providers::set_api_key(
+                    &self.marlin_dir,
+                    &provider,
+                    value,
+                ) {
                     Ok(true) => {}
                     Ok(false) => {
                         self.cfg.set_key(&provider, value);
                         let _ = self.cfg.save();
                     }
                     Err(e) => {
-                        let _ = ui_tx.send(UiUpdate::ErrorMsg(format!("Failed to save API key: {e}"))).await;
+                        let _ = ui_tx
+                            .send(UiUpdate::ErrorMsg(format!("Failed to save API key: {e}")))
+                            .await;
                     }
                 }
                 self.registry = Registry::new(&self.cfg, Some(&self.marlin_dir));
@@ -3964,7 +4696,9 @@ impl Engine {
                     self.cfg.theme = value.to_string();
                     crate::tui::styles::set_light_theme(value == "light");
                     let _ = self.cfg.save();
-                } else if let Some(palette) = crate::config::load_named_theme(&self.marlin_dir, value) {
+                } else if let Some(palette) =
+                    crate::config::load_named_theme(&self.marlin_dir, value)
+                {
                     // Named theme — apply and persist it.
                     crate::tui::styles::load_palette(palette);
                     self.cfg.theme = value.to_string();
@@ -3977,11 +4711,13 @@ impl Engine {
                     "permissive" => Some(SandboxMode::Permissive),
                     "mxc" if executor::detect_mxc() => Some(SandboxMode::Mxc),
                     "mxc" => {
-                        let _ = ui_tx.send(UiUpdate::ErrorMsg(format!(
-                            "MXC binary ({}) not found in PATH. \
+                        let _ = ui_tx
+                            .send(UiUpdate::ErrorMsg(format!(
+                                "MXC binary ({}) not found in PATH. \
                             Install from https://github.com/microsoft/mxc and retry.",
-                            executor::mxc_binary_name()
-                        ))).await;
+                                executor::mxc_binary_name()
+                            )))
+                            .await;
                         None
                     }
                     _ => None,
@@ -4035,10 +4771,12 @@ impl Engine {
             }
             _ => {}
         }
-        let _ = ui_tx.send(UiUpdate::ConfigState {
-            state: self.config_state(),
-            open: false,
-        }).await;
+        let _ = ui_tx
+            .send(UiUpdate::ConfigState {
+                state: self.config_state(),
+                open: false,
+            })
+            .await;
     }
 
     /// Ctrl+S in the /edit pane. Goes through the exact same funnel a
@@ -4058,23 +4796,36 @@ impl Engine {
 
         let approved = match preflight::check(&inv, &self.cfg, &self.allowed_commands) {
             preflight::Verdict::Allow => true,
-            preflight::Verdict::NeedApproval(reason) => self.await_approval(ui_tx, action_rx, reason).await,
+            preflight::Verdict::NeedApproval(reason) => {
+                self.await_approval(ui_tx, action_rx, reason).await
+            }
             preflight::Verdict::Deny(reason) => {
-                let _ = ui_tx.send(UiUpdate::ErrorMsg(format!("Save denied: {reason}"))).await;
+                let _ = ui_tx
+                    .send(UiUpdate::ErrorMsg(format!("Save denied: {reason}")))
+                    .await;
                 false
             }
         };
         if !approved {
-            let _ = ui_tx.send(UiUpdate::SystemMsg(format!("Save cancelled: {resolved}"))).await;
+            let _ = ui_tx
+                .send(UiUpdate::SystemMsg(format!("Save cancelled: {resolved}")))
+                .await;
             return;
         }
 
         let input = serde_json::json!({ "path": path, "content": content }).to_string();
-        let call = ToolCall { id: "editor-save".into(), name: "write_file".into(), input };
-        let result = self.spawn_tool(&call, ui_tx).await.unwrap_or_else(|e| executor::ToolResult {
-            output: e.to_string(),
-            is_error: true,
-        });
+        let call = ToolCall {
+            id: "editor-save".into(),
+            name: "write_file".into(),
+            input,
+        };
+        let result = self
+            .spawn_tool(&call, ui_tx)
+            .await
+            .unwrap_or_else(|e| executor::ToolResult {
+                output: e.to_string(),
+                is_error: true,
+            });
 
         if result.is_error {
             let _ = ui_tx.send(UiUpdate::ErrorMsg(result.output)).await;
@@ -4082,7 +4833,9 @@ impl Engine {
             if let Some(idx) = &mut self.code_index {
                 index::update_file(idx, &resolved);
             }
-            let _ = ui_tx.send(UiUpdate::SystemMsg(format!("Saved {resolved}"))).await;
+            let _ = ui_tx
+                .send(UiUpdate::SystemMsg(format!("Saved {resolved}")))
+                .await;
             let _ = ui_tx.send(UiUpdate::EditorSaved { path: resolved }).await;
         }
     }
@@ -4151,18 +4904,23 @@ impl Engine {
             pre{background:#24283b;padding:0.8em;border-radius:6px;overflow-x:auto;}\
             code{font-family:monospace;}\
             .summary{color:#9ece6a;opacity:0.7;margin:1em 0;font-style:italic;}\
-            </style></head><body>\n<h1>Marlin Session</h1>\n"
+            </style></head><body>\n<h1>Marlin Session</h1>\n",
         );
         for msg in &self.history {
             let role = &msg.role;
             let content = html_escape(&msg.content);
             match role.as_str() {
-                "user" => html.push_str(&format!("<div class=\"user\"><strong>You</strong><pre>{content}</pre></div>\n")),
+                "user" => html.push_str(&format!(
+                    "<div class=\"user\"><strong>You</strong><pre>{content}</pre></div>\n"
+                )),
                 "assistant" => {
                     if !msg.tool_calls.is_empty() {
                         for tc in &msg.tool_calls {
-                            html.push_str(&format!("<div class=\"tool\"><strong>🔧 {}</strong><pre>{}</pre></div>\n",
-                                html_escape(&tc.name), html_escape(&tc.input)));
+                            html.push_str(&format!(
+                                "<div class=\"tool\"><strong>🔧 {}</strong><pre>{}</pre></div>\n",
+                                html_escape(&tc.name),
+                                html_escape(&tc.input)
+                            ));
                         }
                     }
                     if !content.is_empty() {
@@ -4182,7 +4940,8 @@ impl Engine {
 
     /// Export the current conversation as JSON (same format as session files).
     fn export_json(&self) -> String {
-        let session_msgs: Vec<history::SessionMessage> = self.history.iter().map(to_session_message).collect();
+        let session_msgs: Vec<history::SessionMessage> =
+            self.history.iter().map(to_session_message).collect();
         serde_json::to_string_pretty(&session_msgs).unwrap_or_else(|_| "[]".into())
     }
 }
@@ -4233,6 +4992,16 @@ fn error_hint(tool_name: &str, output: &str) -> String {
                 String::new()
             }
         }
+        "multi_edit" => {
+            if out.contains("old_string not found") {
+                "One of the edits' old_string wasn't found (possibly after earlier edits in the batch already ran). Re-read the file and adjust the edits.".into()
+            } else if out.contains("edits") && (out.contains("empty") || out.contains("required")) {
+                "multi_edit needs a non-empty 'edits' array of {old_string, new_string} pairs."
+                    .into()
+            } else {
+                String::new()
+            }
+        }
         "search_codebase" => {
             if out.contains("index not built") {
                 "No search index yet. Run /index to build one for this project.".into()
@@ -4247,7 +5016,9 @@ fn error_hint(tool_name: &str, output: &str) -> String {
 fn extract_file_path(input_json: &str, work_dir: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(input_json).ok()?;
     let p = v["path"].as_str()?;
-    if p.is_empty() { return None; }
+    if p.is_empty() {
+        return None;
+    }
     if Path::new(p).is_absolute() {
         Some(p.to_string())
     } else {
@@ -4344,9 +5115,20 @@ fn is_transient_network_error(e: &anyhow::Error) -> bool {
 
 fn looks_like_unfinished_stall(text: &str) -> bool {
     const STALL_PHRASES: &[&str] = &[
-        "let me ", "let's ", "i'll ", "i will ", "i'm going to ", "i am going to ",
-        "now i'll ", "now i will ", "next i'll ", "next, i'll ", "next i will ",
-        "going to now ", "i'll now ", "i will now ",
+        "let me ",
+        "let's ",
+        "i'll ",
+        "i will ",
+        "i'm going to ",
+        "i am going to ",
+        "now i'll ",
+        "now i will ",
+        "next i'll ",
+        "next, i'll ",
+        "next i will ",
+        "going to now ",
+        "i'll now ",
+        "i will now ",
     ];
 
     // Scan all sentences, not just the last one. The model may say
@@ -4354,7 +5136,9 @@ fn looks_like_unfinished_stall(text: &str) -> bool {
     // where the stall signal is in the penultimate sentence.
     for sentence in text.split(['.', '!', '?', '\n']) {
         let s = sentence.trim().to_lowercase();
-        if s.is_empty() { continue; }
+        if s.is_empty() {
+            continue;
+        }
         if STALL_PHRASES.iter().any(|p| s.starts_with(p)) {
             return true;
         }
@@ -4367,7 +5151,17 @@ fn looks_like_unfinished_stall(text: &str) -> bool {
 /// model requests several in one turn. Everything else (writes, commands,
 /// skills, AST mutation, external tools) stays strictly sequential.
 fn is_parallel_safe(name: &str) -> bool {
-    matches!(name, "read_file" | "list_directory" | "search_codebase" | "search_symbols" | "grep" | "glob" | "ast_skeleton" | "ast_get_node")
+    matches!(
+        name,
+        "read_file"
+            | "list_directory"
+            | "search_codebase"
+            | "search_symbols"
+            | "grep"
+            | "glob"
+            | "ast_skeleton"
+            | "ast_get_node"
+    )
 }
 
 /// Assigns a shared group id (the run's starting index) to every call in a
@@ -4382,9 +5176,13 @@ fn parallel_group_ids(calls: &[ToolCall]) -> Vec<Option<usize>> {
     while i < calls.len() {
         if is_parallel_safe(&calls[i].name) {
             let start = i;
-            while i < calls.len() && is_parallel_safe(&calls[i].name) { i += 1; }
+            while i < calls.len() && is_parallel_safe(&calls[i].name) {
+                i += 1;
+            }
             if i - start > 1 {
-                for id in ids[start..i].iter_mut() { *id = Some(start); }
+                for id in ids[start..i].iter_mut() {
+                    *id = Some(start);
+                }
             }
         } else {
             i += 1;
@@ -4396,9 +5194,10 @@ fn parallel_group_ids(calls: &[ToolCall]) -> Vec<Option<usize>> {
 fn tool_short_desc(name: &str, input_json: &str) -> String {
     let v = serde_json::from_str::<serde_json::Value>(input_json).unwrap_or_default();
     match name {
-        "read_file" | "write_file" | "edit_file" | "notebook_edit" => {
+        "read_file" | "write_file" | "edit_file" | "multi_edit" | "notebook_edit" => {
             let path = v["path"].as_str().unwrap_or("?");
-            let basename = Path::new(path).file_name()
+            let basename = Path::new(path)
+                .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.to_string());
             format!("{name}: {basename}")
@@ -4422,7 +5221,13 @@ fn tool_short_desc(name: &str, input_json: &str) -> String {
         }
         "ast_skeleton" => {
             let f = v["file"].as_str().unwrap_or("?");
-            format!("ast_skeleton: {}", Path::new(f).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| f.into()))
+            format!(
+                "ast_skeleton: {}",
+                Path::new(f)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| f.into())
+            )
         }
         "ast_get_node" => {
             let id = v["node_id"].as_str().unwrap_or("?");
@@ -4450,9 +5255,13 @@ fn shell_aware_truncate(cmd: &str, n: usize) -> String {
 
     for (i, &b) in bytes.iter().enumerate() {
         if in_single {
-            if b == b'\'' { in_single = false; }
+            if b == b'\'' {
+                in_single = false;
+            }
         } else if in_double {
-            if b == b'"' { in_double = false; }
+            if b == b'"' {
+                in_double = false;
+            }
         } else if b == b'\'' {
             in_single = true;
         } else if b == b'"' {
@@ -4460,7 +5269,9 @@ fn shell_aware_truncate(cmd: &str, n: usize) -> String {
         } else if b == b' ' || b == b'\t' {
             if start < i {
                 tokens.push(&cmd[start..i]);
-                if tokens.len() >= n { return tokens.join(" "); }
+                if tokens.len() >= n {
+                    return tokens.join(" ");
+                }
             }
             start = i + 1;
         }
@@ -4540,7 +5351,11 @@ mod parallel_batching_tests {
     use super::*;
 
     fn call(name: &str) -> ToolCall {
-        ToolCall { id: format!("id-{name}-{}", name.len()), name: name.to_string(), input: "{}".into() }
+        ToolCall {
+            id: format!("id-{name}-{}", name.len()),
+            name: name.to_string(),
+            input: "{}".into(),
+        }
     }
 
     #[test]
@@ -4564,7 +5379,11 @@ mod parallel_batching_tests {
 
     #[test]
     fn consecutive_safe_calls_share_a_group() {
-        let calls = vec![call("read_file"), call("list_directory"), call("search_codebase")];
+        let calls = vec![
+            call("read_file"),
+            call("list_directory"),
+            call("search_codebase"),
+        ];
         let groups = parallel_group_ids(&calls);
         assert_eq!(groups, vec![Some(0), Some(0), Some(0)]);
     }

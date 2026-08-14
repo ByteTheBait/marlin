@@ -12,10 +12,16 @@ pub struct ToolResult {
 
 impl ToolResult {
     fn ok(output: impl Into<String>) -> Self {
-        Self { output: output.into(), is_error: false }
+        Self {
+            output: output.into(),
+            is_error: false,
+        }
     }
     fn err(output: impl Into<String>) -> Self {
-        Self { output: output.into(), is_error: true }
+        Self {
+            output: output.into(),
+            is_error: true,
+        }
     }
 }
 
@@ -28,9 +34,16 @@ const MAX_OUTPUT_BYTES: usize = 40_000;
 /// Single source of truth — previously duplicated (and drifted) across executor.rs,
 /// external.rs, and the verify-command runner in engine/mod.rs.
 pub(crate) const CLEAN_ENV_VARS: &[&str] = &[
-    "PATH", "HOME", "USER", "LANG", "LC_ALL",
-    "CARGO_HOME", "RUSTUP_HOME", "GOPATH",
-    "NODE_PATH", "npm_config_prefix",
+    "PATH",
+    "HOME",
+    "USER",
+    "LANG",
+    "LC_ALL",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "GOPATH",
+    "NODE_PATH",
+    "npm_config_prefix",
 ];
 
 /// Single-quote `s` for safe inclusion as one shell word, escaping embedded `'`.
@@ -97,9 +110,8 @@ pub fn execute(
                         let data = std::fs::read(&path)
                             .map(|d| String::from_utf8_lossy(&d).into_owned())
                             .unwrap_or_default();
-                        let warning = format!(
-                            "// [AST/SEXPR] warning: {e} — degraded to raw text\n"
-                        );
+                        let warning =
+                            format!("// [AST/SEXPR] warning: {e} — degraded to raw text\n");
                         return ToolResult::ok(clamp(format!("{warning}{data}")));
                     }
                 }
@@ -121,7 +133,10 @@ pub fn execute(
                     let header = format!(
                         "// extracted: {} from {} ({} of {} bytes)\n",
                         sym.trim(),
-                        Path::new(&path).file_name().unwrap_or_default().to_string_lossy(),
+                        Path::new(&path)
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy(),
                         extracted.len(),
                         content.len()
                     );
@@ -129,7 +144,8 @@ pub fn execute(
                 }
                 return ToolResult::ok(clamp(format!(
                     "// symbol {:?} not found — returning full file\n\n{}",
-                    sym.trim(), content
+                    sym.trim(),
+                    content
                 )));
             }
             ToolResult::ok(clamp(content))
@@ -173,22 +189,80 @@ pub fn execute(
             ToolResult::ok(format!("edited {path}"))
         }
 
+        // Multi-edit: apply several old→new replacements to one file in a single
+        // call, in order. `edits` is an array of {old_string, new_string}, which
+        // the string-only `parse_input` HashMap drops — so this arm re-parses the
+        // raw JSON itself. Each old_string is matched against the current state
+        // of the file (after prior edits in the same call), so edits can build on
+        // one another like Claude/opencode's multi-edit.
+        "multi_edit" => {
+            let v: serde_json::Value = match serde_json::from_str(input_json) {
+                Ok(v) => v,
+                Err(e) => return ToolResult::err(format!("input parse error: {e}")),
+            };
+            let path = resolve(v["path"].as_str().unwrap_or(""));
+            let edits =
+                match v["edits"].as_array() {
+                    Some(a) if !a.is_empty() => a,
+                    Some(_) => return ToolResult::err("multi_edit 'edits' array is empty"),
+                    None => return ToolResult::err(
+                        "multi_edit requires an 'edits' array of {old_string, new_string} pairs",
+                    ),
+                };
+            let original = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) => return ToolResult::err(e.to_string()),
+            };
+            if let Some(snap) = snapshot_fn {
+                snap(&path, "multi_edit");
+            }
+            let mut updated = original;
+            let mut applied = 0usize;
+            for (i, edit) in edits.iter().enumerate() {
+                let old = edit["old_string"].as_str().unwrap_or("");
+                let new = edit["new_string"].as_str().unwrap_or("");
+                if old.is_empty() {
+                    return ToolResult::err(format!(
+                        "multi_edit edit {} has an empty old_string — use edit_file for inserts",
+                        i + 1
+                    ));
+                }
+                if !updated.contains(old) {
+                    return ToolResult::err(format!(
+                        "multi_edit: edit {} old_string not found in {path} ({applied} already applied)",
+                        i + 1
+                    ));
+                }
+                updated = updated.replacen(old, new, 1);
+                applied += 1;
+            }
+            if let Err(e) = std::fs::write(&path, updated.as_bytes()) {
+                return ToolResult::err(e.to_string());
+            }
+            ToolResult::ok(format!("multi_edit: applied {applied} edit(s) → {path}"))
+        }
+
         "notebook_edit" => {
             let path = resolve(input.get("path").map(String::as_str).unwrap_or(""));
             let cell_id = input.get("cell_id").map(String::as_str).unwrap_or("");
             let cell_type = input.get("cell_type").map(String::as_str).unwrap_or("");
             let edit_mode_raw = input.get("edit_mode").map(String::as_str).unwrap_or("");
-            let edit_mode = if edit_mode_raw.is_empty() { "replace" } else { edit_mode_raw };
+            let edit_mode = if edit_mode_raw.is_empty() {
+                "replace"
+            } else {
+                edit_mode_raw
+            };
             let new_source = input.get("new_source").map(String::as_str).unwrap_or("");
 
             let data = match std::fs::read_to_string(&path) {
                 Ok(s) => s,
                 Err(e) => return ToolResult::err(e.to_string()),
             };
-            let (msg, updated) = match build_notebook_edit(&data, cell_id, cell_type, edit_mode, new_source) {
-                Ok(v) => v,
-                Err(e) => return ToolResult::err(e),
-            };
+            let (msg, updated) =
+                match build_notebook_edit(&data, cell_id, cell_type, edit_mode, new_source) {
+                    Ok(v) => v,
+                    Err(e) => return ToolResult::err(e),
+                };
             if let Some(snap) = snapshot_fn {
                 snap(&path, "notebook_edit");
             }
@@ -211,13 +285,19 @@ pub fn execute(
             if *sandbox_mode == SandboxMode::Mxc {
                 return match run_in_mxc(cmd, work_dir) {
                     Err(e) => ToolResult::err(e.to_string()),
-                    Ok(out) => format_command_output(&out.stdout, &out.stderr, out.status.success(), logs_dir),
+                    Ok(out) => format_command_output(
+                        &out.stdout,
+                        &out.stderr,
+                        out.status.success(),
+                        logs_dir,
+                    ),
                 };
             }
 
             // Streaming path
             if let Some(stream) = stream_fn {
-                let timeout_secs: u64 = input.get("timeout")
+                let timeout_secs: u64 = input
+                    .get("timeout")
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(120)
                     .max(1);
@@ -275,7 +355,8 @@ pub fn execute(
                 let mut stderr_buf = String::new();
 
                 // Poll for completion, killing the child if it exceeds the timeout.
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
                 loop {
                     // Drain whatever output has arrived so far.
                     while let Ok((is_err, chunk)) = rx.try_recv() {
@@ -300,7 +381,11 @@ pub fn execute(
                             }
                             let combined = format!("{stdout_buf}{stderr_buf}");
                             let trimmed = combined.trim().to_string();
-                            let result = if trimmed.is_empty() { "(no output)".to_string() } else { trimmed };
+                            let result = if trimmed.is_empty() {
+                                "(no output)".to_string()
+                            } else {
+                                trimmed
+                            };
                             let success = status.success();
                             let display = format_command_output_display(&result, logs_dir, clamp);
                             return if success {
@@ -333,12 +418,20 @@ pub fn execute(
                         stdout_buf.push_str(&chunk);
                     }
                 }
-                if let Some(h) = stdout_thread { let _ = h.join(); }
-                if let Some(h) = stderr_thread { let _ = h.join(); }
+                if let Some(h) = stdout_thread {
+                    let _ = h.join();
+                }
+                if let Some(h) = stderr_thread {
+                    let _ = h.join();
+                }
 
                 let combined = format!("{stdout_buf}{stderr_buf}");
                 let trimmed = combined.trim().to_string();
-                let result = if trimmed.is_empty() { "(no output)".to_string() } else { trimmed };
+                let result = if trimmed.is_empty() {
+                    "(no output)".to_string()
+                } else {
+                    trimmed
+                };
                 let display = format_command_output_display(&result, logs_dir, clamp);
                 return ToolResult::err(format!(
                     "command timed out after {timeout_secs}s and was killed.\n{display}"
@@ -346,7 +439,8 @@ pub fn execute(
             }
 
             // Non-streaming fallback (used by subagents and tests)
-            let timeout_secs: u64 = input.get("timeout")
+            let timeout_secs: u64 = input
+                .get("timeout")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(120)
                 .max(1);
@@ -399,18 +493,29 @@ pub fn execute(
             loop {
                 // Drain whatever output has arrived so far.
                 while let Ok((is_err, chunk)) = rx.try_recv() {
-                    if is_err { stderr_buf.extend_from_slice(&chunk); }
-                    else { stdout_buf.extend_from_slice(&chunk); }
+                    if is_err {
+                        stderr_buf.extend_from_slice(&chunk);
+                    } else {
+                        stdout_buf.extend_from_slice(&chunk);
+                    }
                 }
 
                 match child.try_wait() {
                     Ok(Some(status)) => {
                         // Drain remaining output.
                         while let Ok((is_err, chunk)) = rx.recv() {
-                            if is_err { stderr_buf.extend_from_slice(&chunk); }
-                            else { stdout_buf.extend_from_slice(&chunk); }
+                            if is_err {
+                                stderr_buf.extend_from_slice(&chunk);
+                            } else {
+                                stdout_buf.extend_from_slice(&chunk);
+                            }
                         }
-                        return format_command_output(&stdout_buf, &stderr_buf, status.success(), logs_dir);
+                        return format_command_output(
+                            &stdout_buf,
+                            &stderr_buf,
+                            status.success(),
+                            logs_dir,
+                        );
                     }
                     Ok(None) => {
                         if std::time::Instant::now() >= deadline {
@@ -426,11 +531,18 @@ pub fn execute(
 
             // Timed out — drain whatever output arrived.
             while let Ok((is_err, chunk)) = rx.try_recv() {
-                if is_err { stderr_buf.extend_from_slice(&chunk); }
-                else { stdout_buf.extend_from_slice(&chunk); }
+                if is_err {
+                    stderr_buf.extend_from_slice(&chunk);
+                } else {
+                    stdout_buf.extend_from_slice(&chunk);
+                }
             }
-            if let Some(h) = stdout_thread { let _ = h.join(); }
-            if let Some(h) = stderr_thread { let _ = h.join(); }
+            if let Some(h) = stdout_thread {
+                let _ = h.join();
+            }
+            if let Some(h) = stderr_thread {
+                let _ = h.join();
+            }
             let display = format_command_output(&stdout_buf, &stderr_buf, false, logs_dir);
             return ToolResult::err(format!(
                 "command timed out after {timeout_secs}s and was killed.\n{}",
@@ -484,7 +596,8 @@ pub fn execute(
             if query.is_empty() {
                 return ToolResult::err("query is required");
             }
-            let limit: usize = input.get("limit")
+            let limit: usize = input
+                .get("limit")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(5)
                 .clamp(1, 20);
@@ -499,7 +612,8 @@ pub fn execute(
             if symbol.is_empty() {
                 return ToolResult::err("search_symbols requires 'symbol'");
             }
-            let limit: usize = input.get("limit")
+            let limit: usize = input
+                .get("limit")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(5)
                 .clamp(1, 20);
@@ -507,7 +621,11 @@ pub fn execute(
         }
 
         "grep" => {
-            let pattern = input.get("pattern").map(String::as_str).unwrap_or("").trim();
+            let pattern = input
+                .get("pattern")
+                .map(String::as_str)
+                .unwrap_or("")
+                .trim();
             if pattern.is_empty() {
                 return ToolResult::err("grep requires 'pattern'");
             }
@@ -516,12 +634,18 @@ pub fn execute(
                 Err(e) => return ToolResult::err(format!("invalid regex: {e}")),
             };
             let path = input.get("path").map(String::as_str).unwrap_or("").trim();
-            let root = if path.is_empty() { work_dir.to_string() } else { resolve(path) };
+            let root = if path.is_empty() {
+                work_dir.to_string()
+            } else {
+                resolve(path)
+            };
             let glob_pat = input.get("glob").map(String::as_str).unwrap_or("").trim();
-            let context: usize = input.get("context")
+            let context: usize = input
+                .get("context")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
-            let limit: usize = input.get("limit")
+            let limit: usize = input
+                .get("limit")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(50)
                 .clamp(1, 200);
@@ -554,15 +678,27 @@ pub fn execute(
             };
 
             for file in files {
-                if total_matches >= limit { break; }
-                let rel = file.strip_prefix(&root).unwrap_or(&file).to_string_lossy().to_string();
-                if let Some(g) = &glob_filter {
-                    if !g.matches(&rel) { continue; }
+                if total_matches >= limit {
+                    break;
                 }
-                let Ok(text) = std::fs::read_to_string(&file) else { continue };
+                let rel = file
+                    .strip_prefix(&root)
+                    .unwrap_or(&file)
+                    .to_string_lossy()
+                    .to_string();
+                if let Some(g) = &glob_filter {
+                    if !g.matches(&rel) {
+                        continue;
+                    }
+                }
+                let Ok(text) = std::fs::read_to_string(&file) else {
+                    continue;
+                };
                 let lines: Vec<&str> = text.lines().collect();
                 for (i, line) in lines.iter().enumerate() {
-                    if total_matches >= limit { break; }
+                    if total_matches >= limit {
+                        break;
+                    }
                     if re.is_match(line) {
                         total_matches += 1;
                         if context > 0 {
@@ -584,7 +720,10 @@ pub fn execute(
             if matches.is_empty() {
                 return ToolResult::ok(format!("No matches for /{pattern}/ in {root}"));
             }
-            let mut out = format!("grep /{pattern}/ — {} match(es) in {root}:\n", total_matches);
+            let mut out = format!(
+                "grep /{pattern}/ — {} match(es) in {root}:\n",
+                total_matches
+            );
             for m in matches {
                 out.push_str(&m);
                 out.push('\n');
@@ -596,11 +735,16 @@ pub fn execute(
         }
 
         "glob" => {
-            let pattern = input.get("pattern").map(String::as_str).unwrap_or("").trim();
+            let pattern = input
+                .get("pattern")
+                .map(String::as_str)
+                .unwrap_or("")
+                .trim();
             if pattern.is_empty() {
                 return ToolResult::err("glob requires 'pattern'");
             }
-            let limit: usize = input.get("limit")
+            let limit: usize = input
+                .get("limit")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(100)
                 .clamp(1, 500);
@@ -627,7 +771,6 @@ pub fn execute(
         }
 
         // ── AST Harness tools ────────────────────────────────────────────────
-
         "ast_skeleton" => {
             let file = resolve(input.get("file").map(String::as_str).unwrap_or(""));
             if file.is_empty() {
@@ -698,7 +841,8 @@ pub fn execute(
                     // Recompile source from the mutated AST JSON
                     let compile_out = if !lang.is_empty() && !source_file.is_empty() {
                         let resolved_src = resolve(source_file);
-                        match compiler_run(&["compile", &file, "--lang", lang, "-o", &resolved_src]) {
+                        match compiler_run(&["compile", &file, "--lang", lang, "-o", &resolved_src])
+                        {
                             Ok(out) => {
                                 // Optimization pass (non-fatal if it fails)
                                 let opt_note = match compiler_run(&["optimize", &file]) {
@@ -748,9 +892,9 @@ pub fn mxc_binary_name() -> &'static str {
 
 fn mxc_binary() -> &'static str {
     match std::env::consts::OS {
-        "macos"   => "mxc-exec-mac",
+        "macos" => "mxc-exec-mac",
         "windows" => "wxc-exec.exe",
-        _         => "lxc-exec",   // Linux and others
+        _ => "lxc-exec", // Linux and others
     }
 }
 
@@ -768,7 +912,10 @@ fn mxc_config_json(cmd: &str, work_dir: &str) -> String {
     // cd into workdir first so relative paths in cmd resolve correctly.
     let full_cmd = format!("cd {} && {}", shell_quote(work_dir), cmd);
     // serde_json::to_string produces a JSON-quoted string including surrounding '"'.
-    let command_line = format!("sh -c {}", serde_json::to_string(full_cmd.as_str()).unwrap());
+    let command_line = format!(
+        "sh -c {}",
+        serde_json::to_string(full_cmd.as_str()).unwrap()
+    );
 
     serde_json::json!({
         "version": "0.7.0-alpha",
@@ -791,8 +938,7 @@ pub(crate) fn run_in_mxc(cmd: &str, work_dir: &str) -> std::io::Result<std::proc
     let json = mxc_config_json(cmd, work_dir);
 
     // Write the config to a temp file; MXC takes a file path argument.
-    let tmp = std::env::temp_dir()
-        .join(format!("marlin_mxc_{}.json", uuid::Uuid::new_v4()));
+    let tmp = std::env::temp_dir().join(format!("marlin_mxc_{}.json", uuid::Uuid::new_v4()));
     std::fs::write(&tmp, json.as_bytes())?;
 
     let result = Command::new(mxc_binary()).arg(&tmp).output();
@@ -824,7 +970,11 @@ fn compiler_run(args: &[&str]) -> Result<String, String> {
         }
     } else {
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        Err(format!("ast-compiler exit {}: {}", out.status, stderr.trim()))
+        Err(format!(
+            "ast-compiler exit {}: {}",
+            out.status,
+            stderr.trim()
+        ))
     }
 }
 
@@ -838,9 +988,17 @@ fn harness_run(args: &[&str]) -> Result<String, String> {
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     if out.status.success() {
-        Ok(if stdout.trim().is_empty() { "(no output)".into() } else { stdout })
+        Ok(if stdout.trim().is_empty() {
+            "(no output)".into()
+        } else {
+            stdout
+        })
     } else {
-        Err(format!("ast-harness exit {}: {}", out.status, stderr.trim()))
+        Err(format!(
+            "ast-harness exit {}: {}",
+            out.status,
+            stderr.trim()
+        ))
     }
 }
 
@@ -857,31 +1015,35 @@ fn build_notebook_edit(
     edit_mode: &str,
     new_source: &str,
 ) -> Result<(String, String), String> {
-    let mut nb: serde_json::Value = serde_json::from_str(notebook_json)
-        .map_err(|e| format!("invalid notebook JSON: {e}"))?;
+    let mut nb: serde_json::Value =
+        serde_json::from_str(notebook_json).map_err(|e| format!("invalid notebook JSON: {e}"))?;
 
     let msg = {
-        let cells = nb.get_mut("cells")
+        let cells = nb
+            .get_mut("cells")
             .and_then(|c| c.as_array_mut())
             .ok_or_else(|| "notebook has no 'cells' array".to_string())?;
 
         match edit_mode {
             "delete" => {
                 let id = require_cell_id(cell_id, "delete")?;
-                let idx = find_cell_index(cells, id)
-                    .ok_or_else(|| format!("no cell with id {id:?}"))?;
+                let idx =
+                    find_cell_index(cells, id).ok_or_else(|| format!("no cell with id {id:?}"))?;
                 cells.remove(idx);
                 format!("deleted cell {id} ({} cells remain)", cells.len())
             }
             "insert" => {
                 if cell_type != "code" && cell_type != "markdown" {
-                    return Err("cell_type must be 'code' or 'markdown' for edit_mode=insert".into());
+                    return Err(
+                        "cell_type must be 'code' or 'markdown' for edit_mode=insert".into(),
+                    );
                 }
                 let insert_at = if cell_id.is_empty() {
                     0
                 } else {
                     find_cell_index(cells, cell_id)
-                        .ok_or_else(|| format!("no cell with id {cell_id:?}"))? + 1
+                        .ok_or_else(|| format!("no cell with id {cell_id:?}"))?
+                        + 1
                 };
                 let new_id = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
                 let mut new_cell = serde_json::json!({
@@ -899,8 +1061,8 @@ fn build_notebook_edit(
             }
             "replace" => {
                 let id = require_cell_id(cell_id, "replace")?;
-                let idx = find_cell_index(cells, id)
-                    .ok_or_else(|| format!("no cell with id {id:?}"))?;
+                let idx =
+                    find_cell_index(cells, id).ok_or_else(|| format!("no cell with id {id:?}"))?;
                 let cell = &mut cells[idx];
                 cell["source"] = serde_json::Value::Array(source_lines(new_source));
                 let target_type = if cell_type.is_empty() {
@@ -920,9 +1082,11 @@ fn build_notebook_edit(
                 }
                 format!("replaced cell {id}")
             }
-            other => return Err(format!(
-                "unknown edit_mode {other:?} — valid: replace, insert, delete"
-            )),
+            other => {
+                return Err(format!(
+                    "unknown edit_mode {other:?} — valid: replace, insert, delete"
+                ))
+            }
         }
     };
 
@@ -941,7 +1105,9 @@ fn require_cell_id<'a>(cell_id: &'a str, mode: &str) -> Result<&'a str, String> 
 /// Match by the cell's `id` field first; falls back to treating `cell_id` as a
 /// 0-based index for notebooks predating nbformat 4.5 cell ids.
 fn find_cell_index(cells: &[serde_json::Value], cell_id: &str) -> Option<usize> {
-    cells.iter().position(|c| c.get("id").and_then(|v| v.as_str()) == Some(cell_id))
+    cells
+        .iter()
+        .position(|c| c.get("id").and_then(|v| v.as_str()) == Some(cell_id))
         .or_else(|| cell_id.parse::<usize>().ok().filter(|&i| i < cells.len()))
 }
 
@@ -978,23 +1144,37 @@ fn spill_to_log(content: &str, logs_dir: Option<&Path>) -> Option<String> {
 }
 
 /// Format command output bytes into a ToolResult, applying size limits.
-fn format_command_output(stdout: &[u8], stderr: &[u8], success: bool, logs_dir: Option<&Path>) -> ToolResult {
+fn format_command_output(
+    stdout: &[u8],
+    stderr: &[u8],
+    success: bool,
+    logs_dir: Option<&Path>,
+) -> ToolResult {
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(stdout),
         String::from_utf8_lossy(stderr)
     );
     let trimmed = combined.trim().to_string();
-    let result = if trimmed.is_empty() { "(no output)".to_string() } else { trimmed };
+    let result = if trimmed.is_empty() {
+        "(no output)".to_string()
+    } else {
+        trimmed
+    };
 
     let display = if result.len() > LOG_THRESHOLD_BYTES {
         match spill_to_log(&result, logs_dir) {
             Some(log_path) => {
                 let total_lines = result.lines().count();
-                let snippet: String = result.lines()
-                    .rev().take(40).collect::<Vec<_>>()
-                    .into_iter().rev()
-                    .collect::<Vec<_>>().join("\n");
+                let snippet: String = result
+                    .lines()
+                    .rev()
+                    .take(40)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 format!(
                     "[Marlin: truncated {} lines of output. Full log saved to {}]\n\
                     --- last 40 lines ---\n{}",
@@ -1017,15 +1197,24 @@ fn format_command_output(stdout: &[u8], stderr: &[u8], success: bool, logs_dir: 
 /// Apply the log-spill / size-clamp display formatting to an already-combined
 /// output string (used by the streaming run_command path, which assembles
 /// stdout+stderr itself). Returns the display string.
-fn format_command_output_display(result: &str, logs_dir: Option<&Path>, clamp: impl Fn(String) -> String) -> String {
+fn format_command_output_display(
+    result: &str,
+    logs_dir: Option<&Path>,
+    clamp: impl Fn(String) -> String,
+) -> String {
     if result.len() > LOG_THRESHOLD_BYTES {
         match spill_to_log(result, logs_dir) {
             Some(log_path) => {
                 let total_lines = result.lines().count();
-                let snippet: String = result.lines()
-                    .rev().take(40).collect::<Vec<_>>()
-                    .into_iter().rev()
-                    .collect::<Vec<_>>().join("\n");
+                let snippet: String = result
+                    .lines()
+                    .rev()
+                    .take(40)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 format!(
                     "[Marlin: truncated {} lines of output. Full log saved to {}]\n\
                     --- last 40 lines ---\n{}",
@@ -1076,24 +1265,41 @@ fn parse_input(json: &str) -> Option<HashMap<String, String>> {
 }
 
 pub(crate) fn resolve_path(p: &str, work_dir: &str) -> String {
-    if p.is_empty() { return work_dir.to_string(); }
+    if p.is_empty() {
+        return work_dir.to_string();
+    }
     if p == "~" {
-        return dirs::home_dir().unwrap_or_default().to_string_lossy().to_string();
+        return dirs::home_dir()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
     }
     if let Some(rest) = p.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
             return home.join(rest).to_string_lossy().to_string();
         }
     }
-    if Path::new(p).is_absolute() { return p.to_string(); }
+    if Path::new(p).is_absolute() {
+        return p.to_string();
+    }
     Path::new(work_dir).join(p).to_string_lossy().to_string()
 }
 
 /// Directories never descended into by the grep/glob walkers — same spirit as
 /// the index's SKIP_DIRS, kept local so these tools don't depend on the index.
 const SEARCH_SKIP_DIRS: &[&str] = &[
-    ".git", "node_modules", "target", "dist", ".next", "vendor", "__pycache__",
-    ".venv", "venv", "build", ".cache", ".marlin",
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    ".next",
+    "vendor",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "build",
+    ".cache",
+    ".marlin",
 ];
 
 /// Directories that are always skipped by the grep walker regardless of name
@@ -1106,7 +1312,9 @@ fn is_skipped_dir(name: &str) -> bool {
 /// `count` tracks how many entries were visited (for a rough "files searched"
 /// figure). Skips binary files and junk directories.
 fn collect_grep_files(dir: &Path, files: &mut Vec<PathBuf>, count: &mut usize) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
@@ -1117,7 +1325,9 @@ fn collect_grep_files(dir: &Path, files: &mut Vec<PathBuf>, count: &mut usize) {
             continue;
         }
         *count += 1;
-        if is_binary_path(&path) { continue; }
+        if is_binary_path(&path) {
+            continue;
+        }
         files.push(path);
     }
 }
@@ -1125,9 +1335,9 @@ fn collect_grep_files(dir: &Path, files: &mut Vec<PathBuf>, count: &mut usize) {
 /// Heuristic binary detection by extension — cheap and good enough for grep.
 fn is_binary_path(path: &Path) -> bool {
     const BINARY_EXTS: &[&str] = &[
-        "exe", "dll", "so", "dylib", "png", "jpg", "jpeg", "gif", "webp", "ico",
-        "pdf", "zip", "tar", "gz", "wasm", "bin", "lock", "woff", "woff2", "ttf",
-        "otf", "mp3", "mp4", "mov", "avi", "class", "pyc", "o", "a", "rlib",
+        "exe", "dll", "so", "dylib", "png", "jpg", "jpeg", "gif", "webp", "ico", "pdf", "zip",
+        "tar", "gz", "wasm", "bin", "lock", "woff", "woff2", "ttf", "otf", "mp3", "mp4", "mov",
+        "avi", "class", "pyc", "o", "a", "rlib",
     ];
     path.extension()
         .and_then(|e| e.to_str())
@@ -1137,11 +1347,23 @@ fn is_binary_path(path: &Path) -> bool {
 
 /// Recursively walk `dir`, collecting paths (relative to `work_dir`) that match
 /// `pat`. Stops once `results` reaches `limit`. Skips junk directories.
-fn collect_glob_matches(dir: &Path, pat: &glob::Pattern, work_dir: &str, results: &mut Vec<String>, limit: usize) {
-    if results.len() >= limit { return; }
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+fn collect_glob_matches(
+    dir: &Path,
+    pat: &glob::Pattern,
+    work_dir: &str,
+    results: &mut Vec<String>,
+    limit: usize,
+) {
+    if results.len() >= limit {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
-        if results.len() >= limit { return; }
+        if results.len() >= limit {
+            return;
+        }
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
         if path.is_dir() {
@@ -1150,7 +1372,11 @@ fn collect_glob_matches(dir: &Path, pat: &glob::Pattern, work_dir: &str, results
             }
             continue;
         }
-        let rel = path.strip_prefix(work_dir).unwrap_or(&path).to_string_lossy().to_string();
+        let rel = path
+            .strip_prefix(work_dir)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .to_string();
         if pat.matches(&rel) {
             results.push(rel);
         }
@@ -1171,16 +1397,21 @@ mod notebook_edit_tests {
             "metadata": {},
             "nbformat": 4,
             "nbformat_minor": 5,
-        }).to_string()
+        })
+        .to_string()
     }
 
     fn cells(json: &str) -> Vec<serde_json::Value> {
-        serde_json::from_str::<serde_json::Value>(json).unwrap()["cells"].as_array().unwrap().clone()
+        serde_json::from_str::<serde_json::Value>(json).unwrap()["cells"]
+            .as_array()
+            .unwrap()
+            .clone()
     }
 
     #[test]
     fn replace_updates_source_and_clears_stale_execution_state() {
-        let (msg, out) = build_notebook_edit(&sample_notebook(), "b2", "", "replace", "print(3)\n").unwrap();
+        let (msg, out) =
+            build_notebook_edit(&sample_notebook(), "b2", "", "replace", "print(3)\n").unwrap();
         assert!(msg.contains("replaced cell b2"));
         let cs = cells(&out);
         assert_eq!(cs[1]["source"], serde_json::json!(["print(3)\n"]));
@@ -1190,7 +1421,8 @@ mod notebook_edit_tests {
 
     #[test]
     fn replace_can_change_cell_type_and_drops_code_only_fields() {
-        let (_, out) = build_notebook_edit(&sample_notebook(), "b2", "markdown", "replace", "notes").unwrap();
+        let (_, out) =
+            build_notebook_edit(&sample_notebook(), "b2", "markdown", "replace", "notes").unwrap();
         let cs = cells(&out);
         assert_eq!(cs[1]["cell_type"], "markdown");
         assert!(cs[1].get("execution_count").is_none());
@@ -1215,7 +1447,8 @@ mod notebook_edit_tests {
 
     #[test]
     fn insert_after_given_cell_id() {
-        let (msg, out) = build_notebook_edit(&sample_notebook(), "a1", "code", "insert", "print(0)").unwrap();
+        let (msg, out) =
+            build_notebook_edit(&sample_notebook(), "a1", "code", "insert", "print(0)").unwrap();
         assert!(msg.contains("inserted code cell"));
         let cs = cells(&out);
         assert_eq!(cs.len(), 3);
@@ -1226,7 +1459,8 @@ mod notebook_edit_tests {
 
     #[test]
     fn insert_without_cell_id_goes_to_the_start() {
-        let (_, out) = build_notebook_edit(&sample_notebook(), "", "markdown", "insert", "intro").unwrap();
+        let (_, out) =
+            build_notebook_edit(&sample_notebook(), "", "markdown", "insert", "intro").unwrap();
         let cs = cells(&out);
         assert_eq!(cs.len(), 3);
         assert_eq!(cs[0]["cell_type"], "markdown");
@@ -1265,7 +1499,8 @@ mod notebook_edit_tests {
                 {"cell_type": "code", "metadata": {}, "source": ["a = 1"]},
                 {"cell_type": "code", "metadata": {}, "source": ["b = 2"]},
             ],
-        }).to_string();
+        })
+        .to_string();
         let (_, out) = build_notebook_edit(&nb, "1", "", "replace", "b = 3").unwrap();
         let cs = cells(&out);
         assert_eq!(cs[1]["source"], serde_json::json!(["b = 3"]));
@@ -1293,7 +1528,11 @@ mod grep_glob_tests {
     fn setup_dir() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("marlin_grep_glob_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join("src")).unwrap();
-        std::fs::write(dir.join("src/main.rs"), "fn main() {\n    println!(\"hello world\");\n}\n").unwrap();
+        std::fs::write(
+            dir.join("src/main.rs"),
+            "fn main() {\n    println!(\"hello world\");\n}\n",
+        )
+        .unwrap();
         std::fs::write(dir.join("src/lib.rs"), "pub fn helper() -> u32 { 42 }\n").unwrap();
         std::fs::write(dir.join("README.md"), "# Project\nhello there\n").unwrap();
         std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
@@ -1308,10 +1547,32 @@ mod grep_glob_tests {
     fn grep_finds_matching_lines_with_line_numbers() {
         let dir = setup_dir();
         let input = serde_json::json!({"pattern": "hello"}).to_string();
-        let res = execute("grep", &input, dir.to_str().unwrap(), &allow_all(), None, None, None, None, None, false, AstMode::Off, &SandboxMode::Off, &[]);
+        let res = execute(
+            "grep",
+            &input,
+            dir.to_str().unwrap(),
+            &allow_all(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            AstMode::Off,
+            &SandboxMode::Off,
+            &[],
+        );
         assert!(!res.is_error, "grep failed: {}", res.output);
-        assert!(res.output.contains("main.rs:2"), "missing main.rs:2 in: {}", res.output);
-        assert!(res.output.contains("README.md:2"), "missing README.md:2 in: {}", res.output);
+        assert!(
+            res.output.contains("main.rs:2"),
+            "missing main.rs:2 in: {}",
+            res.output
+        );
+        assert!(
+            res.output.contains("README.md:2"),
+            "missing README.md:2 in: {}",
+            res.output
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1319,10 +1580,28 @@ mod grep_glob_tests {
     fn grep_respects_glob_filter() {
         let dir = setup_dir();
         let input = serde_json::json!({"pattern": "hello", "glob": "*.rs"}).to_string();
-        let res = execute("grep", &input, dir.to_str().unwrap(), &allow_all(), None, None, None, None, None, false, AstMode::Off, &SandboxMode::Off, &[]);
+        let res = execute(
+            "grep",
+            &input,
+            dir.to_str().unwrap(),
+            &allow_all(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            AstMode::Off,
+            &SandboxMode::Off,
+            &[],
+        );
         assert!(!res.is_error);
         assert!(res.output.contains("main.rs:2"));
-        assert!(!res.output.contains("README.md"), "glob filter should exclude README.md: {}", res.output);
+        assert!(
+            !res.output.contains("README.md"),
+            "glob filter should exclude README.md: {}",
+            res.output
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1330,7 +1609,21 @@ mod grep_glob_tests {
     fn grep_no_match_returns_empty_message() {
         let dir = setup_dir();
         let input = serde_json::json!({"pattern": "zzz_nothing_here"}).to_string();
-        let res = execute("grep", &input, dir.to_str().unwrap(), &allow_all(), None, None, None, None, None, false, AstMode::Off, &SandboxMode::Off, &[]);
+        let res = execute(
+            "grep",
+            &input,
+            dir.to_str().unwrap(),
+            &allow_all(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            AstMode::Off,
+            &SandboxMode::Off,
+            &[],
+        );
         assert!(!res.is_error);
         assert!(res.output.contains("No matches"));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1340,7 +1633,21 @@ mod grep_glob_tests {
     fn grep_invalid_regex_errors() {
         let dir = setup_dir();
         let input = serde_json::json!({"pattern": "("}).to_string();
-        let res = execute("grep", &input, dir.to_str().unwrap(), &allow_all(), None, None, None, None, None, false, AstMode::Off, &SandboxMode::Off, &[]);
+        let res = execute(
+            "grep",
+            &input,
+            dir.to_str().unwrap(),
+            &allow_all(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            AstMode::Off,
+            &SandboxMode::Off,
+            &[],
+        );
         assert!(res.is_error);
         assert!(res.output.contains("invalid regex"));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1350,10 +1657,32 @@ mod grep_glob_tests {
     fn glob_finds_files_by_pattern() {
         let dir = setup_dir();
         let input = serde_json::json!({"pattern": "**/*.rs"}).to_string();
-        let res = execute("glob", &input, dir.to_str().unwrap(), &allow_all(), None, None, None, None, None, false, AstMode::Off, &SandboxMode::Off, &[]);
+        let res = execute(
+            "glob",
+            &input,
+            dir.to_str().unwrap(),
+            &allow_all(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            AstMode::Off,
+            &SandboxMode::Off,
+            &[],
+        );
         assert!(!res.is_error, "glob failed: {}", res.output);
-        assert!(res.output.contains("src/main.rs"), "missing src/main.rs in: {}", res.output);
-        assert!(res.output.contains("src/lib.rs"), "missing src/lib.rs in: {}", res.output);
+        assert!(
+            res.output.contains("src/main.rs"),
+            "missing src/main.rs in: {}",
+            res.output
+        );
+        assert!(
+            res.output.contains("src/lib.rs"),
+            "missing src/lib.rs in: {}",
+            res.output
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1361,7 +1690,21 @@ mod grep_glob_tests {
     fn glob_no_match_returns_empty_message() {
         let dir = setup_dir();
         let input = serde_json::json!({"pattern": "**/*.py"}).to_string();
-        let res = execute("glob", &input, dir.to_str().unwrap(), &allow_all(), None, None, None, None, None, false, AstMode::Off, &SandboxMode::Off, &[]);
+        let res = execute(
+            "glob",
+            &input,
+            dir.to_str().unwrap(),
+            &allow_all(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            AstMode::Off,
+            &SandboxMode::Off,
+            &[],
+        );
         assert!(!res.is_error);
         assert!(res.output.contains("No files match"));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1372,9 +1715,134 @@ mod grep_glob_tests {
         let dir = setup_dir();
         // A command that sleeps longer than the 1s timeout.
         let input = serde_json::json!({"command": "sleep 5", "timeout": "1"}).to_string();
-        let res = execute("run_command", &input, dir.to_str().unwrap(), &allow_all(), None, None, None, None, None, false, AstMode::Off, &SandboxMode::Off, &[]);
+        let res = execute(
+            "run_command",
+            &input,
+            dir.to_str().unwrap(),
+            &allow_all(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            AstMode::Off,
+            &SandboxMode::Off,
+            &[],
+        );
         assert!(res.is_error, "expected timeout error, got: {}", res.output);
-        assert!(res.output.contains("timed out"), "missing 'timed out' in: {}", res.output);
+        assert!(
+            res.output.contains("timed out"),
+            "missing 'timed out' in: {}",
+            res.output
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn multi_edit_applies_all_edits_in_order() {
+        let dir = setup_dir();
+        let input = serde_json::json!({
+            "path": "src/main.rs",
+            "edits": [
+                {"old_string": "fn main()", "new_string": "fn entry()"},
+                {"old_string": "hello world", "new_string": "goodbye world"}
+            ]
+        })
+        .to_string();
+        let res = execute(
+            "multi_edit",
+            &input,
+            dir.to_str().unwrap(),
+            &allow_all(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            AstMode::Off,
+            &SandboxMode::Off,
+            &[],
+        );
+        assert!(!res.is_error, "unexpected error: {}", res.output);
+        assert!(
+            res.output.contains("2 edit(s)"),
+            "missing count in: {}",
+            res.output
+        );
+        let content = std::fs::read_to_string(dir.join("src/main.rs")).unwrap();
+        assert!(content.contains("fn entry()"), "content: {content}");
+        assert!(content.contains("goodbye world"), "content: {content}");
+        assert!(!content.contains("fn main()"), "content: {content}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn multi_edit_error_when_old_string_missing() {
+        let dir = setup_dir();
+        let input = serde_json::json!({
+            "path": "src/main.rs",
+            "edits": [
+                {"old_string": "does not exist", "new_string": "x"}
+            ]
+        })
+        .to_string();
+        let res = execute(
+            "multi_edit",
+            &input,
+            dir.to_str().unwrap(),
+            &allow_all(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            AstMode::Off,
+            &SandboxMode::Off,
+            &[],
+        );
+        assert!(res.is_error, "expected error, got: {}", res.output);
+        assert!(
+            res.output.contains("not found"),
+            "missing 'not found' in: {}",
+            res.output
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn multi_edit_rejects_empty_old_string() {
+        let dir = setup_dir();
+        let input = serde_json::json!({
+            "path": "src/main.rs",
+            "edits": [
+                {"old_string": "", "new_string": "x"}
+            ]
+        })
+        .to_string();
+        let res = execute(
+            "multi_edit",
+            &input,
+            dir.to_str().unwrap(),
+            &allow_all(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            AstMode::Off,
+            &SandboxMode::Off,
+            &[],
+        );
+        assert!(res.is_error, "expected error, got: {}", res.output);
+        assert!(
+            res.output.contains("empty old_string"),
+            "missing hint in: {}",
+            res.output
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1382,7 +1850,21 @@ mod grep_glob_tests {
     fn run_command_completes_within_timeout() {
         let dir = setup_dir();
         let input = serde_json::json!({"command": "echo done", "timeout": "5"}).to_string();
-        let res = execute("run_command", &input, dir.to_str().unwrap(), &allow_all(), None, None, None, None, None, false, AstMode::Off, &SandboxMode::Off, &[]);
+        let res = execute(
+            "run_command",
+            &input,
+            dir.to_str().unwrap(),
+            &allow_all(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            AstMode::Off,
+            &SandboxMode::Off,
+            &[],
+        );
         assert!(!res.is_error, "expected success, got: {}", res.output);
         assert!(res.output.contains("done"));
         std::fs::remove_dir_all(&dir).unwrap();

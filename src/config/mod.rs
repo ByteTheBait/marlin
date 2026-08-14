@@ -304,7 +304,9 @@ impl Config {
     /// Record a model designation as used with `provider` so it resurfaces in
     /// the /config menu's model list after switching away and back.
     pub fn remember_model(&mut self, provider: &str, model: &str) {
-        if model.is_empty() { return; }
+        if model.is_empty() {
+            return;
+        }
         let entry = self.providers.entry(provider.to_string()).or_default();
         entry.extra_models.retain(|m| m != model);
         entry.extra_models.insert(0, model.to_string());
@@ -318,48 +320,69 @@ impl Config {
             .to_string();
 
         let mut providers = HashMap::new();
-        providers.insert("claude".into(), ProviderConfig {
-            api_key: String::new(),
-            endpoint: String::new(),
-            model: "claude-sonnet-5".into(),
-            extra_models: vec![],
-        });
-        providers.insert("ollama".into(), ProviderConfig {
-            api_key: String::new(),
-            endpoint: "http://localhost:11434".into(),
-            model: "llama3".into(),
-            extra_models: vec![],
-        });
-        providers.insert("fireworks".into(), ProviderConfig {
-            api_key: String::new(),
-            endpoint: "https://api.fireworks.ai/inference/v1".into(),
-            model: "accounts/fireworks/models/llama-v3-70b-instruct".into(),
-            extra_models: vec![],
-        });
-        providers.insert("moonshot".into(), ProviderConfig {
-            api_key: String::new(),
-            endpoint: "https://api.moonshot.cn/v1".into(),
-            model: "moonshot-v1-8k".into(),
-            extra_models: vec![],
-        });
-        providers.insert("groq".into(), ProviderConfig {
-            api_key: String::new(),
-            endpoint: "https://api.groq.com/openai/v1".into(),
-            model: "llama-3.3-70b-versatile".into(),
-            extra_models: vec![],
-        });
-        providers.insert("openrouter".into(), ProviderConfig {
-            api_key: String::new(),
-            endpoint: "https://openrouter.ai/api/v1".into(),
-            model: "anthropic/claude-sonnet-5".into(),
-            extra_models: vec![],
-        });
-        providers.insert("custom".into(), ProviderConfig {
-            api_key: String::new(),
-            endpoint: "http://localhost:8080/v1".into(),
-            model: "default".into(),
-            extra_models: vec![],
-        });
+        providers.insert(
+            "claude".into(),
+            ProviderConfig {
+                api_key: String::new(),
+                endpoint: String::new(),
+                model: "claude-sonnet-5".into(),
+                extra_models: vec![],
+            },
+        );
+        providers.insert(
+            "ollama".into(),
+            ProviderConfig {
+                api_key: String::new(),
+                endpoint: "http://localhost:11434".into(),
+                model: "llama3".into(),
+                extra_models: vec![],
+            },
+        );
+        providers.insert(
+            "fireworks".into(),
+            ProviderConfig {
+                api_key: String::new(),
+                endpoint: "https://api.fireworks.ai/inference/v1".into(),
+                model: "accounts/fireworks/models/llama-v3-70b-instruct".into(),
+                extra_models: vec![],
+            },
+        );
+        providers.insert(
+            "moonshot".into(),
+            ProviderConfig {
+                api_key: String::new(),
+                endpoint: "https://api.moonshot.cn/v1".into(),
+                model: "moonshot-v1-8k".into(),
+                extra_models: vec![],
+            },
+        );
+        providers.insert(
+            "groq".into(),
+            ProviderConfig {
+                api_key: String::new(),
+                endpoint: "https://api.groq.com/openai/v1".into(),
+                model: "llama-3.3-70b-versatile".into(),
+                extra_models: vec![],
+            },
+        );
+        providers.insert(
+            "openrouter".into(),
+            ProviderConfig {
+                api_key: String::new(),
+                endpoint: "https://openrouter.ai/api/v1".into(),
+                model: "anthropic/claude-sonnet-5".into(),
+                extra_models: vec![],
+            },
+        );
+        providers.insert(
+            "custom".into(),
+            ProviderConfig {
+                api_key: String::new(),
+                endpoint: "http://localhost:8080/v1".into(),
+                model: "default".into(),
+                extra_models: vec![],
+            },
+        );
 
         Self {
             active_provider: "claude".into(),
@@ -456,7 +479,9 @@ pub struct ThemePalette {
 
 pub fn load_theme(marlin_dir: &Path) -> ThemePalette {
     let path = marlin_dir.join("theme.toml");
-    if !path.exists() { return ThemePalette::default(); }
+    if !path.exists() {
+        return ThemePalette::default();
+    }
     std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| toml::from_str::<ThemePalette>(&s).ok())
@@ -486,18 +511,26 @@ pub fn themes_dir(marlin_dir: &Path) -> PathBuf {
 /// Load a named theme from `~/.marlin/themes/<name>.toml`, returning its palette.
 pub fn load_named_theme(marlin_dir: &Path, name: &str) -> Option<ThemePalette> {
     let path = themes_dir(marlin_dir).join(format!("{name}.toml"));
-    if !path.exists() { return None; }
+    if !path.exists() {
+        return None;
+    }
     std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| toml::from_str::<ThemeFile>(&s).ok())
-        .map(|tf| ThemePalette { dark: tf.dark, light: tf.light })
+        .map(|tf| ThemePalette {
+            dark: tf.dark,
+            light: tf.light,
+        })
 }
 
 /// List all named themes: (name, description).
 pub fn list_themes(marlin_dir: &Path) -> Vec<(String, String)> {
     let dir = themes_dir(marlin_dir);
-    let Ok(entries) = std::fs::read_dir(&dir) else { return vec![] };
-    let mut themes: Vec<(String, String)> = entries.flatten()
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return vec![];
+    };
+    let mut themes: Vec<(String, String)> = entries
+        .flatten()
         .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("toml"))
         .filter_map(|e| {
             let data = std::fs::read_to_string(e.path()).ok()?;
@@ -621,8 +654,12 @@ pub struct LayoutConfig {
     pub min_sidebar_width: u16,
 }
 
-fn default_sidebar_width() -> u16 { 34 }
-fn default_min_sidebar_width() -> u16 { 100 }
+fn default_sidebar_width() -> u16 {
+    34
+}
+fn default_min_sidebar_width() -> u16 {
+    100
+}
 
 impl Default for LayoutConfig {
     fn default() -> Self {

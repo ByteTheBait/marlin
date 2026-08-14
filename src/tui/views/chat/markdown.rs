@@ -15,18 +15,105 @@ use crate::tui::styles::*;
 
 /// Rust-style keywords (also common in most C-family languages).
 const KEYWORDS: &[&str] = &[
-    "fn", "let", "mut", "const", "static", "impl", "trait", "struct", "enum", "match",
-    "if", "else", "for", "while", "loop", "return", "break", "continue", "use", "mod",
-    "pub", "crate", "async", "await", "move", "ref", "type", "where", "in", "self", "Self",
-    "true", "false", "null", "None", "Some", "Ok", "Err", "new", "default",
+    "fn",
+    "let",
+    "mut",
+    "const",
+    "static",
+    "impl",
+    "trait",
+    "struct",
+    "enum",
+    "match",
+    "if",
+    "else",
+    "for",
+    "while",
+    "loop",
+    "return",
+    "break",
+    "continue",
+    "use",
+    "mod",
+    "pub",
+    "crate",
+    "async",
+    "await",
+    "move",
+    "ref",
+    "type",
+    "where",
+    "in",
+    "self",
+    "Self",
+    "true",
+    "false",
+    "null",
+    "None",
+    "Some",
+    "Ok",
+    "Err",
+    "new",
+    "default",
     // Shell / scripting
-    "echo", "export", "source", "function", "then", "fi", "elif", "case", "esac", "done",
+    "echo",
+    "export",
+    "source",
+    "function",
+    "then",
+    "fi",
+    "elif",
+    "case",
+    "esac",
+    "done",
     // Common
-    "import", "from", "as", "class", "def", "lambda", "return", "yield", "with",
-    "global", "nonlocal", "assert", "raise", "except", "try", "finally", "del",
-    "and", "or", "not", "is", "in", "package", "var", "func", "go", "defer", "select",
-    "interface", "package", "switch", "case", "default", "printf", "cd", "ls", "cat",
-    "mkdir", "grep", "sed", "awk", "touch", "rm", "cp", "mv", "curl", "wget",
+    "import",
+    "from",
+    "as",
+    "class",
+    "def",
+    "lambda",
+    "return",
+    "yield",
+    "with",
+    "global",
+    "nonlocal",
+    "assert",
+    "raise",
+    "except",
+    "try",
+    "finally",
+    "del",
+    "and",
+    "or",
+    "not",
+    "is",
+    "in",
+    "package",
+    "var",
+    "func",
+    "go",
+    "defer",
+    "select",
+    "interface",
+    "package",
+    "switch",
+    "case",
+    "default",
+    "printf",
+    "cd",
+    "ls",
+    "cat",
+    "mkdir",
+    "grep",
+    "sed",
+    "awk",
+    "touch",
+    "rm",
+    "cp",
+    "mv",
+    "curl",
+    "wget",
 ];
 
 /// Characters that end an identifier token.
@@ -114,7 +201,8 @@ fn highlight_code_line(line: &str) -> Vec<(String, Style)> {
             // Function call: ident followed by '(' — highlight blue
             let is_func_call = end < chars.len() && chars[end] == '(';
             // Type-like: identifier starting uppercase in non-keyword position
-            let is_type = !is_func_call && word.chars().next().map_or(false, |c| c.is_uppercase())
+            let is_type = !is_func_call
+                && word.chars().next().map_or(false, |c| c.is_uppercase())
                 && !KEYWORDS.contains(&word.as_str());
 
             if KEYWORDS.contains(&word.as_str()) {
@@ -130,7 +218,10 @@ fn highlight_code_line(line: &str) -> Vec<(String, Style)> {
 
         // Single character (operator, punctuation, whitespace)
         let s = c.to_string();
-        if matches!(c, '=' | '+' | '-' | '*' | '/' | '<' | '>' | '!' | '&' | '|' | '^' | '%' | '?' | ':' | ';') {
+        if matches!(
+            c,
+            '=' | '+' | '-' | '*' | '/' | '<' | '>' | '!' | '&' | '|' | '^' | '%' | '?' | ':' | ';'
+        ) {
             spans.push((s, style_syntax_operator()));
         } else {
             spans.push((s, style_syntax_default()));
@@ -163,7 +254,9 @@ pub(super) fn word_wrap(text: &str, max_width: usize) -> Vec<String> {
                 let mut chars = word.chars();
                 loop {
                     let chunk: String = chars.by_ref().take(max_width).collect();
-                    if chunk.is_empty() { break; }
+                    if chunk.is_empty() {
+                        break;
+                    }
                     if chunk.chars().count() < max_width {
                         line = chunk;
                         break;
@@ -182,7 +275,9 @@ pub(super) fn word_wrap(text: &str, max_width: usize) -> Vec<String> {
                 let mut chars = word.chars();
                 loop {
                     let chunk: String = chars.by_ref().take(max_width).collect();
-                    if chunk.is_empty() { break; }
+                    if chunk.is_empty() {
+                        break;
+                    }
                     if chunk.chars().count() < max_width {
                         line = chunk;
                         break;
@@ -282,7 +377,10 @@ fn render_markdown_body(text: &str, width: usize) -> Vec<Line<'static>> {
         if raw_line.starts_with("```") {
             in_code_block = !in_code_block;
             if in_code_block {
-                lines.push(Line::from(Span::styled(raw_line.to_string(), style_system())));
+                lines.push(Line::from(Span::styled(
+                    raw_line.to_string(),
+                    style_system(),
+                )));
             } else {
                 lines.push(Line::from(Span::styled("```".to_string(), style_system())));
             }
@@ -293,7 +391,8 @@ fn render_markdown_body(text: &str, width: usize) -> Vec<Line<'static>> {
             // exceeds the viewport width.
             let highlighted = highlight_code_line(raw_line);
             if width == 0 || raw_line.chars().count() <= width {
-                let spans: Vec<Span> = highlighted.into_iter()
+                let spans: Vec<Span> = highlighted
+                    .into_iter()
                     .map(|(text, style)| Span::styled(text, style))
                     .collect();
                 lines.push(Line::from(spans));
@@ -303,7 +402,8 @@ fn render_markdown_body(text: &str, width: usize) -> Vec<Line<'static>> {
                 let chars: Vec<char> = raw_line.chars().collect();
                 for chunk in chars.chunks(width.max(1)) {
                     let chunk_str: String = chunk.iter().collect();
-                    let spans: Vec<Span> = highlight_code_line(&chunk_str).into_iter()
+                    let spans: Vec<Span> = highlight_code_line(&chunk_str)
+                        .into_iter()
                         .map(|(text, style)| Span::styled(text, style))
                         .collect();
                     lines.push(Line::from(spans));
@@ -315,7 +415,9 @@ fn render_markdown_body(text: &str, width: usize) -> Vec<Line<'static>> {
             for wrapped in word_wrap(rest, width) {
                 lines.push(Line::from(Span::styled(
                     wrapped,
-                    Style::default().fg(col_user()).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                    Style::default()
+                        .fg(col_user())
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
                 )));
             }
             continue;
@@ -333,7 +435,9 @@ fn render_markdown_body(text: &str, width: usize) -> Vec<Line<'static>> {
             for wrapped in word_wrap(rest, width) {
                 lines.push(Line::from(Span::styled(
                     wrapped,
-                    Style::default().fg(col_steel()).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(col_steel())
+                        .add_modifier(Modifier::BOLD),
                 )));
             }
             continue;
@@ -370,7 +474,11 @@ fn find_single_star(s: &str) -> Option<usize> {
     None
 }
 
-enum Marker { Code, Bold, Italic }
+enum Marker {
+    Code,
+    Bold,
+    Italic,
+}
 
 fn parse_inline(line: &str) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -448,8 +556,14 @@ mod tests {
     use super::*;
 
     fn plain(lines: &[Line<'static>]) -> String {
-        lines.iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }

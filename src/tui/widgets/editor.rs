@@ -125,7 +125,12 @@ impl EditorPane {
         let modal_h = area.height.saturating_sub(2).clamp(6, area.height.max(6));
         let x = area.x + (area.width.saturating_sub(modal_w)) / 2;
         let y = area.y + (area.height.saturating_sub(modal_h)) / 2;
-        let modal = Rect { x, y, width: modal_w, height: modal_h };
+        let modal = Rect {
+            x,
+            y,
+            width: modal_w,
+            height: modal_h,
+        };
 
         Clear.render(modal, buf);
 
@@ -143,7 +148,10 @@ impl EditorPane {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(if dirty { col_amber() } else { col_cobalt() }))
-            .title(Span::styled(title, Style::default().fg(col_aqua()).add_modifier(Modifier::BOLD)))
+            .title(Span::styled(
+                title,
+                Style::default().fg(col_aqua()).add_modifier(Modifier::BOLD),
+            ))
             .title_bottom(Line::from(Span::styled(hint, style_placeholder())).right_aligned());
         let inner = block.inner(modal);
         block.render(modal, buf);
@@ -164,7 +172,12 @@ impl EditorPane {
         let text_x = inner.x + gutter_w as u16 + 1;
         let text_w = inner.width.saturating_sub(gutter_w as u16 + 1) as usize;
 
-        for (row_i, line) in lines.iter().enumerate().skip(self.scroll_row).take(inner.height as usize) {
+        for (row_i, line) in lines
+            .iter()
+            .enumerate()
+            .skip(self.scroll_row)
+            .take(inner.height as usize)
+        {
             let row_y = inner.y + (row_i - self.scroll_row) as u16;
 
             let gutter = format!("{:>gutter_w$} ", row_i + 1);

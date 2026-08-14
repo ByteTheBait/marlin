@@ -29,7 +29,12 @@ pub struct DiffPane {
 
 impl DiffPane {
     pub fn new(path: String, lines: Vec<DiffLine>) -> Self {
-        Self { path, lines, scroll: 0, viewport_height: 20 }
+        Self {
+            path,
+            lines,
+            scroll: 0,
+            viewport_height: 20,
+        }
     }
 
     fn max_scroll(&self) -> usize {
@@ -58,12 +63,25 @@ impl DiffPane {
         let modal_h = area.height.saturating_sub(2).clamp(6, area.height.max(6));
         let x = area.x + (area.width.saturating_sub(modal_w)) / 2;
         let y = area.y + (area.height.saturating_sub(modal_h)) / 2;
-        let modal = Rect { x, y, width: modal_w, height: modal_h };
+        let modal = Rect {
+            x,
+            y,
+            width: modal_w,
+            height: modal_h,
+        };
 
         Clear.render(modal, buf);
 
-        let added = self.lines.iter().filter(|l| matches!(l, DiffLine::Added(_))).count();
-        let removed = self.lines.iter().filter(|l| matches!(l, DiffLine::Removed(_))).count();
+        let added = self
+            .lines
+            .iter()
+            .filter(|l| matches!(l, DiffLine::Added(_)))
+            .count();
+        let removed = self
+            .lines
+            .iter()
+            .filter(|l| matches!(l, DiffLine::Removed(_)))
+            .count();
         let hint = format!(" +{added} -{removed} — ↑/↓ PgUp/PgDn scroll, Esc/q close ");
 
         let block = Block::default()
@@ -81,7 +99,9 @@ impl DiffPane {
         self.viewport_height = inner.height as usize;
         self.scroll = self.scroll.min(self.max_scroll());
 
-        let visible: Vec<Line> = self.lines.iter()
+        let visible: Vec<Line> = self
+            .lines
+            .iter()
             .skip(self.scroll)
             .take(inner.height as usize)
             .map(|l| match l {
@@ -114,7 +134,9 @@ mod tests {
     }
 
     fn pane_with_lines(n: usize, viewport_height: usize) -> DiffPane {
-        let lines = (1..=n).map(|i| DiffLine::Context(format!("line {i}"))).collect();
+        let lines = (1..=n)
+            .map(|i| DiffLine::Context(format!("line {i}")))
+            .collect();
         let mut p = DiffPane::new("test.txt".into(), lines);
         p.viewport_height = viewport_height;
         p
@@ -124,7 +146,10 @@ mod tests {
     fn esc_and_q_close() {
         let mut p = pane_with_lines(10, 5);
         assert!(matches!(p.on_key(key(KeyCode::Esc)), DiffOutcome::Close));
-        assert!(matches!(p.on_key(key(KeyCode::Char('q'))), DiffOutcome::Close));
+        assert!(matches!(
+            p.on_key(key(KeyCode::Char('q'))),
+            DiffOutcome::Close
+        ));
     }
 
     #[test]

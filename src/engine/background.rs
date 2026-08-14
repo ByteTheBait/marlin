@@ -58,7 +58,9 @@ pub struct BgStatus {
 
 impl BackgroundRegistry {
     pub fn new() -> Self {
-        Self { processes: Mutex::new(HashMap::new()) }
+        Self {
+            processes: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Launch `cmd` via `sh -c` in `work_dir`. Returns the new process id.
@@ -81,14 +83,18 @@ impl BackgroundRegistry {
             unsafe {
                 command.pre_exec(|| {
                     // setpgid(0, 0) moves this child into its own process group.
-                    extern "C" { fn setpgid(pid: i32, pgid: i32) -> i32; }
+                    extern "C" {
+                        fn setpgid(pid: i32, pgid: i32) -> i32;
+                    }
                     setpgid(0, 0);
                     Ok(())
                 });
             }
         }
 
-        let child = command.spawn().map_err(|e| format!("failed to start: {e}"))?;
+        let child = command
+            .spawn()
+            .map_err(|e| format!("failed to start: {e}"))?;
 
         // Read any immediate pipe data non-blocking-ish so the child can't fill
         // its pipe and block. We drain in poll(), but we need the handles.
@@ -155,7 +161,10 @@ impl BackgroundRegistry {
         let now = SystemTime::now();
         guard.retain(|id, p| {
             p.exit_code.is_none()
-                || now.duration_since(p.started_at).map(|d| d.as_secs() < 600).unwrap_or(true)
+                || now
+                    .duration_since(p.started_at)
+                    .map(|d| d.as_secs() < 600)
+                    .unwrap_or(true)
                 || finished.contains(id)
         });
     }
@@ -163,7 +172,9 @@ impl BackgroundRegistry {
     /// Number of currently-running background processes.
     pub fn running_count(&self) -> usize {
         self.poll();
-        self.processes.lock().unwrap()
+        self.processes
+            .lock()
+            .unwrap()
             .values()
             .filter(|p| p.exit_code.is_none())
             .count()
@@ -173,14 +184,17 @@ impl BackgroundRegistry {
     pub fn status(&self, id: &str) -> Vec<BgStatus> {
         self.poll();
         let guard = self.processes.lock().unwrap();
-        guard.iter()
+        guard
+            .iter()
             .filter(|(k, _)| id.is_empty() || *k == id)
             .map(|(_, p)| BgStatus {
                 id: p.id.clone(),
                 running: p.exit_code.is_none(),
                 exit_code: p.exit_code.flatten(),
-                elapsed_secs: SystemTime::now().duration_since(p.started_at)
-                    .map(|d| d.as_secs()).unwrap_or(0),
+                elapsed_secs: SystemTime::now()
+                    .duration_since(p.started_at)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
                 stdout_len: p.stdout_buf.len(),
                 stderr_len: p.stderr_buf.len(),
                 cmd: p.cmd.clone(),
@@ -192,10 +206,13 @@ impl BackgroundRegistry {
     pub fn log(&self, id: &str) -> Result<(String, String), String> {
         self.poll();
         let mut guard = self.processes.lock().unwrap();
-        let proc = guard.get_mut(id)
+        let proc = guard
+            .get_mut(id)
             .ok_or_else(|| format!("no background process with id '{id}'"))?;
-        let new_stdout = String::from_utf8_lossy(&proc.stdout_buf[proc.stdout_consumed..]).into_owned();
-        let new_stderr = String::from_utf8_lossy(&proc.stderr_buf[proc.stderr_consumed..]).into_owned();
+        let new_stdout =
+            String::from_utf8_lossy(&proc.stdout_buf[proc.stdout_consumed..]).into_owned();
+        let new_stderr =
+            String::from_utf8_lossy(&proc.stderr_buf[proc.stderr_consumed..]).into_owned();
         proc.stdout_consumed = proc.stdout_buf.len();
         proc.stderr_consumed = proc.stderr_buf.len();
         Ok((new_stdout, new_stderr))
@@ -205,7 +222,8 @@ impl BackgroundRegistry {
     pub fn kill(&self, id: &str) -> Result<String, String> {
         self.poll();
         let mut guard = self.processes.lock().unwrap();
-        let proc = guard.get_mut(id)
+        let proc = guard
+            .get_mut(id)
             .ok_or_else(|| format!("no background process with id '{id}'"))?;
         if proc.exit_code.is_some() {
             return Ok(format!("process {id} already exited"));
@@ -225,21 +243,40 @@ impl BackgroundRegistry {
 /// Send SIGTERM to a pid via the platform `kill` utility (std-only, no FFI).
 #[cfg(unix)]
 fn kill_by_pid(pid: u32) -> std::io::Result<()> {
-    let status = Command::new("kill").arg("-TERM").arg(pid.to_string()).status()?;
-    if status.success() { Ok(()) } else { Err(std::io::Error::other("kill -TERM failed")) }
+    let status = Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("kill -TERM failed"))
+    }
 }
 
 /// Send SIGKILL to a pid via the platform `kill` utility.
 #[cfg(unix)]
 fn kill_by_pid_force(pid: u32) -> std::io::Result<()> {
-    let status = Command::new("kill").arg("-KILL").arg(pid.to_string()).status()?;
-    if status.success() { Ok(()) } else { Err(std::io::Error::other("kill -KILL failed")) }
+    let status = Command::new("kill")
+        .arg("-KILL")
+        .arg(pid.to_string())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("kill -KILL failed"))
+    }
 }
 
 #[cfg(not(unix))]
 fn kill_by_pid(pid: u32) -> std::io::Result<()> {
     // Windows: kill via taskkill.
-    let _ = Command::new("taskkill").arg("/PID").arg(pid.to_string()).arg("/T").arg("/F").status();
+    let _ = Command::new("taskkill")
+        .arg("/PID")
+        .arg(pid.to_string())
+        .arg("/T")
+        .arg("/F")
+        .status();
     Ok(())
 }
 #[cfg(not(unix))]
@@ -259,7 +296,11 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
 
         // A command that prints then sleeps — we can poll while it's alive.
-        let id = reg.start("echo hello-bg && sleep 0.2 && echo world-bg", tmp.to_str().unwrap())
+        let id = reg
+            .start(
+                "echo hello-bg && sleep 0.2 && echo world-bg",
+                tmp.to_str().unwrap(),
+            )
             .expect("bg start");
 
         // It should be running (or already done by the time we poll, given timing).
@@ -271,8 +312,14 @@ mod tests {
         // Wait for it to finish and drain the full log.
         std::thread::sleep(Duration::from_millis(400));
         let (out, _err) = reg.log(&id).expect("bg log");
-        assert!(out.contains("hello-bg"), "stdout should contain hello-bg, got: {out:?}");
-        assert!(out.contains("world-bg"), "stdout should contain world-bg, got: {out:?}");
+        assert!(
+            out.contains("hello-bg"),
+            "stdout should contain hello-bg, got: {out:?}"
+        );
+        assert!(
+            out.contains("world-bg"),
+            "stdout should contain world-bg, got: {out:?}"
+        );
 
         let statuses = reg.status(&id);
         assert!(!statuses[0].running, "process should have exited");
@@ -287,7 +334,9 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("marlin_bg_kill_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp).unwrap();
 
-        let id = reg.start("sleep 30", tmp.to_str().unwrap()).expect("bg start");
+        let id = reg
+            .start("sleep 30", tmp.to_str().unwrap())
+            .expect("bg start");
         let statuses = reg.status(&id);
         assert!(statuses[0].running, "sleep should be running");
 

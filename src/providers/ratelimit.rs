@@ -65,7 +65,11 @@ pub fn parse_rate_limit_state(headers: &HeaderMap) -> Option<RateLimitState> {
         }
     }
 
-    if found { Some(state) } else { None }
+    if found {
+        Some(state)
+    } else {
+        None
+    }
 }
 
 pub fn retry_after_seconds(headers: &HeaderMap, default_secs: u32) -> u32 {
@@ -87,11 +91,15 @@ pub fn retry_after_seconds(headers: &HeaderMap, default_secs: u32) -> u32 {
     for h in &reset_headers {
         if let Some(v) = headers.get(*h).and_then(|v| v.to_str().ok()) {
             if let Some(s) = parse_wait_seconds(v) {
-                if s > best { best = s; }
+                if s > best {
+                    best = s;
+                }
             }
         }
     }
-    if best > 0 { return best as u32; }
+    if best > 0 {
+        return best as u32;
+    }
 
     default_secs
 }

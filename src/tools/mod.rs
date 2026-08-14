@@ -54,6 +54,19 @@ pub fn all_tools(
             required: vec!["path".into(), "old_string".into(), "new_string".into()],
         },
         ToolDef {
+            name: "multi_edit".into(),
+            description: "Apply several old_string→new_string replacements to one file in a single \
+                call, in order. Each edit runs against the file after the previous edits in the \
+                same call, so later edits can build on earlier ones. Use for a batch of related \
+                edits to one file instead of repeated edit_file calls. An empty old_string is not \
+                allowed (use edit_file for inserts).".into(),
+            properties: vec![
+                ToolProp { name: "path".into(), ty: "string".into(), description: "File path.".into() },
+                ToolProp { name: "edits".into(), ty: "string".into(), description: "JSON array of {old_string, new_string} in apply order, e.g. [{\"old_string\":\"a\",\"new_string\":\"b\"}]".into() },
+            ],
+            required: vec!["path".into(), "edits".into()],
+        },
+        ToolDef {
             name: "notebook_edit".into(),
             description: "Replace, insert, or delete a single cell in a Jupyter notebook (.ipynb file).".into(),
             properties: vec![
@@ -212,8 +225,15 @@ pub fn all_tools(
     // names when nothing matched) — see Engine::skill_tool_list — so this list
     // stays bounded instead of scaling with the number of installed skills.
     if !skills.is_empty() {
-        let skill_list = skills.iter()
-            .map(|(name, desc)| if desc.is_empty() { format!("  - {name}") } else { format!("  - {name}: {desc}") })
+        let skill_list = skills
+            .iter()
+            .map(|(name, desc)| {
+                if desc.is_empty() {
+                    format!("  - {name}")
+                } else {
+                    format!("  - {name}: {desc}")
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let delegation_note = if subagents_enabled {
@@ -266,14 +286,17 @@ pub fn all_tools(
         tools.push(ToolDef {
             name: "ast_get_node".into(),
             description: "Fetch the full JSON structure of a single AST node by its node_id. Use \
-                after ast_skeleton to inspect the body of a specific function, type, or statement.".into(),
+                after ast_skeleton to inspect the body of a specific function, type, or statement."
+                .into(),
             properties: vec![
                 ToolProp {
-                    name: "file".into(), ty: "string".into(),
+                    name: "file".into(),
+                    ty: "string".into(),
                     description: "Path to the .ast.json file.".into(),
                 },
                 ToolProp {
-                    name: "node_id".into(), ty: "string".into(),
+                    name: "node_id".into(),
+                    ty: "string".into(),
                     description: "The node identifier from the skeleton output.".into(),
                 },
             ],
@@ -345,7 +368,11 @@ mod tests {
     use super::*;
 
     fn run_skill_desc(tools: &[ToolDef]) -> &str {
-        &tools.iter().find(|t| t.name == "run_skill").unwrap().description
+        &tools
+            .iter()
+            .find(|t| t.name == "run_skill")
+            .unwrap()
+            .description
     }
 
     #[test]
@@ -359,10 +386,16 @@ mod tests {
         let tools = all_tools(&AstMode::Off, &ten_names, &[], true, &[]);
         let desc = run_skill_desc(&tools);
         for i in 0..10 {
-            assert!(desc.contains(&format!("skill_{i}")), "missing skill_{i} in: {desc}");
+            assert!(
+                desc.contains(&format!("skill_{i}")),
+                "missing skill_{i} in: {desc}"
+            );
         }
         // No description text (colon-separated) should appear for the fallback case.
-        assert!(!desc.contains(':') || desc.matches(':').count() <= 1, "unexpected description text: {desc}");
+        assert!(
+            !desc.contains(':') || desc.matches(':').count() <= 1,
+            "unexpected description text: {desc}"
+        );
     }
 
     #[test]
@@ -370,14 +403,21 @@ mod tests {
         // A large skill count with only a couple of matches (the normal
         // Engine::skill_tool_list path) keeps the description small regardless
         // of how many skills are installed overall.
-        let matched = vec![("relevant_skill".to_string(), "does the relevant thing".to_string())];
+        let matched = vec![(
+            "relevant_skill".to_string(),
+            "does the relevant thing".to_string(),
+        )];
         let tools = all_tools(&AstMode::Off, &matched, &[], true, &[]);
         let desc = run_skill_desc(&tools);
         assert!(desc.contains("relevant_skill: does the relevant thing"));
         // Bounded by the fixed delegation-note overhead, not skill count — a
         // regression here would mean the description started scaling with
         // something other than the (already-narrowed) matched skill list.
-        assert!(desc.len() < 700, "run_skill description unexpectedly large: {} chars", desc.len());
+        assert!(
+            desc.len() < 700,
+            "run_skill description unexpectedly large: {} chars",
+            desc.len()
+        );
     }
 
     #[test]

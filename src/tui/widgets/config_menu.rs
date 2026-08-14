@@ -16,7 +16,10 @@ pub enum ConfigMenuOutcome {
     /// User closed the menu (Esc / q).
     Close,
     /// A setting was cycled to a new value — forward to the engine.
-    Set { key: &'static str, value: String },
+    Set {
+        key: &'static str,
+        value: String,
+    },
 }
 
 /// Whether a row cycles through fixed options with ←/→ or is edited as free
@@ -83,12 +86,20 @@ pub struct ConfigMenu {
     new_provider: Option<NewProviderWizard>,
 }
 
-const MAX_TOKEN_PRESETS: [usize; 10] =
-    [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288];
+const MAX_TOKEN_PRESETS: [usize; 10] = [
+    1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288,
+];
 
 impl ConfigMenu {
     pub fn new(state: ConfigState, animate: bool) -> Self {
-        Self { state, selected: 0, animate, editing: false, edit_buf: String::new(), new_provider: None }
+        Self {
+            state,
+            selected: 0,
+            animate,
+            editing: false,
+            edit_buf: String::new(),
+            new_provider: None,
+        }
     }
 
     /// Replace the snapshot (engine refresh) without losing cursor position.
@@ -177,7 +188,12 @@ impl ConfigMenu {
                 label: "Permissions".into(),
                 kind: FieldKind::Cycle,
                 options: vec!["require".into(), "skip".into()],
-                current: if s.skip_permissions { "skip" } else { "require" }.into(),
+                current: if s.skip_permissions {
+                    "skip"
+                } else {
+                    "require"
+                }
+                .into(),
             },
             MenuItem {
                 key: "clean_env",
@@ -343,10 +359,14 @@ impl ConfigMenu {
                         ConfigMenuOutcome::None
                     }
                     NewProviderField::ApiKey => {
-                        let encoded = format!("{}\n{}\n{}\n{}", wiz.name, wiz.endpoint, wiz.model, value);
+                        let encoded =
+                            format!("{}\n{}\n{}\n{}", wiz.name, wiz.endpoint, wiz.model, value);
                         self.new_provider = None;
                         self.editing = false;
-                        ConfigMenuOutcome::Set { key: "new_provider", value: encoded }
+                        ConfigMenuOutcome::Set {
+                            key: "new_provider",
+                            value: encoded,
+                        }
                     }
                 }
             }
@@ -371,7 +391,11 @@ impl ConfigMenu {
         if n < 2 {
             return ConfigMenuOutcome::None;
         }
-        let idx = item.options.iter().position(|o| *o == item.current).unwrap_or(0) as i32;
+        let idx = item
+            .options
+            .iter()
+            .position(|o| *o == item.current)
+            .unwrap_or(0) as i32;
         let value = item.options[((idx + dir + n) % n) as usize].clone();
         if value == item.current {
             return ConfigMenuOutcome::None;
@@ -421,7 +445,12 @@ impl ConfigMenu {
         let modal_h = (items.len() as u16 + 5).min(area.height);
         let x = area.x + (area.width.saturating_sub(modal_w)) / 2;
         let y = area.y + (area.height.saturating_sub(modal_h)) / 2;
-        let modal = Rect { x, y, width: modal_w, height: modal_h };
+        let modal = Rect {
+            x,
+            y,
+            width: modal_w,
+            height: modal_h,
+        };
 
         Clear.render(modal, buf);
 
@@ -448,19 +477,29 @@ impl ConfigMenu {
                 item.current.clone()
             };
             if value.chars().count() > value_w {
-                let take = if editing_this { value.chars().count() - value_w } else { 0 };
+                let take = if editing_this {
+                    value.chars().count() - value_w
+                } else {
+                    0
+                };
                 value = if editing_this {
                     // While typing, keep the tail (and cursor) in view.
                     value.chars().skip(take).collect()
                 } else {
-                    value.chars().take(value_w.saturating_sub(1)).collect::<String>() + "…"
+                    value
+                        .chars()
+                        .take(value_w.saturating_sub(1))
+                        .collect::<String>()
+                        + "…"
                 };
             }
             let (label_style, arrow_style, value_style) = if editing_this {
                 (
                     Style::default().fg(col_user()).add_modifier(Modifier::BOLD),
                     Style::default().fg(col_aqua()),
-                    Style::default().fg(col_success()).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(col_success())
+                        .add_modifier(Modifier::BOLD),
                 )
             } else if selected {
                 (
@@ -469,7 +508,11 @@ impl ConfigMenu {
                     Style::default().fg(col_aqua()).add_modifier(Modifier::BOLD),
                 )
             } else {
-                (style_system(), style_app_bg(), Style::default().fg(col_steel()))
+                (
+                    style_system(),
+                    style_app_bg(),
+                    Style::default().fg(col_steel()),
+                )
             };
             let (l_arrow, r_arrow) = if editing_this {
                 ("> ", "  ")
@@ -507,7 +550,9 @@ impl ConfigMenu {
             ])
         });
 
-        Paragraph::new(lines).style(style_app_bg()).render(inner, buf);
+        Paragraph::new(lines)
+            .style(style_app_bg())
+            .render(inner, buf);
     }
 }
 
@@ -555,7 +600,11 @@ mod tests {
     fn tool_call_limit_row_is_editable_text() {
         let mut m = menu();
         // Find the "Tool call limit" row.
-        let idx = m.items().iter().position(|i| i.key == "tool_call_limit").unwrap();
+        let idx = m
+            .items()
+            .iter()
+            .position(|i| i.key == "tool_call_limit")
+            .unwrap();
         m.selected = idx;
         m.activate();
         assert!(m.editing);
@@ -563,7 +612,9 @@ mod tests {
         assert_eq!(m.edit_buf, "250");
         // Enter commits it as a Set.
         let outcome = m.on_key(KeyEvent::from(KeyCode::Enter));
-        assert!(matches!(outcome, ConfigMenuOutcome::Set { key: "tool_call_limit", value } if value == "250"));
+        assert!(
+            matches!(outcome, ConfigMenuOutcome::Set { key: "tool_call_limit", value } if value == "250")
+        );
         assert_eq!(m.state.tool_call_limit, 250);
     }
 }

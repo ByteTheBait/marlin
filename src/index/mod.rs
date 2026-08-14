@@ -19,7 +19,7 @@ pub struct FileEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Index {
     pub files: Vec<FileEntry>,
-    pub df: HashMap<String, usize>,       // document frequency per term
+    pub df: HashMap<String, usize>, // document frequency per term
     pub file_count: usize,
     pub term_count: usize,
     pub built_at: DateTime<Utc>,
@@ -43,9 +43,26 @@ pub struct SearchResult {
     pub is_symbol: bool,
 }
 
-const SKIP_DIRS: &[&str] = &[".git", "node_modules", "target", "dist", ".next", "vendor", "__pycache__", ".venv", "venv", "build", "out", ".cargo", "bin", "obj"];
-const SKIP_EXTS: &[&str] = &["exe", "dll", "so", "dylib", "png", "jpg", "jpeg", "gif", "webp",
-    "ico", "pdf", "zip", "tar", "gz", "wasm", "bin", "lock"];
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    ".next",
+    "vendor",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "build",
+    "out",
+    ".cargo",
+    "bin",
+    "obj",
+];
+const SKIP_EXTS: &[&str] = &[
+    "exe", "dll", "so", "dylib", "png", "jpg", "jpeg", "gif", "webp", "ico", "pdf", "zip", "tar",
+    "gz", "wasm", "bin", "lock",
+];
 
 pub fn build(work_dir: &str, _ignored: Option<()>) -> Result<(Index, BuildStats)> {
     let start = Instant::now();
@@ -53,7 +70,13 @@ pub fn build(work_dir: &str, _ignored: Option<()>) -> Result<(Index, BuildStats)
     let mut df: HashMap<String, usize> = HashMap::new();
     let mut symbol_total = 0usize;
 
-    walk_dir(Path::new(work_dir), work_dir, &mut files_vec, &mut df, &mut symbol_total)?;
+    walk_dir(
+        Path::new(work_dir),
+        work_dir,
+        &mut files_vec,
+        &mut df,
+        &mut symbol_total,
+    )?;
 
     let file_count = files_vec.len();
     let term_count = df.len();
@@ -67,15 +90,24 @@ pub fn build(work_dir: &str, _ignored: Option<()>) -> Result<(Index, BuildStats)
         work_dir: work_dir.to_string(),
     };
 
-    Ok((idx, BuildStats {
-        files: file_count,
-        terms: term_count,
-        symbols: symbol_total,
-        elapsed: start.elapsed(),
-    }))
+    Ok((
+        idx,
+        BuildStats {
+            files: file_count,
+            terms: term_count,
+            symbols: symbol_total,
+            elapsed: start.elapsed(),
+        },
+    ))
 }
 
-fn walk_dir(dir: &Path, work_dir: &str, files: &mut Vec<FileEntry>, df: &mut HashMap<String, usize>, symbol_total: &mut usize) -> Result<()> {
+fn walk_dir(
+    dir: &Path,
+    work_dir: &str,
+    files: &mut Vec<FileEntry>,
+    df: &mut HashMap<String, usize>,
+    symbol_total: &mut usize,
+) -> Result<()> {
     let entries = std::fs::read_dir(dir)?;
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
@@ -88,16 +120,30 @@ fn walk_dir(dir: &Path, work_dir: &str, files: &mut Vec<FileEntry>, df: &mut Has
             continue;
         }
 
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-        if SKIP_EXTS.contains(&ext.as_str()) { continue; }
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if SKIP_EXTS.contains(&ext.as_str()) {
+            continue;
+        }
 
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
-        let rel_path = path.strip_prefix(work_dir).unwrap_or(&path).to_string_lossy().to_string();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let rel_path = path
+            .strip_prefix(work_dir)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .to_string();
 
         let terms = tokenize(&text);
         let mut tf: HashMap<String, f64> = HashMap::new();
         let total = terms.len() as f64;
-        if total == 0.0 { continue; }
+        if total == 0.0 {
+            continue;
+        }
 
         for term in &terms {
             *tf.entry(term.clone()).or_insert(0.0) += 1.0;
@@ -113,7 +159,11 @@ fn walk_dir(dir: &Path, work_dir: &str, files: &mut Vec<FileEntry>, df: &mut Has
         let symbols = extract_symbols(&ext, &text);
         *symbol_total += symbols.len();
 
-        files.push(FileEntry { path: rel_path, tf, symbols });
+        files.push(FileEntry {
+            path: rel_path,
+            tf,
+            symbols,
+        });
     }
     Ok(())
 }
@@ -133,7 +183,13 @@ pub fn extract_symbols(ext: &str, text: &str) -> Vec<String> {
     for line in text.lines() {
         let t = line.trim();
         // Skip comment/string-ish lines cheaply.
-        if t.is_empty() || t.starts_with("//") || t.starts_with('#') || t.starts_with('*') || t.starts_with("/*") || t.starts_with("<!--") {
+        if t.is_empty()
+            || t.starts_with("//")
+            || t.starts_with('#')
+            || t.starts_with('*')
+            || t.starts_with("/*")
+            || t.starts_with("<!--")
+        {
             continue;
         }
         let sym = match ext {
@@ -141,19 +197,29 @@ pub fn extract_symbols(ext: &str, text: &str) -> Vec<String> {
                 // fn foo, fn foo<T>, struct Name, enum Name, trait Name, impl Name, type Name =, const FOO, static FOO
                 if let Some(r) = strip_keyword(t, "pub fn").or_else(|| strip_keyword(t, "fn")) {
                     ident_after_parens(r)
-                } else if let Some(r) = strip_keyword(t, "pub struct").or_else(|| strip_keyword(t, "struct")) {
+                } else if let Some(r) =
+                    strip_keyword(t, "pub struct").or_else(|| strip_keyword(t, "struct"))
+                {
                     Some(symbol_name(r))
-                } else if let Some(r) = strip_keyword(t, "pub enum").or_else(|| strip_keyword(t, "enum")) {
+                } else if let Some(r) =
+                    strip_keyword(t, "pub enum").or_else(|| strip_keyword(t, "enum"))
+                {
                     Some(symbol_name(r))
-                } else if let Some(r) = strip_keyword(t, "pub trait").or_else(|| strip_keyword(t, "trait")) {
+                } else if let Some(r) =
+                    strip_keyword(t, "pub trait").or_else(|| strip_keyword(t, "trait"))
+                {
                     Some(symbol_name(r))
                 } else if let Some(r) = strip_keyword(t, "impl") {
                     // impl Foo, impl<T> Foo
                     let r = r.trim_start_matches(['<', '(']);
                     Some(symbol_name(r))
-                } else if let Some(r) = strip_keyword(t, "pub type").or_else(|| strip_keyword(t, "type")) {
+                } else if let Some(r) =
+                    strip_keyword(t, "pub type").or_else(|| strip_keyword(t, "type"))
+                {
                     Some(symbol_name(r))
-                } else if let Some(r) = strip_keyword(t, "const").or_else(|| strip_keyword(t, "static")) {
+                } else if let Some(r) =
+                    strip_keyword(t, "const").or_else(|| strip_keyword(t, "static"))
+                {
                     Some(symbol_name(r))
                 } else {
                     None
@@ -173,7 +239,9 @@ pub fn extract_symbols(ext: &str, text: &str) -> Vec<String> {
                     }
                 } else if let Some(r) = strip_keyword(t, "type") {
                     Some(symbol_name(r))
-                } else if let Some(r) = strip_keyword(t, "const").or_else(|| strip_keyword(t, "var")) {
+                } else if let Some(r) =
+                    strip_keyword(t, "const").or_else(|| strip_keyword(t, "var"))
+                {
                     Some(symbol_name(r))
                 } else {
                     None
@@ -189,13 +257,21 @@ pub fn extract_symbols(ext: &str, text: &str) -> Vec<String> {
                 }
             }
             "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" => {
-                if let Some(r) = strip_keyword(t, "export function").or_else(|| strip_keyword(t, "function")) {
+                if let Some(r) =
+                    strip_keyword(t, "export function").or_else(|| strip_keyword(t, "function"))
+                {
                     Some(symbol_name(r))
-                } else if let Some(r) = strip_keyword(t, "export class").or_else(|| strip_keyword(t, "class")) {
+                } else if let Some(r) =
+                    strip_keyword(t, "export class").or_else(|| strip_keyword(t, "class"))
+                {
                     Some(symbol_name(r))
-                } else if let Some(r) = strip_keyword(t, "export interface").or_else(|| strip_keyword(t, "interface")) {
+                } else if let Some(r) =
+                    strip_keyword(t, "export interface").or_else(|| strip_keyword(t, "interface"))
+                {
                     Some(symbol_name(r))
-                } else if let Some(r) = strip_keyword(t, "export const").or_else(|| strip_keyword(t, "const")) {
+                } else if let Some(r) =
+                    strip_keyword(t, "export const").or_else(|| strip_keyword(t, "const"))
+                {
                     Some(symbol_name(r))
                 } else {
                     None
@@ -206,17 +282,31 @@ pub fn extract_symbols(ext: &str, text: &str) -> Vec<String> {
                     None
                 } else if let Some(r) = strip_keyword(t, "typedef") {
                     Some(symbol_name(r))
-                } else if let Some(r) = strip_keyword(t, "static inline").or_else(|| strip_keyword(t, "inline")) {
+                } else if let Some(r) =
+                    strip_keyword(t, "static inline").or_else(|| strip_keyword(t, "inline"))
+                {
                     Some(symbol_name(r))
                 } else {
                     // "type name(" pattern — conservative
                     let lower = t.to_lowercase();
-                    if lower.contains("(") && !lower.starts_with("if ") && !lower.starts_with("for ") && !lower.starts_with("while ") && !lower.starts_with("switch ") {
+                    if lower.contains("(")
+                        && !lower.starts_with("if ")
+                        && !lower.starts_with("for ")
+                        && !lower.starts_with("while ")
+                        && !lower.starts_with("switch ")
+                    {
                         let before = t.split('(').next().unwrap_or("").trim();
                         let before = before.split("->").next().unwrap_or(before).trim();
                         let parts: Vec<&str> = before.split_whitespace().collect();
                         if parts.len() >= 2 {
-                            Some(parts.last().unwrap_or(&"").trim_end_matches('*').trim_end_matches('&').to_string())
+                            Some(
+                                parts
+                                    .last()
+                                    .unwrap_or(&"")
+                                    .trim_end_matches('*')
+                                    .trim_end_matches('&')
+                                    .to_string(),
+                            )
                         } else {
                             None
                         }
@@ -265,7 +355,15 @@ pub fn extract_symbols(ext: &str, text: &str) -> Vec<String> {
 /// `{`, `:`, `(`, `=`, `<`).
 fn symbol_name(rest: &str) -> String {
     rest.trim()
-        .split(|c: char| c.is_whitespace() || c == '{' || c == '(' || c == '=' || c == '<' || c == ':' || c == ';')
+        .split(|c: char| {
+            c.is_whitespace()
+                || c == '{'
+                || c == '('
+                || c == '='
+                || c == '<'
+                || c == ':'
+                || c == ';'
+        })
         .next()
         .unwrap_or("")
         .trim_matches(|c: char| c == '*' || c == '&' || c == '"' || c == '\'')
@@ -295,37 +393,58 @@ fn strip_keyword<'a>(line: &'a str, kw: &str) -> Option<&'a str> {
 pub fn search(idx: &Index, query: &str, limit: usize) -> Vec<SearchResult> {
     let n = idx.file_count as f64;
     let query_terms: Vec<String> = tokenize(query);
-    if query_terms.is_empty() { return vec![]; }
+    if query_terms.is_empty() {
+        return vec![];
+    }
 
-    let mut scores: Vec<(usize, f64, bool)> = idx.files.iter().enumerate().filter_map(|(i, f)| {
-        let mut score = 0.0f64;
-        let mut is_symbol = false;
-        for term in &query_terms {
-            let tf = f.tf.get(term).copied().unwrap_or(0.0);
-            let df = idx.df.get(term).copied().unwrap_or(1) as f64;
-            let idf = (n / df + 1.0).ln();
-            score += tf * idf;
+    let mut scores: Vec<(usize, f64, bool)> =
+        idx.files
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| {
+                let mut score = 0.0f64;
+                let mut is_symbol = false;
+                for term in &query_terms {
+                    let tf = f.tf.get(term).copied().unwrap_or(0.0);
+                    let df = idx.df.get(term).copied().unwrap_or(1) as f64;
+                    let idf = (n / df + 1.0).ln();
+                    score += tf * idf;
 
-            // Symbol hits get a strong boost — a definition match is far more
-            // relevant than incidental term co-occurrence.
-            let sym_hit = f.symbols.iter().any(|s| s.to_lowercase() == *term || s.to_lowercase().contains(term.as_str()));
-            if sym_hit {
-                score += 3.0;
-                is_symbol = true;
-            }
-        }
-        if score > 0.0 { Some((i, score, is_symbol)) } else { None }
-    }).collect();
+                    // Symbol hits get a strong boost — a definition match is far more
+                    // relevant than incidental term co-occurrence.
+                    let sym_hit = f.symbols.iter().any(|s| {
+                        s.to_lowercase() == *term || s.to_lowercase().contains(term.as_str())
+                    });
+                    if sym_hit {
+                        score += 3.0;
+                        is_symbol = true;
+                    }
+                }
+                if score > 0.0 {
+                    Some((i, score, is_symbol))
+                } else {
+                    None
+                }
+            })
+            .collect();
 
     scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     scores.truncate(limit);
 
-    scores.into_iter().map(|(i, score, is_symbol)| {
-        let f = &idx.files[i];
-        let full_path = format!("{}/{}", idx.work_dir, f.path);
-        let snippet = extract_snippet(&full_path, &query_terms);
-        SearchResult { path: f.path.clone(), score, snippet, is_symbol }
-    }).collect()
+    scores
+        .into_iter()
+        .map(|(i, score, is_symbol)| {
+            let f = &idx.files[i];
+            let full_path = format!("{}/{}", idx.work_dir, f.path);
+            let snippet = extract_snippet(&full_path, &query_terms);
+            SearchResult {
+                path: f.path.clone(),
+                score,
+                snippet,
+                is_symbol,
+            }
+        })
+        .collect()
 }
 
 /// Find files that *define* the given symbol name (function/type/const/class).
@@ -346,16 +465,25 @@ pub fn search_symbols(idx: &Index, symbol: &str, limit: usize) -> Vec<SearchResu
     }
     hits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     hits.truncate(limit);
-    hits.into_iter().map(|(i, score)| {
-        let f = &idx.files[i];
-        let full_path = format!("{}/{}", idx.work_dir, f.path);
-        let snippet = extract_snippet(&full_path, &[term.clone()]);
-        SearchResult { path: f.path.clone(), score, snippet, is_symbol: true }
-    }).collect()
+    hits.into_iter()
+        .map(|(i, score)| {
+            let f = &idx.files[i];
+            let full_path = format!("{}/{}", idx.work_dir, f.path);
+            let snippet = extract_snippet(&full_path, &[term.clone()]);
+            SearchResult {
+                path: f.path.clone(),
+                score,
+                snippet,
+                is_symbol: true,
+            }
+        })
+        .collect()
 }
 
 fn extract_snippet(path: &str, terms: &[String]) -> String {
-    let Ok(text) = std::fs::read_to_string(path) else { return String::new() };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
     for line in text.lines() {
         let lower = line.to_lowercase();
         if terms.iter().any(|t| lower.contains(t.as_str())) {
@@ -404,7 +532,8 @@ pub fn format_symbol_results(results: &[SearchResult], symbol: &str) -> String {
 
 /// Drop a file from the index (used when it's deleted on disk).
 pub fn remove_file(idx: &mut Index, abs_path: &str) {
-    let rel_path = abs_path.strip_prefix(&idx.work_dir)
+    let rel_path = abs_path
+        .strip_prefix(&idx.work_dir)
         .map(|s| s.trim_start_matches('/').to_string())
         .unwrap_or_else(|| abs_path.to_string());
     if let Some(pos) = idx.files.iter().position(|f| f.path == rel_path) {
@@ -420,12 +549,20 @@ pub fn remove_file(idx: &mut Index, abs_path: &str) {
     }
 }
 
-pub fn update_file(idx: &mut Index, abs_path: &str) {    let Ok(text) = std::fs::read_to_string(abs_path) else { return };
-    let rel_path = abs_path.strip_prefix(&idx.work_dir)
+pub fn update_file(idx: &mut Index, abs_path: &str) {
+    let Ok(text) = std::fs::read_to_string(abs_path) else {
+        return;
+    };
+    let rel_path = abs_path
+        .strip_prefix(&idx.work_dir)
         .map(|s| s.trim_start_matches('/').to_string())
         .unwrap_or_else(|| abs_path.to_string());
 
-    let ext = Path::new(abs_path).extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let ext = Path::new(abs_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
     let symbols = extract_symbols(&ext, &text);
 
     // Remove old entry
@@ -445,16 +582,30 @@ pub fn update_file(idx: &mut Index, abs_path: &str) {    let Ok(text) = std::fs:
     let total = terms.len() as f64;
     if total == 0.0 {
         // Keep a stub entry so the file is still discoverable by symbol/name.
-        idx.files.push(FileEntry { path: rel_path, tf, symbols });
+        idx.files.push(FileEntry {
+            path: rel_path,
+            tf,
+            symbols,
+        });
         idx.file_count = idx.files.len();
         idx.term_count = idx.df.len();
         return;
     }
-    for term in &terms { *tf.entry(term.clone()).or_insert(0.0) += 1.0; }
-    for v in tf.values_mut() { *v /= total; }
-    for term in tf.keys() { *idx.df.entry(term.clone()).or_insert(0) += 1; }
+    for term in &terms {
+        *tf.entry(term.clone()).or_insert(0.0) += 1.0;
+    }
+    for v in tf.values_mut() {
+        *v /= total;
+    }
+    for term in tf.keys() {
+        *idx.df.entry(term.clone()).or_insert(0) += 1;
+    }
 
-    idx.files.push(FileEntry { path: rel_path, tf, symbols });
+    idx.files.push(FileEntry {
+        path: rel_path,
+        tf,
+        symbols,
+    });
     idx.file_count = idx.files.len();
     idx.term_count = idx.df.len();
 }
@@ -476,9 +627,17 @@ pub struct RefreshState {
 /// returning the set of files whose mtime/size differ from `state`. Also
 /// returns a rebuilt RefreshState snapshot.
 pub fn diff_against(state: &RefreshState, work_dir: &str) -> (Vec<String>, RefreshState) {
-    let mut next = RefreshState { mtimes: HashMap::new() };
+    let mut next = RefreshState {
+        mtimes: HashMap::new(),
+    };
     let mut changed: Vec<String> = Vec::new();
-    collect_mtimes(Path::new(work_dir), work_dir, &mut next.mtimes, &mut changed, state);
+    collect_mtimes(
+        Path::new(work_dir),
+        work_dir,
+        &mut next.mtimes,
+        &mut changed,
+        state,
+    );
     (changed, next)
 }
 
@@ -489,7 +648,9 @@ fn collect_mtimes(
     changed: &mut Vec<String>,
     prev: &RefreshState,
 ) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -499,15 +660,27 @@ fn collect_mtimes(
             }
             continue;
         }
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-        if SKIP_EXTS.contains(&ext.as_str()) { continue; }
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if SKIP_EXTS.contains(&ext.as_str()) {
+            continue;
+        }
 
         let Ok(meta) = entry.metadata() else { continue };
         let Ok(mtime) = meta.modified() else { continue };
-        let mtime_secs = mtime.duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64).unwrap_or(0);
+        let mtime_secs = mtime
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
         let size = meta.len();
-        let rel = path.strip_prefix(work_dir).unwrap_or(&path).to_string_lossy().to_string();
+        let rel = path
+            .strip_prefix(work_dir)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .to_string();
         out.insert(rel.clone(), (mtime_secs, size));
         if prev.mtimes.get(&rel) != Some(&(mtime_secs, size)) {
             changed.push(rel);
@@ -518,7 +691,10 @@ fn collect_mtimes(
 fn index_path(marlin_dir: &Path, work_dir: &str) -> PathBuf {
     let hash = {
         let mut h: u64 = 0xcbf29ce484222325;
-        for b in work_dir.bytes() { h ^= b as u64; h = h.wrapping_mul(0x100000001b3); }
+        for b in work_dir.bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
         format!("{h:016x}")
     };
     let dir = marlin_dir.join("index");
@@ -538,28 +714,6 @@ pub fn load(marlin_dir: &Path, work_dir: &str) -> Result<Index> {
     let mut idx: Index = serde_json::from_str(&data)?;
     idx.work_dir = work_dir.to_string();
     Ok(idx)
-}
-
-/// Age of an existing index in seconds, or None if it doesn't exist.
-pub fn index_age(marlin_dir: &Path, work_dir: &str) -> Option<i64> {
-    let path = index_path(marlin_dir, work_dir);
-    let meta = std::fs::metadata(path).ok()?;
-    let modified = meta.modified().ok()?;
-    let now = SystemTime::now();
-    modified.duration_since(now).ok().or_else(|| now.duration_since(modified).ok())
-        .map(|d| d.as_secs() as i64)
-}
-
-// Re-export the time type used above without adding an import at the call site.
-use std::time::SystemTime;
-
-/// Helper: how stale (in seconds) is an existing saved index? None if absent.
-/// Convenience used by the engine's auto-rebuild decision.
-pub fn is_index_stale(marlin_dir: &Path, work_dir: &str, max_age: Duration) -> bool {
-    match index_age(marlin_dir, work_dir) {
-        None => true,
-        Some(age) => age as u64 > max_age.as_secs(),
-    }
 }
 
 #[cfg(test)]
@@ -610,10 +764,25 @@ mod tests {
     fn search_symbols_finds_definitions() {
         let mut df: HashMap<String, usize> = HashMap::new();
         let files = vec![
-            FileEntry { path: "a.rs".into(), tf: HashMap::new(), symbols: vec!["connect".into()] },
-            FileEntry { path: "b.rs".into(), tf: HashMap::new(), symbols: vec!["other".into()] },
+            FileEntry {
+                path: "a.rs".into(),
+                tf: HashMap::new(),
+                symbols: vec!["connect".into()],
+            },
+            FileEntry {
+                path: "b.rs".into(),
+                tf: HashMap::new(),
+                symbols: vec!["other".into()],
+            },
         ];
-        let idx = Index { files, df, file_count: 2, term_count: 0, built_at: Utc::now(), work_dir: ".".into() };
+        let idx = Index {
+            files,
+            df,
+            file_count: 2,
+            term_count: 0,
+            built_at: Utc::now(),
+            work_dir: ".".into(),
+        };
         let hits = search_symbols(&idx, "connect", 5);
         assert_eq!(hits.len(), 1);
         assert!(hits[0].is_symbol);
@@ -627,10 +796,25 @@ mod tests {
         let mut a_tf = HashMap::new();
         a_tf.insert("widget".into(), 0.5);
         let files = vec![
-            FileEntry { path: "a.rs".into(), tf: a_tf, symbols: vec![] },
-            FileEntry { path: "b.rs".into(), tf: HashMap::new(), symbols: vec!["Widget".into()] },
+            FileEntry {
+                path: "a.rs".into(),
+                tf: a_tf,
+                symbols: vec![],
+            },
+            FileEntry {
+                path: "b.rs".into(),
+                tf: HashMap::new(),
+                symbols: vec!["Widget".into()],
+            },
         ];
-        let idx = Index { files, df, file_count: 2, term_count: 0, built_at: Utc::now(), work_dir: ".".into() };
+        let idx = Index {
+            files,
+            df,
+            file_count: 2,
+            term_count: 0,
+            built_at: Utc::now(),
+            work_dir: ".".into(),
+        };
         let results = search(&idx, "widget", 5);
         assert_eq!(results[0].path, "b.rs");
     }

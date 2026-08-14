@@ -33,7 +33,12 @@ pub struct ViewerPane {
 impl ViewerPane {
     pub fn new(path: String, content: String) -> Self {
         let lines: Vec<String> = content.lines().map(str::to_string).collect();
-        Self { path, lines, scroll: 0, viewport_height: 20 }
+        Self {
+            path,
+            lines,
+            scroll: 0,
+            viewport_height: 20,
+        }
     }
 
     fn max_scroll(&self) -> usize {
@@ -62,7 +67,12 @@ impl ViewerPane {
         let modal_h = area.height.saturating_sub(2).clamp(6, area.height.max(6));
         let x = area.x + (area.width.saturating_sub(modal_w)) / 2;
         let y = area.y + (area.height.saturating_sub(modal_h)) / 2;
-        let modal = Rect { x, y, width: modal_w, height: modal_h };
+        let modal = Rect {
+            x,
+            y,
+            width: modal_w,
+            height: modal_h,
+        };
 
         Clear.render(modal, buf);
 
@@ -88,13 +98,18 @@ impl ViewerPane {
         self.scroll = self.scroll.min(self.max_scroll());
 
         let gutter_w = self.lines.len().to_string().len().max(3);
-        let visible_lines: Vec<Line> = self.lines.iter().enumerate()
+        let visible_lines: Vec<Line> = self
+            .lines
+            .iter()
+            .enumerate()
             .skip(self.scroll)
             .take(inner.height as usize)
-            .map(|(i, l)| Line::from(vec![
-                Span::styled(format!("{:>gutter_w$} ", i + 1), style_placeholder()),
-                Span::styled(l.clone(), style_inline_text()),
-            ]))
+            .map(|(i, l)| {
+                Line::from(vec![
+                    Span::styled(format!("{:>gutter_w$} ", i + 1), style_placeholder()),
+                    Span::styled(l.clone(), style_inline_text()),
+                ])
+            })
             .collect();
 
         Paragraph::new(visible_lines).render(inner, buf);
@@ -111,7 +126,10 @@ mod tests {
     }
 
     fn pane_with_lines(n: usize, viewport_height: usize) -> ViewerPane {
-        let content = (1..=n).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let content = (1..=n)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let mut p = ViewerPane::new("test.txt".into(), content);
         p.viewport_height = viewport_height;
         p
@@ -121,7 +139,10 @@ mod tests {
     fn esc_and_q_close() {
         let mut p = pane_with_lines(10, 5);
         assert!(matches!(p.on_key(key(KeyCode::Esc)), ViewerOutcome::Close));
-        assert!(matches!(p.on_key(key(KeyCode::Char('q'))), ViewerOutcome::Close));
+        assert!(matches!(
+            p.on_key(key(KeyCode::Char('q'))),
+            ViewerOutcome::Close
+        ));
     }
 
     #[test]

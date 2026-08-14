@@ -1,5 +1,5 @@
-mod commands;
 mod checkpoint;
+mod commands;
 mod config;
 mod engine;
 mod history;
@@ -61,7 +61,10 @@ fn main() -> Result<()> {
             cfg.work_dir = cwd;
         }
         if let Some(key) = flag_value(&args, "--api-key") {
-            cfg.providers.entry(cfg.active_provider.clone()).or_default().api_key = key;
+            cfg.providers
+                .entry(cfg.active_provider.clone())
+                .or_default()
+                .api_key = key;
         }
         let output_path = flag_value(&args, "--output");
 
@@ -91,7 +94,11 @@ fn main() -> Result<()> {
         match history::list_sessions(&marlin_dir) {
             Ok(sessions) if !sessions.is_empty() => {
                 let s = &sessions[0];
-                eng.history = s.messages.iter().map(history::from_session_message).collect();
+                eng.history = s
+                    .messages
+                    .iter()
+                    .map(history::from_session_message)
+                    .collect();
                 eprintln!("marlin: resumed session {} ({})", s.id, s.summary());
             }
             _ => eprintln!("marlin: --resume-last: no saved sessions to resume"),
@@ -134,18 +141,27 @@ fn main() -> Result<()> {
 ///
 /// Mirrors how `tui::runner::run` drives the same channels on the main thread — spawn the
 /// engine on the Tokio runtime, then talk to it synchronously via blocking channel ops.
-fn run_headless(mut eng: engine::Engine, prompt: String, output_path: Option<String>) -> Result<i32> {
+fn run_headless(
+    mut eng: engine::Engine,
+    prompt: String,
+    output_path: Option<String>,
+) -> Result<i32> {
     use engine::{Action, UiUpdate};
 
     let (action_tx, action_rx) = mpsc::channel::<Action>(64);
     let (ui_tx, mut ui_rx) = mpsc::channel::<UiUpdate>(256);
 
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     rt.spawn(async move {
         eng.run(action_rx, ui_tx).await;
     });
 
-    if action_tx.blocking_send(Action::SendMessage(prompt)).is_err() {
+    if action_tx
+        .blocking_send(Action::SendMessage(prompt))
+        .is_err()
+    {
         eprintln!("marlin: engine channel closed before the run could start");
         return Ok(1);
     }

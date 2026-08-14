@@ -8,8 +8,8 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use super::{
-    Message, Provider, StreamChunk, StreamRequest, ToolCall, ToolDef,
     ratelimit::{parse_rate_limit_state, retry_after_seconds},
+    Message, Provider, StreamChunk, StreamRequest, ToolCall, ToolDef,
 };
 
 /// Groq (and some other OpenAI-compatible providers) reject a request outright
@@ -60,7 +60,12 @@ impl OpenAiCompatProvider {
     pub fn new_ollama(endpoint: &str, model: &str) -> Self {
         Self {
             provider_name: "ollama".into(),
-            endpoint: if endpoint.is_empty() { "http://localhost:11434" } else { endpoint }.into(),
+            endpoint: if endpoint.is_empty() {
+                "http://localhost:11434"
+            } else {
+                endpoint
+            }
+            .into(),
             api_key: String::new(),
             model_list: vec![model.to_string()],
         }
@@ -71,7 +76,10 @@ impl OpenAiCompatProvider {
             provider_name: "fireworks".into(),
             endpoint: if endpoint.is_empty() {
                 "https://api.fireworks.ai/inference/v1"
-            } else { endpoint }.into(),
+            } else {
+                endpoint
+            }
+            .into(),
             api_key: api_key.into(),
             model_list: vec![
                 "accounts/fireworks/models/llama-v3p1-70b-instruct".into(),
@@ -86,7 +94,10 @@ impl OpenAiCompatProvider {
             provider_name: "groq".into(),
             endpoint: if endpoint.is_empty() {
                 "https://api.groq.com/openai/v1"
-            } else { endpoint }.into(),
+            } else {
+                endpoint
+            }
+            .into(),
             api_key: api_key.into(),
             model_list: vec![
                 "llama-3.3-70b-versatile".into(),
@@ -102,7 +113,10 @@ impl OpenAiCompatProvider {
             provider_name: "moonshot".into(),
             endpoint: if endpoint.is_empty() {
                 "https://api.moonshot.cn/v1"
-            } else { endpoint }.into(),
+            } else {
+                endpoint
+            }
+            .into(),
             api_key: api_key.into(),
             model_list: vec![
                 "moonshot-v1-8k".into(),
@@ -117,7 +131,10 @@ impl OpenAiCompatProvider {
             provider_name: "openrouter".into(),
             endpoint: if endpoint.is_empty() {
                 "https://openrouter.ai/api/v1"
-            } else { endpoint }.into(),
+            } else {
+                endpoint
+            }
+            .into(),
             api_key: api_key.into(),
             model_list: vec![
                 "anthropic/claude-sonnet-5".into(),
@@ -135,7 +152,10 @@ impl OpenAiCompatProvider {
             provider_name: "custom".into(),
             endpoint: if endpoint.is_empty() {
                 "http://localhost:8080/v1"
-            } else { endpoint }.into(),
+            } else {
+                endpoint
+            }
+            .into(),
             api_key: api_key.into(),
             model_list: vec!["default".into()],
         }
@@ -147,22 +167,34 @@ impl OpenAiCompatProvider {
             provider_name: name.into(),
             endpoint: endpoint.into(),
             api_key: api_key.into(),
-            model_list: if models.is_empty() { vec!["default".into()] } else { models },
+            model_list: if models.is_empty() {
+                vec!["default".into()]
+            } else {
+                models
+            },
         }
     }
 }
 
 #[async_trait]
 impl Provider for OpenAiCompatProvider {
-    fn name(&self) -> &str { &self.provider_name }
+    fn name(&self) -> &str {
+        &self.provider_name
+    }
 
-    fn models(&self) -> Vec<String> { self.model_list.clone() }
+    fn models(&self) -> Vec<String> {
+        self.model_list.clone()
+    }
 
     async fn stream(&self, req: StreamRequest) -> Result<mpsc::Receiver<StreamChunk>> {
-        if self.api_key.is_empty() && self.provider_name != "ollama" && self.provider_name != "custom" {
+        if self.api_key.is_empty()
+            && self.provider_name != "ollama"
+            && self.provider_name != "custom"
+        {
             return Err(anyhow!(
                 "{}: no API key set — use /key {} <key>",
-                self.provider_name, self.provider_name
+                self.provider_name,
+                self.provider_name
             ));
         }
 
@@ -170,7 +202,9 @@ impl Provider for OpenAiCompatProvider {
         let tools = marshal_openai_tools(&req.tools);
 
         let cache_key = format!("{}/{}", self.provider_name, req.model);
-        let mut max_tokens = learned_cache().lock().unwrap()
+        let mut max_tokens = learned_cache()
+            .lock()
+            .unwrap()
             .get(&cache_key)
             .map(|&learned| req.max_tokens.min(learned))
             .unwrap_or(req.max_tokens);
@@ -190,25 +224,31 @@ impl Provider for OpenAiCompatProvider {
             let text = resp.text().await.unwrap_or_default();
             let retry_max = parse_tpm_limit(&text).map(|limit| {
                 let prompt_estimate = estimate_request_tokens(&messages, &tools);
-                limit.saturating_sub(prompt_estimate).saturating_sub(TPM_SAFETY_MARGIN).max(MIN_MAX_TOKENS)
+                limit
+                    .saturating_sub(prompt_estimate)
+                    .saturating_sub(TPM_SAFETY_MARGIN)
+                    .max(MIN_MAX_TOKENS)
             });
             match retry_max {
                 Some(safe_max) if safe_max < max_tokens => {
                     max_tokens = safe_max;
                     learned_cache().lock().unwrap().insert(cache_key, safe_max);
-                    body = build_openai_body(&req.model, &messages, &tools, max_tokens, req.thinking);
+                    body =
+                        build_openai_body(&req.model, &messages, &tools, max_tokens, req.thinking);
                     resp = send_openai_request(&client, &url, &self.api_key, &body).await?;
                 }
                 _ => {
                     let name = self.provider_name.clone();
-                    let _ = tx.send(StreamChunk {
-                        content: String::new(),
-                        done: false,
-                        error: Some(anyhow!("{name} error 413: {text}")),
-                        tool_calls: vec![],
-                        retry_after: 0,
-                        rate_limit: None,
-                    }).await;
+                    let _ = tx
+                        .send(StreamChunk {
+                            content: String::new(),
+                            done: false,
+                            error: Some(anyhow!("{name} error 413: {text}")),
+                            tool_calls: vec![],
+                            retry_after: 0,
+                            rate_limit: None,
+                        })
+                        .await;
                     return Ok(rx);
                 }
             }
@@ -216,14 +256,16 @@ impl Provider for OpenAiCompatProvider {
 
         if resp.status().as_u16() == 429 {
             let secs = retry_after_seconds(resp.headers(), 60);
-            let _ = tx.send(StreamChunk {
-                content: String::new(),
-                done: false,
-                error: None,
-                tool_calls: vec![],
-                retry_after: secs,
-                rate_limit: None,
-            }).await;
+            let _ = tx
+                .send(StreamChunk {
+                    content: String::new(),
+                    done: false,
+                    error: None,
+                    tool_calls: vec![],
+                    retry_after: secs,
+                    rate_limit: None,
+                })
+                .await;
             return Ok(rx);
         }
 
@@ -231,14 +273,16 @@ impl Provider for OpenAiCompatProvider {
             let status = resp.status().as_u16();
             let text = resp.text().await.unwrap_or_default();
             let name = self.provider_name.clone();
-            let _ = tx.send(StreamChunk {
-                content: String::new(),
-                done: false,
-                error: Some(anyhow!("{name} error {status}: {text}")),
-                tool_calls: vec![],
-                retry_after: 0,
-                rate_limit: None,
-            }).await;
+            let _ = tx
+                .send(StreamChunk {
+                    content: String::new(),
+                    done: false,
+                    error: Some(anyhow!("{name} error {status}: {text}")),
+                    tool_calls: vec![],
+                    retry_after: 0,
+                    rate_limit: None,
+                })
+                .await;
             return Ok(rx);
         }
 
@@ -268,14 +312,16 @@ impl Provider for OpenAiCompatProvider {
                 let chunk = match chunk {
                     Ok(c) => c,
                     Err(e) => {
-                        let _ = tx.send(StreamChunk {
-                            content: String::new(),
-                            done: false,
-                            error: Some(anyhow!("{e}")),
-                            tool_calls: vec![],
-                            retry_after: 0,
-                            rate_limit: None,
-                        }).await;
+                        let _ = tx
+                            .send(StreamChunk {
+                                content: String::new(),
+                                done: false,
+                                error: Some(anyhow!("{e}")),
+                                tool_calls: vec![],
+                                retry_after: 0,
+                                rate_limit: None,
+                            })
+                            .await;
                         return;
                     }
                 };
@@ -301,26 +347,37 @@ impl Provider for OpenAiCompatProvider {
                             let line = buf[..pos].trim().to_string();
                             buf = buf[pos + 1..].to_string();
 
-                            if !line.starts_with("data: ") { continue; }
+                            if !line.starts_with("data: ") {
+                                continue;
+                            }
                             let data = &line["data: ".len()..];
                             if data == "[DONE]" {
                                 let mut indices: Vec<usize> = acc.keys().cloned().collect();
                                 indices.sort();
-                                let calls: Vec<ToolCall> = indices.into_iter().filter_map(|i| {
-                                    acc.remove(&i).map(|a| ToolCall {
-                                        id: a.id,
-                                        name: a.name,
-                                        input: if a.args.is_empty() { "{}".into() } else { a.args },
+                                let calls: Vec<ToolCall> = indices
+                                    .into_iter()
+                                    .filter_map(|i| {
+                                        acc.remove(&i).map(|a| ToolCall {
+                                            id: a.id,
+                                            name: a.name,
+                                            input: if a.args.is_empty() {
+                                                "{}".into()
+                                            } else {
+                                                a.args
+                                            },
+                                        })
                                     })
-                                }).collect();
-                                let _ = tx.send(StreamChunk {
-                                    content: String::new(),
-                                    done: true,
-                                    error: None,
-                                    tool_calls: calls,
-                                    retry_after: 0,
-                                    rate_limit: rl,
-                                }).await;
+                                    .collect();
+                                let _ = tx
+                                    .send(StreamChunk {
+                                        content: String::new(),
+                                        done: true,
+                                        error: None,
+                                        tool_calls: calls,
+                                        retry_after: 0,
+                                        rate_limit: rl,
+                                    })
+                                    .await;
                                 return;
                             }
 
@@ -339,24 +396,31 @@ impl Provider for OpenAiCompatProvider {
                                             // the visible answer.
                                             if !reasoning_buf.is_empty() && !reasoning_emitted {
                                                 reasoning_emitted = true;
-                                                let _ = tx.send(StreamChunk {
-                                                    content: format!(" thinking{} response", reasoning_buf),
+                                                let _ = tx
+                                                    .send(StreamChunk {
+                                                        content: format!(
+                                                            " thinking{} response",
+                                                            reasoning_buf
+                                                        ),
+                                                        done: false,
+                                                        error: None,
+                                                        tool_calls: vec![],
+                                                        retry_after: 0,
+                                                        rate_limit: None,
+                                                    })
+                                                    .await;
+                                                reasoning_buf.clear();
+                                            }
+                                            let _ = tx
+                                                .send(StreamChunk {
+                                                    content: text.to_string(),
                                                     done: false,
                                                     error: None,
                                                     tool_calls: vec![],
                                                     retry_after: 0,
                                                     rate_limit: None,
-                                                }).await;
-                                                reasoning_buf.clear();
-                                            }
-                                            let _ = tx.send(StreamChunk {
-                                                content: text.to_string(),
-                                                done: false,
-                                                error: None,
-                                                tool_calls: vec![],
-                                                retry_after: 0,
-                                                rate_limit: None,
-                                            }).await;
+                                                })
+                                                .await;
                                         }
                                     }
 
@@ -372,14 +436,19 @@ impl Provider for OpenAiCompatProvider {
                                         // tool call (model reasoned, then acted).
                                         if !reasoning_buf.is_empty() && !reasoning_emitted {
                                             reasoning_emitted = true;
-                                            let _ = tx.send(StreamChunk {
-                                                content: format!(" thinking{} response", reasoning_buf),
-                                                done: false,
-                                                error: None,
-                                                tool_calls: vec![],
-                                                retry_after: 0,
-                                                rate_limit: None,
-                                            }).await;
+                                            let _ = tx
+                                                .send(StreamChunk {
+                                                    content: format!(
+                                                        " thinking{} response",
+                                                        reasoning_buf
+                                                    ),
+                                                    done: false,
+                                                    error: None,
+                                                    tool_calls: vec![],
+                                                    retry_after: 0,
+                                                    rate_limit: None,
+                                                })
+                                                .await;
                                             reasoning_buf.clear();
                                         }
                                         for tc in tcs {
@@ -390,12 +459,17 @@ impl Provider for OpenAiCompatProvider {
                                                 args: String::new(),
                                             });
                                             if let Some(id) = tc["id"].as_str() {
-                                                if !id.is_empty() { entry.id = id.to_string(); }
+                                                if !id.is_empty() {
+                                                    entry.id = id.to_string();
+                                                }
                                             }
                                             if let Some(name) = tc["function"]["name"].as_str() {
-                                                if !name.is_empty() { entry.name = name.to_string(); }
+                                                if !name.is_empty() {
+                                                    entry.name = name.to_string();
+                                                }
                                             }
-                                            if let Some(args) = tc["function"]["arguments"].as_str() {
+                                            if let Some(args) = tc["function"]["arguments"].as_str()
+                                            {
                                                 entry.args.push_str(args);
                                             }
                                         }
@@ -409,28 +483,43 @@ impl Provider for OpenAiCompatProvider {
 
             let mut indices: Vec<usize> = acc.keys().cloned().collect();
             indices.sort();
-            let calls: Vec<ToolCall> = indices.into_iter().filter_map(|i| {
-                acc.remove(&i).map(|a| ToolCall {
-                    id: a.id,
-                    name: a.name,
-                    input: if a.args.is_empty() { "{}".into() } else { a.args },
+            let calls: Vec<ToolCall> = indices
+                .into_iter()
+                .filter_map(|i| {
+                    acc.remove(&i).map(|a| ToolCall {
+                        id: a.id,
+                        name: a.name,
+                        input: if a.args.is_empty() {
+                            "{}".into()
+                        } else {
+                            a.args
+                        },
+                    })
                 })
-            }).collect();
-            let _ = tx.send(StreamChunk {
-                content: String::new(),
-                done: true,
-                error: None,
-                tool_calls: calls,
-                retry_after: 0,
-                rate_limit: rl,
-            }).await;
+                .collect();
+            let _ = tx
+                .send(StreamChunk {
+                    content: String::new(),
+                    done: true,
+                    error: None,
+                    tool_calls: calls,
+                    retry_after: 0,
+                    rate_limit: rl,
+                })
+                .await;
         });
 
         Ok(rx)
     }
 }
 
-fn build_openai_body(model: &str, messages: &[Value], tools: &[Value], max_tokens: usize, thinking: bool) -> Value {
+fn build_openai_body(
+    model: &str,
+    messages: &[Value],
+    tools: &[Value],
+    max_tokens: usize,
+    thinking: bool,
+) -> Value {
     let mut body = serde_json::json!({
         "model": model,
         "messages": messages,
@@ -472,11 +561,17 @@ fn marshal_openai_messages(messages: &[Message], system_prompt: &str) -> Vec<Val
     for m in messages {
         match m.role.as_str() {
             "assistant" if !m.tool_calls.is_empty() => {
-                let calls: Vec<Value> = m.tool_calls.iter().map(|tc| serde_json::json!({
-                    "id": tc.id,
-                    "type": "function",
-                    "function": { "name": tc.name, "arguments": tc.input },
-                })).collect();
+                let calls: Vec<Value> = m
+                    .tool_calls
+                    .iter()
+                    .map(|tc| {
+                        serde_json::json!({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": { "name": tc.name, "arguments": tc.input },
+                        })
+                    })
+                    .collect();
                 let mut msg = serde_json::json!({"role": "assistant", "tool_calls": calls});
                 if !m.content.is_empty() {
                     msg["content"] = serde_json::json!(m.content);
@@ -516,27 +611,32 @@ fn marshal_openai_messages(messages: &[Message], system_prompt: &str) -> Vec<Val
 }
 
 fn marshal_openai_tools(defs: &[ToolDef]) -> Vec<Value> {
-    defs.iter().map(|d| {
-        let mut props: serde_json::Map<String, Value> = serde_json::Map::new();
-        for p in &d.properties {
-            props.insert(p.name.clone(), serde_json::json!({
-                "type": p.ty,
-                "description": p.description,
-            }));
-        }
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": d.name,
-                "description": d.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": props,
-                    "required": d.required,
-                }
+    defs.iter()
+        .map(|d| {
+            let mut props: serde_json::Map<String, Value> = serde_json::Map::new();
+            for p in &d.properties {
+                props.insert(
+                    p.name.clone(),
+                    serde_json::json!({
+                        "type": p.ty,
+                        "description": p.description,
+                    }),
+                );
             }
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": d.name,
+                    "description": d.description,
+                    "parameters": {
+                        "type": "object",
+                        "properties": props,
+                        "required": d.required,
+                    }
+                }
+            })
         })
-    }).collect()
+        .collect()
 }
 
 #[cfg(test)]
@@ -551,7 +651,8 @@ mod tests {
 
     #[test]
     fn ignores_413_bodies_unrelated_to_tpm() {
-        let body = r#"{"error":{"message":"Request body too large","type":"invalid_request_error"}}"#;
+        let body =
+            r#"{"error":{"message":"Request body too large","type":"invalid_request_error"}}"#;
         assert_eq!(parse_tpm_limit(body), None);
     }
 
@@ -566,8 +667,14 @@ mod tests {
         let tools: Vec<Value> = vec![];
         let limit = 6000usize;
         let prompt_estimate = estimate_request_tokens(&messages, &tools);
-        let safe_max = limit.saturating_sub(prompt_estimate).saturating_sub(TPM_SAFETY_MARGIN).max(MIN_MAX_TOKENS);
-        assert!(safe_max < 8192, "retry budget should be below the original request");
+        let safe_max = limit
+            .saturating_sub(prompt_estimate)
+            .saturating_sub(TPM_SAFETY_MARGIN)
+            .max(MIN_MAX_TOKENS);
+        assert!(
+            safe_max < 8192,
+            "retry budget should be below the original request"
+        );
         assert!(prompt_estimate + safe_max + TPM_SAFETY_MARGIN <= limit);
     }
 }

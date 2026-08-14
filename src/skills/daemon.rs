@@ -48,15 +48,7 @@ pub fn spawn(
 
         let req = StreamRequest {
             model: model.clone(),
-            messages: vec![Message {
-                role: "user".into(),
-                content: prompt,
-                tool_calls: vec![],
-                tool_use_id: String::new(),
-                tool_call_id: String::new(),
-                images: vec![],
-                is_error: false,
-            }],
+            messages: vec![Message::new_user(prompt)],
             system_prompt: String::new(),
             max_tokens: 1200,
             tools: vec![],
@@ -175,7 +167,8 @@ mod tests {
         std::fs::write(
             sessions_dir.join("session1.json"),
             serde_json::to_string(&session).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let text = read_recent_sessions(&marlin_dir);
         assert!(text.starts_with("User: 🎉"));

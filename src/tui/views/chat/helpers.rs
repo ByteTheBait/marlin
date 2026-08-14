@@ -1,4 +1,7 @@
-use ratatui::{style::Style, text::{Line, Span}};
+use ratatui::{
+    style::Style,
+    text::{Line, Span},
+};
 
 use crate::tui::styles::*;
 
@@ -62,18 +65,19 @@ pub(super) fn build_tool_bubble(
 
 pub(super) fn tool_display_name(raw: &str) -> &'static str {
     match raw {
-        "read_file"        => "Read",
-        "write_file"       => "Write",
-        "edit_file"        => "Update",
-        "notebook_edit"    => "Notebook",
-        "run_command"      => "Run",
-        "list_directory"   => "List",
+        "read_file" => "Read",
+        "write_file" => "Write",
+        "edit_file" => "Update",
+        "multi_edit" => "Multi-update",
+        "notebook_edit" => "Notebook",
+        "run_command" => "Run",
+        "list_directory" => "List",
         "create_directory" => "Mkdir",
-        "search_codebase"  => "Search",
-        "run_skill"        => "Skill",
-        "ast_skeleton"     => "Skeleton",
-        "ast_get_node"     => "Node",
-        "ast_mutate"       => "Mutate",
-        _                  => "Tool",
+        "search_codebase" => "Search",
+        "run_skill" => "Skill",
+        "ast_skeleton" => "Skeleton",
+        "ast_get_node" => "Node",
+        "ast_mutate" => "Mutate",
+        _ => "Tool",
     }
 }

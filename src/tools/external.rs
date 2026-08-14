@@ -20,7 +20,9 @@ pub struct ExternalToolProp {
     pub required: bool,
 }
 
-fn default_prop_type() -> String { "string".into() }
+fn default_prop_type() -> String {
+    "string".into()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalToolRun {
@@ -46,12 +48,18 @@ impl ExternalTool {
         ToolDef {
             name: self.name.clone(),
             description: self.description.clone(),
-            properties: self.properties.iter().map(|p| ToolProp {
-                name: p.name.clone(),
-                ty: p.ty.clone(),
-                description: p.description.clone(),
-            }).collect(),
-            required: self.properties.iter()
+            properties: self
+                .properties
+                .iter()
+                .map(|p| ToolProp {
+                    name: p.name.clone(),
+                    ty: p.ty.clone(),
+                    description: p.description.clone(),
+                })
+                .collect(),
+            required: self
+                .properties
+                .iter()
                 .filter(|p| p.required)
                 .map(|p| p.name.clone())
                 .collect(),
@@ -107,8 +115,14 @@ impl ExternalTool {
                     "{}{}",
                     String::from_utf8_lossy(&out.stdout),
                     String::from_utf8_lossy(&out.stderr),
-                ).trim().to_string();
-                let text = if text.is_empty() { "(no output)".into() } else { text };
+                )
+                .trim()
+                .to_string();
+                let text = if text.is_empty() {
+                    "(no output)".into()
+                } else {
+                    text
+                };
                 (text, !out.status.success())
             }
         }
@@ -126,10 +140,14 @@ pub fn tools_dir(marlin_dir: &Path) -> PathBuf {
 pub fn load_all(marlin_dir: &Path) -> Vec<ExternalTool> {
     let dir = tools_dir(marlin_dir);
     let mut tools = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&dir) else { return tools };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return tools;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("toml") { continue; }
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
         if let Ok(data) = std::fs::read_to_string(&path) {
             match toml::from_str::<ExternalTool>(&data) {
                 Ok(tool) => tools.push(tool),
@@ -208,7 +226,10 @@ mod tests {
             name: "jq_run".into(),
             description: "run jq".into(),
             properties: vec![ExternalToolProp {
-                name: "path".into(), ty: "string".into(), description: String::new(), required: true,
+                name: "path".into(),
+                ty: "string".into(),
+                description: String::new(),
+                required: true,
             }],
             run: ExternalToolRun {
                 kind: "shell".into(),
@@ -227,9 +248,15 @@ mod tests {
             name: "greet".into(),
             description: String::new(),
             properties: vec![ExternalToolProp {
-                name: "name".into(), ty: "string".into(), description: String::new(), required: true,
+                name: "name".into(),
+                ty: "string".into(),
+                description: String::new(),
+                required: true,
             }],
-            run: ExternalToolRun { kind: "shell".into(), command: "echo {name}".into() },
+            run: ExternalToolRun {
+                kind: "shell".into(),
+                command: "echo {name}".into(),
+            },
         };
         let mut input = HashMap::new();
         input.insert("name".to_string(), "a; rm -rf ~".to_string());

@@ -18,8 +18,14 @@ pub fn has_chain_operators(cmd: &str) -> bool {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'\'' if !in_double => { in_single = !in_single; i += 1; }
-            b'"'  if !in_single => { in_double = !in_double; i += 1; }
+            b'\'' if !in_double => {
+                in_single = !in_single;
+                i += 1;
+            }
+            b'"' if !in_single => {
+                in_double = !in_double;
+                i += 1;
+            }
             _ if !in_single && !in_double => {
                 let rest = &cmd[i..];
                 for op in CHAIN_OPS {
@@ -29,7 +35,9 @@ pub fn has_chain_operators(cmd: &str) -> bool {
                 }
                 i += 1;
             }
-            _ => { i += 1; }
+            _ => {
+                i += 1;
+            }
         }
     }
     false

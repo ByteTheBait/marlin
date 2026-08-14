@@ -14,7 +14,11 @@ pub fn resolve_chunks(skill: &Skill, query: &str) -> Result<Vec<String>> {
         return Err(anyhow!("skill '{}' has no shell chunks", skill.name));
     }
     let quoted = crate::tools::executor::shell_quote(query);
-    Ok(skill.chunks.iter().map(|c| c.source.replace("{query}", &quoted)).collect())
+    Ok(skill
+        .chunks
+        .iter()
+        .map(|c| c.source.replace("{query}", &quoted))
+        .collect())
 }
 
 /// Expand a prompt skill's prose body, substituting `{input}`/`{query}` with
@@ -23,5 +27,8 @@ pub fn expand_prompt(skill: &Skill, input: &str) -> Result<String> {
     if !skill.is_prompt() {
         return Err(anyhow!("skill '{}' has no prompt body", skill.name));
     }
-    Ok(skill.body.replace("{input}", input).replace("{query}", input))
+    Ok(skill
+        .body
+        .replace("{input}", input)
+        .replace("{query}", input))
 }

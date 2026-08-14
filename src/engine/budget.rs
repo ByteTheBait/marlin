@@ -25,13 +25,20 @@ impl Report {
     }
 
     pub fn format(&self) -> String {
-        let mut lines: Vec<String> = self.components.iter()
+        let mut lines: Vec<String> = self
+            .components
+            .iter()
             .map(|c| format!("  {:<20} ~{}t", c.name, c.tokens))
             .collect();
         lines.push(format!(
             "  {:<20} ~{}t{}",
-            "total", self.total,
-            if self.over_budget() { format!(" (over {WARN_THRESHOLD}t target)") } else { String::new() }
+            "total",
+            self.total,
+            if self.over_budget() {
+                format!(" (over {WARN_THRESHOLD}t target)")
+            } else {
+                String::new()
+            }
         ));
         lines.join("\n")
     }
@@ -53,11 +60,16 @@ pub fn compute(system_prompt: &str, tools: &[ToolDef]) -> Report {
     }];
 
     for t in tools {
-        let prop_tokens: usize = t.properties.iter()
+        let prop_tokens: usize = t
+            .properties
+            .iter()
             .map(|p| count(&p.name) + count(&p.description) + 4) // +4: JSON schema overhead per property
             .sum();
         let tokens = count(&t.name) + count(&t.description) + prop_tokens + 8; // +8: per-tool JSON overhead
-        components.push(Component { name: t.name.clone(), tokens });
+        components.push(Component {
+            name: t.name.clone(),
+            tokens,
+        });
     }
 
     let total = components.iter().map(|c| c.tokens).sum();
@@ -85,7 +97,8 @@ mod tests {
         assert!(
             !report.over_budget(),
             "default config exceeds the {WARN_THRESHOLD}t budget: {} tokens\n{}",
-            report.total, report.format()
+            report.total,
+            report.format()
         );
     }
 }

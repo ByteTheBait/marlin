@@ -6,7 +6,7 @@ use crate::engine::Action;
 use crate::tui::widgets::config_menu::ConfigMenuOutcome;
 use crate::tui::widgets::diff::DiffOutcome;
 use crate::tui::widgets::editor::EditorOutcome;
-use crate::tui::widgets::suggestions::{CmdDef, filter_suggestions, tab_complete};
+use crate::tui::widgets::suggestions::{filter_suggestions, tab_complete, CmdDef};
 use crate::tui::widgets::viewer::ViewerOutcome;
 
 use super::entry::{ChatEntry, EntryRole};
@@ -54,8 +54,15 @@ impl ChatView {
             || self.editor.is_some();
 
         if overlay_open {
-            let code = if up { crossterm::event::KeyCode::Up } else { crossterm::event::KeyCode::Down };
-            return self.on_key(crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE));
+            let code = if up {
+                crossterm::event::KeyCode::Up
+            } else {
+                crossterm::event::KeyCode::Down
+            };
+            return self.on_key(crossterm::event::KeyEvent::new(
+                code,
+                crossterm::event::KeyModifiers::NONE,
+            ));
         }
 
         self.scroll_viewport(up, 3);
@@ -97,9 +104,10 @@ impl ChatView {
         let val = self.textarea.lines().first().cloned().unwrap_or_default();
         let defs = &self.suggestions_defs;
         let suggs = filter_suggestions(&val, defs);
-        self.suggestions = suggs.iter().map(|s| {
-            defs.iter().position(|d| std::ptr::eq(d, *s)).unwrap_or(0)
-        }).collect();
+        self.suggestions = suggs
+            .iter()
+            .map(|s| defs.iter().position(|d| std::ptr::eq(d, *s)).unwrap_or(0))
+            .collect();
 
         self.skill_hints.clear();
     }
@@ -115,13 +123,17 @@ impl ChatView {
                     let answer: String = self.textarea.lines().join("\n").trim().to_string();
                     self.ask_pending = None;
                     self.textarea = TextArea::default();
-                    self.textarea.set_placeholder_text("Message Marlin... (Enter to send, Ctrl+J for newline)");
+                    self.textarea.set_placeholder_text(
+                        "Message Marlin... (Enter to send, Ctrl+J for newline)",
+                    );
                     return Some(Action::UserAnswer(answer));
                 }
                 KeyCode::Esc => {
                     self.ask_pending = None;
                     self.textarea = TextArea::default();
-                    self.textarea.set_placeholder_text("Message Marlin... (Enter to send, Ctrl+J for newline)");
+                    self.textarea.set_placeholder_text(
+                        "Message Marlin... (Enter to send, Ctrl+J for newline)",
+                    );
                     return Some(Action::CancelStream);
                 }
                 _ => {
@@ -167,7 +179,10 @@ impl ChatView {
                         }
                         return None;
                     }
-                    return Some(Action::ConfigSet { key: key.to_string(), value });
+                    return Some(Action::ConfigSet {
+                        key: key.to_string(),
+                        value,
+                    });
                 }
                 ConfigMenuOutcome::None => {}
             }
@@ -263,7 +278,10 @@ impl ChatView {
         // Ctrl+R — repeat last user message
         if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
             // Find the last user message from entries
-            if let Some(last_user) = self.entries.iter().rev()
+            if let Some(last_user) = self
+                .entries
+                .iter()
+                .rev()
                 .find(|e| matches!(e.role, EntryRole::User))
             {
                 let text = last_user.content.clone();
@@ -277,7 +295,10 @@ impl ChatView {
         // !! — repeat last user message (shell-style shorthand)
         let current_input: String = self.textarea.lines().join("\n");
         if current_input == "!!" {
-            if let Some(last_user) = self.entries.iter().rev()
+            if let Some(last_user) = self
+                .entries
+                .iter()
+                .rev()
                 .find(|e| matches!(e.role, EntryRole::User))
             {
                 let text = last_user.content.clone();
@@ -292,8 +313,7 @@ impl ChatView {
         if key.code == KeyCode::Tab {
             let val = self.textarea.lines().first().cloned().unwrap_or_default();
             let defs = &self.suggestions_defs;
-            let suggs: Vec<&CmdDef> = self.suggestions.iter()
-                .map(|&i| &defs[i]).collect();
+            let suggs: Vec<&CmdDef> = self.suggestions.iter().map(|&i| &defs[i]).collect();
             if let Some(completed) = tab_complete(&val, &suggs) {
                 self.textarea = TextArea::default();
                 self.textarea.insert_str(&completed);
@@ -385,10 +405,13 @@ impl ChatView {
         // Enter to send (not Alt+Enter or Ctrl+J)
         if key.code == KeyCode::Enter && !key.modifiers.contains(KeyModifiers::ALT) {
             let input: String = self.textarea.lines().join("\n").trim().to_string();
-            if input.is_empty() { return None; }
+            if input.is_empty() {
+                return None;
+            }
 
             self.textarea = TextArea::default();
-            self.textarea.set_placeholder_text("Message Marlin... (Enter to send, Ctrl+J for newline)");
+            self.textarea
+                .set_placeholder_text("Message Marlin... (Enter to send, Ctrl+J for newline)");
             self.suggestions.clear();
             self.history_idx = -1;
             self.history_draft.clear();
@@ -407,13 +430,16 @@ impl ChatView {
             if input == "/animate" || input.starts_with("/animate ") {
                 let arg = input["animate".len() + 1..].trim();
                 match arg {
-                    "on"  => { self.typewriter_enabled = true;  self.typewriter_pos = 0; }
+                    "on" => {
+                        self.typewriter_enabled = true;
+                        self.typewriter_pos = 0;
+                    }
                     "off" => {
                         self.typewriter_enabled = false;
                         // Snap to the bottom right away — no lingering ease.
                         self.smooth_offset = f64::MAX;
                     }
-                    _     => {
+                    _ => {
                         self.typewriter_enabled = !self.typewriter_enabled;
                         self.typewriter_pos = 0;
                         if !self.typewriter_enabled {

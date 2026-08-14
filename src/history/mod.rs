@@ -20,7 +20,10 @@ pub struct InputHistory {
 impl InputHistory {
     pub fn load(marlin_dir: &Path) -> Self {
         let path = marlin_dir.join("input_history.json");
-        let mut h = Self { entries: vec![], path: path.clone() };
+        let mut h = Self {
+            entries: vec![],
+            path: path.clone(),
+        };
         if let Ok(data) = std::fs::read_to_string(&path) {
             if let Ok(loaded) = serde_json::from_str::<Self>(&data) {
                 h.entries = loaded.entries;
@@ -30,8 +33,12 @@ impl InputHistory {
     }
 
     pub fn add(&mut self, entry: &str) {
-        if entry.is_empty() { return; }
-        if self.entries.first().map(String::as_str) == Some(entry) { return; }
+        if entry.is_empty() {
+            return;
+        }
+        if self.entries.first().map(String::as_str) == Some(entry) {
+            return;
+        }
         self.entries.insert(0, entry.to_string());
         if self.entries.len() > MAX_INPUT_ENTRIES {
             self.entries.truncate(MAX_INPUT_ENTRIES);
@@ -108,13 +115,22 @@ impl Session {
         // persisted (populated from engine history in save_session); `entries`
         // is never filled, so counting it would always show "0 msgs".
         for m in &self.messages {
-            if m.role == "user" || m.role == "assistant" { msg_count += 1; }
+            if m.role == "user" || m.role == "assistant" {
+                msg_count += 1;
+            }
             if m.role == "user" && preview.is_empty() {
                 preview = m.content.chars().take(60).collect();
-                if m.content.len() > 60 { preview.push_str("..."); }
+                if m.content.len() > 60 {
+                    preview.push_str("...");
+                }
             }
         }
-        format!("{}  [{} msgs]  {}", self.updated_at.format("%b %d %H:%M"), msg_count, preview)
+        format!(
+            "{}  [{} msgs]  {}",
+            self.updated_at.format("%b %d %H:%M"),
+            msg_count,
+            preview
+        )
     }
 }
 
@@ -156,9 +172,15 @@ pub fn to_session_message(m: &Message) -> SessionMessage {
     SessionMessage {
         role: m.role.clone(),
         content: m.content.clone(),
-        tool_calls: m.tool_calls.iter().map(|tc| SessionToolCall {
-            id: tc.id.clone(), name: tc.name.clone(), input: tc.input.clone(),
-        }).collect(),
+        tool_calls: m
+            .tool_calls
+            .iter()
+            .map(|tc| SessionToolCall {
+                id: tc.id.clone(),
+                name: tc.name.clone(),
+                input: tc.input.clone(),
+            })
+            .collect(),
         tool_call_id: m.tool_call_id.clone(),
         tool_use_id: m.tool_use_id.clone(),
         is_error: m.is_error,
@@ -169,9 +191,15 @@ pub fn from_session_message(m: &SessionMessage) -> Message {
     Message {
         role: m.role.clone(),
         content: m.content.clone(),
-        tool_calls: m.tool_calls.iter().map(|tc| ToolCallMsg {
-            id: tc.id.clone(), name: tc.name.clone(), input: tc.input.clone(),
-        }).collect(),
+        tool_calls: m
+            .tool_calls
+            .iter()
+            .map(|tc| ToolCallMsg {
+                id: tc.id.clone(),
+                name: tc.name.clone(),
+                input: tc.input.clone(),
+            })
+            .collect(),
         tool_call_id: m.tool_call_id.clone(),
         tool_use_id: m.tool_use_id.clone(),
         images: vec![],

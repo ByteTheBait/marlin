@@ -5,8 +5,8 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use super::{
-    Message, Provider, StreamChunk, StreamRequest, ToolCall, ToolDef,
     ratelimit::{parse_rate_limit_state, retry_after_seconds},
+    Message, Provider, StreamChunk, StreamRequest, ToolCall, ToolDef,
 };
 
 pub struct ClaudeProvider {
@@ -21,7 +21,9 @@ impl ClaudeProvider {
 
 #[async_trait]
 impl Provider for ClaudeProvider {
-    fn name(&self) -> &str { "claude" }
+    fn name(&self) -> &str {
+        "claude"
+    }
 
     fn models(&self) -> Vec<String> {
         vec![
@@ -34,7 +36,9 @@ impl Provider for ClaudeProvider {
     }
 
     async fn count_tokens(&self, req: &StreamRequest) -> Option<usize> {
-        if self.api_key.is_empty() { return None; }
+        if self.api_key.is_empty() {
+            return None;
+        }
 
         let messages = marshal_claude_messages(&req.messages);
         let tools = marshal_claude_tools(&req.tools);
@@ -62,7 +66,9 @@ impl Provider for ClaudeProvider {
             .await
             .ok()?;
 
-        if !resp.status().is_success() { return None; }
+        if !resp.status().is_success() {
+            return None;
+        }
         let json: serde_json::Value = resp.json().await.ok()?;
         json["input_tokens"].as_u64().map(|n| n as usize)
     }
@@ -90,14 +96,16 @@ impl Provider for ClaudeProvider {
 
         if resp.status().as_u16() == 429 {
             let secs = retry_after_seconds(resp.headers(), 60);
-            let _ = tx.send(StreamChunk {
-                content: String::new(),
-                done: false,
-                error: None,
-                tool_calls: vec![],
-                retry_after: secs,
-                rate_limit: None,
-            }).await;
+            let _ = tx
+                .send(StreamChunk {
+                    content: String::new(),
+                    done: false,
+                    error: None,
+                    tool_calls: vec![],
+                    retry_after: secs,
+                    rate_limit: None,
+                })
+                .await;
             return Ok(rx);
         }
 
@@ -108,14 +116,16 @@ impl Provider for ClaudeProvider {
                 .ok()
                 .and_then(|v| v["error"]["message"].as_str().map(|s| s.to_string()))
                 .unwrap_or(text);
-            let _ = tx.send(StreamChunk {
-                content: String::new(),
-                done: false,
-                error: Some(anyhow!("claude error {status}: {msg}")),
-                tool_calls: vec![],
-                retry_after: 0,
-                rate_limit: None,
-            }).await;
+            let _ = tx
+                .send(StreamChunk {
+                    content: String::new(),
+                    done: false,
+                    error: Some(anyhow!("claude error {status}: {msg}")),
+                    tool_calls: vec![],
+                    retry_after: 0,
+                    rate_limit: None,
+                })
+                .await;
             return Ok(rx);
         }
 
@@ -147,14 +157,16 @@ impl Provider for ClaudeProvider {
                 let chunk = match chunk {
                     Ok(c) => c,
                     Err(e) => {
-                        let _ = tx.send(StreamChunk {
-                            content: String::new(),
-                            done: false,
-                            error: Some(anyhow!("{e}")),
-                            tool_calls: vec![],
-                            retry_after: 0,
-                            rate_limit: None,
-                        }).await;
+                        let _ = tx
+                            .send(StreamChunk {
+                                content: String::new(),
+                                done: false,
+                                error: Some(anyhow!("{e}")),
+                                tool_calls: vec![],
+                                retry_after: 0,
+                                rate_limit: None,
+                            })
+                            .await;
                         return;
                     }
                 };
@@ -195,12 +207,22 @@ impl Provider for ClaudeProvider {
                                 "content_block_start" => {
                                     if event["content_block"]["type"].as_str() == Some("tool_use") {
                                         let id = event["content_block"]["id"]
-                                            .as_str().unwrap_or("").to_string();
+                                            .as_str()
+                                            .unwrap_or("")
+                                            .to_string();
                                         let name = event["content_block"]["name"]
-                                            .as_str().unwrap_or("").to_string();
-                                        pending.push(PendingTool { id, name, input: String::new() });
+                                            .as_str()
+                                            .unwrap_or("")
+                                            .to_string();
+                                        pending.push(PendingTool {
+                                            id,
+                                            name,
+                                            input: String::new(),
+                                        });
                                         current_tool_idx = Some(pending.len() - 1);
-                                    } else if event["content_block"]["type"].as_str() == Some("thinking") {
+                                    } else if event["content_block"]["type"].as_str()
+                                        == Some("thinking")
+                                    {
                                         in_thinking = true;
                                         current_tool_idx = None;
                                     } else {
@@ -213,14 +235,16 @@ impl Provider for ClaudeProvider {
                                         "text_delta" => {
                                             if let Some(text) = delta["text"].as_str() {
                                                 if !text.is_empty() {
-                                                    let _ = tx.send(StreamChunk {
-                                                        content: text.to_string(),
-                                                        done: false,
-                                                        error: None,
-                                                        tool_calls: vec![],
-                                                        retry_after: 0,
-                                                        rate_limit: None,
-                                                    }).await;
+                                                    let _ = tx
+                                                        .send(StreamChunk {
+                                                            content: text.to_string(),
+                                                            done: false,
+                                                            error: None,
+                                                            tool_calls: vec![],
+                                                            retry_after: 0,
+                                                            rate_limit: None,
+                                                        })
+                                                        .await;
                                                 }
                                             }
                                         }
@@ -230,10 +254,9 @@ impl Provider for ClaudeProvider {
                                             }
                                         }
                                         "input_json_delta" => {
-                                            if let (Some(idx), Some(part)) = (
-                                                current_tool_idx,
-                                                delta["partial_json"].as_str(),
-                                            ) {
+                                            if let (Some(idx), Some(part)) =
+                                                (current_tool_idx, delta["partial_json"].as_str())
+                                            {
                                                 pending[idx].input.push_str(part);
                                             }
                                         }
@@ -244,37 +267,47 @@ impl Provider for ClaudeProvider {
                                     if in_thinking {
                                         in_thinking = false;
                                         if !thinking_buf.is_empty() {
-                                            let _ = tx.send(StreamChunk {
-                                                content: format!(" thinking{} response", thinking_buf),
-                                                done: false,
-                                                error: None,
-                                                tool_calls: vec![],
-                                                retry_after: 0,
-                                                rate_limit: None,
-                                            }).await;
+                                            let _ = tx
+                                                .send(StreamChunk {
+                                                    content: format!(
+                                                        " thinking{} response",
+                                                        thinking_buf
+                                                    ),
+                                                    done: false,
+                                                    error: None,
+                                                    tool_calls: vec![],
+                                                    retry_after: 0,
+                                                    rate_limit: None,
+                                                })
+                                                .await;
                                             thinking_buf.clear();
                                         }
                                     }
                                     current_tool_idx = None;
                                 }
                                 "message_stop" => {
-                                    let calls: Vec<ToolCall> = pending.drain(..).map(|pt| ToolCall {
-                                        id: pt.id,
-                                        name: pt.name,
-                                        input: if pt.input.is_empty() {
-                                            "{}".into()
-                                        } else {
-                                            pt.input
-                                        },
-                                    }).collect();
-                                    let _ = tx.send(StreamChunk {
-                                        content: String::new(),
-                                        done: true,
-                                        error: None,
-                                        tool_calls: calls,
-                                        retry_after: 0,
-                                        rate_limit: rl,
-                                    }).await;
+                                    let calls: Vec<ToolCall> = pending
+                                        .drain(..)
+                                        .map(|pt| ToolCall {
+                                            id: pt.id,
+                                            name: pt.name,
+                                            input: if pt.input.is_empty() {
+                                                "{}".into()
+                                            } else {
+                                                pt.input
+                                            },
+                                        })
+                                        .collect();
+                                    let _ = tx
+                                        .send(StreamChunk {
+                                            content: String::new(),
+                                            done: true,
+                                            error: None,
+                                            tool_calls: calls,
+                                            retry_after: 0,
+                                            rate_limit: rl,
+                                        })
+                                        .await;
                                     return;
                                 }
                                 _ => {}
@@ -284,19 +317,28 @@ impl Provider for ClaudeProvider {
                 }
             }
 
-            let calls: Vec<ToolCall> = pending.drain(..).map(|pt| ToolCall {
-                id: pt.id,
-                name: pt.name,
-                input: if pt.input.is_empty() { "{}".into() } else { pt.input },
-            }).collect();
-            let _ = tx.send(StreamChunk {
-                content: String::new(),
-                done: true,
-                error: None,
-                tool_calls: calls,
-                retry_after: 0,
-                rate_limit: rl,
-            }).await;
+            let calls: Vec<ToolCall> = pending
+                .drain(..)
+                .map(|pt| ToolCall {
+                    id: pt.id,
+                    name: pt.name,
+                    input: if pt.input.is_empty() {
+                        "{}".into()
+                    } else {
+                        pt.input
+                    },
+                })
+                .collect();
+            let _ = tx
+                .send(StreamChunk {
+                    content: String::new(),
+                    done: true,
+                    error: None,
+                    tool_calls: calls,
+                    retry_after: 0,
+                    rate_limit: rl,
+                })
+                .await;
         });
 
         Ok(rx)
@@ -353,8 +395,8 @@ fn marshal_claude_messages(msgs: &[Message]) -> Vec<Value> {
                     content.push(serde_json::json!({"type": "text", "text": m.content}));
                 }
                 for tc in &m.tool_calls {
-                    let input: Value = serde_json::from_str(&tc.input)
-                        .unwrap_or(serde_json::json!({}));
+                    let input: Value =
+                        serde_json::from_str(&tc.input).unwrap_or(serde_json::json!({}));
                     content.push(serde_json::json!({
                         "type": "tool_use",
                         "id": tc.id,
@@ -404,22 +446,27 @@ fn marshal_claude_messages(msgs: &[Message]) -> Vec<Value> {
 }
 
 fn marshal_claude_tools(defs: &[ToolDef]) -> Vec<Value> {
-    defs.iter().map(|d| {
-        let mut props: serde_json::Map<String, Value> = serde_json::Map::new();
-        for p in &d.properties {
-            props.insert(p.name.clone(), serde_json::json!({
-                "type": p.ty,
-                "description": p.description,
-            }));
-        }
-        serde_json::json!({
-            "name": d.name,
-            "description": d.description,
-            "input_schema": {
-                "type": "object",
-                "properties": props,
-                "required": d.required,
+    defs.iter()
+        .map(|d| {
+            let mut props: serde_json::Map<String, Value> = serde_json::Map::new();
+            for p in &d.properties {
+                props.insert(
+                    p.name.clone(),
+                    serde_json::json!({
+                        "type": p.ty,
+                        "description": p.description,
+                    }),
+                );
             }
+            serde_json::json!({
+                "name": d.name,
+                "description": d.description,
+                "input_schema": {
+                    "type": "object",
+                    "properties": props,
+                    "required": d.required,
+                }
+            })
         })
-    }).collect()
+        .collect()
 }

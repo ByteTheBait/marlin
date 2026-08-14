@@ -39,10 +39,14 @@ pub fn mcp_dir(marlin_dir: &Path) -> PathBuf {
 pub fn load_all(marlin_dir: &Path) -> Vec<McpServerConfig> {
     let dir = mcp_dir(marlin_dir);
     let mut servers = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&dir) else { return servers };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return servers;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
         if let Ok(data) = std::fs::read_to_string(&path) {
             match serde_json::from_str::<McpServerConfig>(&data) {
                 Ok(cfg) => servers.push(cfg),
@@ -66,18 +70,38 @@ pub fn load_all(marlin_dir: &Path) -> Vec<McpServerConfig> {
 pub fn tool_def(server_name: &str, tool: &client::McpTool) -> crate::providers::ToolDef {
     use crate::providers::{ToolDef, ToolProp};
 
-    let required: Vec<String> = tool.input_schema.get("required")
+    let required: Vec<String> = tool
+        .input_schema
+        .get("required")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
 
-    let properties = tool.input_schema.get("properties")
+    let properties = tool
+        .input_schema
+        .get("properties")
         .and_then(|v| v.as_object())
-        .map(|obj| obj.iter().map(|(name, schema)| ToolProp {
-            name: name.clone(),
-            ty: schema.get("type").and_then(|v| v.as_str()).unwrap_or("string").to_string(),
-            description: schema.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        }).collect())
+        .map(|obj| {
+            obj.iter()
+                .map(|(name, schema)| ToolProp {
+                    name: name.clone(),
+                    ty: schema
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("string")
+                        .to_string(),
+                    description: schema
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                })
+                .collect()
+        })
         .unwrap_or_default();
 
     ToolDef {
@@ -100,7 +124,12 @@ pub fn parse_tool_name(name: &str) -> Option<(&str, &str)> {
 }
 
 /// Write a starter config for `/mcp new <name> <command> [args...]`.
-pub fn save_template(marlin_dir: &Path, name: &str, command: &str, args: Vec<String>) -> Result<PathBuf> {
+pub fn save_template(
+    marlin_dir: &Path,
+    name: &str,
+    command: &str,
+    args: Vec<String>,
+) -> Result<PathBuf> {
     let cfg = McpServerConfig {
         name: name.to_string(),
         command: command.to_string(),
@@ -158,7 +187,11 @@ mod tests {
 
     #[test]
     fn parse_tool_name_round_trips_with_tool_def_naming() {
-        let tool = client::McpTool { name: "search".into(), description: String::new(), input_schema: json!({}) };
+        let tool = client::McpTool {
+            name: "search".into(),
+            description: String::new(),
+            input_schema: json!({}),
+        };
         let def = tool_def("myserver", &tool);
         assert_eq!(parse_tool_name(&def.name), Some(("myserver", "search")));
     }
@@ -179,7 +212,8 @@ mod tests {
         std::fs::write(
             mcp_dir(&marlin_dir).join("good.json"),
             r#"{"name":"good","command":"echo","args":["hi"]}"#,
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::write(mcp_dir(&marlin_dir).join("bad.json"), "not json").unwrap();
         std::fs::write(mcp_dir(&marlin_dir).join("ignored.txt"), "irrelevant").unwrap();
 
@@ -197,7 +231,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let marlin_dir = dir.join("marlin_home");
 
-        let path = save_template(&marlin_dir, "My Server", "npx", vec!["-y".into(), "some-pkg".into()]).unwrap();
+        let path = save_template(
+            &marlin_dir,
+            "My Server",
+            "npx",
+            vec!["-y".into(), "some-pkg".into()],
+        )
+        .unwrap();
         assert!(path.exists());
         let servers = load_all(&marlin_dir);
         assert_eq!(servers.len(), 1);

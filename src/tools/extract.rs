@@ -8,22 +8,14 @@ pub fn extract_symbol(source: &str, name: &str, ext: &str) -> Option<String> {
             &format!("fn {name}<"),
             &format!("async fn {name}("),
         ],
-        "go" => &[
-            &format!("func {name}("),
-            &format!(") {name}("),
-        ],
-        "py" => &[
-            &format!("def {name}("),
-            &format!("async def {name}("),
-        ],
+        "go" => &[&format!("func {name}("), &format!(") {name}(")],
+        "py" => &[&format!("def {name}("), &format!("async def {name}(")],
         "js" | "ts" | "jsx" | "tsx" => &[
             &format!("function {name}("),
             &format!("const {name} ="),
             &format!("async function {name}("),
         ],
-        "c" | "cpp" | "cc" | "h" | "hpp" => &[
-            &format!("{name}("),
-        ],
+        "c" | "cpp" | "cc" | "h" | "hpp" => &[&format!("{name}(")],
         _ => &[
             &format!("fn {name}("),
             &format!("func {name}("),
@@ -81,8 +73,13 @@ fn extract_from(source: &str, start: usize) -> String {
             }
         } else {
             match ch {
-                '"' | '\'' => { in_string = true; string_char = ch; }
-                '{' => { depth += 1; }
+                '"' | '\'' => {
+                    in_string = true;
+                    string_char = ch;
+                }
+                '{' => {
+                    depth += 1;
+                }
                 '}' => {
                     depth -= 1;
                     if depth == 0 && i > 0 {
@@ -140,8 +137,13 @@ fn find_body_open_brace(tail: &str) -> Option<usize> {
             }
         } else {
             match ch {
-                '"' | '\'' => { in_string = true; string_char = ch; }
-                '(' => { paren_depth += 1; }
+                '"' | '\'' => {
+                    in_string = true;
+                    string_char = ch;
+                }
+                '(' => {
+                    paren_depth += 1;
+                }
                 ')' => {
                     paren_depth -= 1;
                     if paren_depth == 0 {

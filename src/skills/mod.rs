@@ -105,10 +105,23 @@ struct LegacyToml {
 impl From<LegacyToml> for Skill {
     fn from(l: LegacyToml) -> Self {
         let (body, chunks) = match l.run.kind {
-            LegacyKind::Shell => (String::new(), vec![Chunk { lang: "sh".into(), source: l.run.command }]),
+            LegacyKind::Shell => (
+                String::new(),
+                vec![Chunk {
+                    lang: "sh".into(),
+                    source: l.run.command,
+                }],
+            ),
             LegacyKind::Prompt => (l.run.template, vec![]),
         };
-        Skill { name: l.name, description: l.description, triggers: l.triggers, body, chunks, format: SkillFormat::Toml }
+        Skill {
+            name: l.name,
+            description: l.description,
+            triggers: l.triggers,
+            body,
+            chunks,
+            format: SkillFormat::Toml,
+        }
     }
 }
 
@@ -131,25 +144,26 @@ pub fn load_all(marlin_dir: &Path) -> (Vec<Skill>, Vec<String>) {
     let dir = skills_dir(marlin_dir);
     let mut skills = Vec::new();
     let mut diagnostics = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&dir) else { return (skills, diagnostics) };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return (skills, diagnostics);
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let ext = path.extension().and_then(|e| e.to_str());
-        let file_name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
 
         let parsed = match ext {
-            Some("qmd") => {
-                std::fs::read_to_string(&path).ok().map(|data| {
-                    qmd::parse(&data).map_err(|e| format!("skill {file_name}: {e}"))
-                })
-            }
-            Some("toml") => {
-                std::fs::read_to_string(&path).ok().map(|data| {
-                    toml::from_str::<LegacyToml>(&data)
-                        .map(Skill::from)
-                        .map_err(|e| format!("skill {file_name}: parse error: {e}"))
-                })
-            }
+            Some("qmd") => std::fs::read_to_string(&path)
+                .ok()
+                .map(|data| qmd::parse(&data).map_err(|e| format!("skill {file_name}: {e}"))),
+            Some("toml") => std::fs::read_to_string(&path).ok().map(|data| {
+                toml::from_str::<LegacyToml>(&data)
+                    .map(Skill::from)
+                    .map_err(|e| format!("skill {file_name}: parse error: {e}"))
+            }),
             _ => None,
         };
 
@@ -158,7 +172,9 @@ pub fn load_all(marlin_dir: &Path) -> (Vec<Skill>, Vec<String>) {
             Err(msg) => diagnostics.push(msg),
             Ok(skill) => {
                 let issues = crate::preflight::validate_skill(&skill);
-                let has_error = issues.iter().any(|i| i.severity == crate::preflight::Severity::Error);
+                let has_error = issues
+                    .iter()
+                    .any(|i| i.severity == crate::preflight::Severity::Error);
                 for issue in &issues {
                     diagnostics.push(format!("skill {file_name}: {}", issue.message));
                 }
@@ -190,14 +206,20 @@ pub fn save_skill(marlin_dir: &Path, skill: &Skill) -> Result<PathBuf> {
 pub fn migrate_all(marlin_dir: &Path) -> Result<usize> {
     let dir = skills_dir(marlin_dir);
     let mut migrated = 0;
-    let Ok(entries) = std::fs::read_dir(&dir) else { return Ok(0) };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(0);
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("toml") {
             continue;
         }
-        let Ok(data) = std::fs::read_to_string(&path) else { continue };
-        let Ok(skill) = toml::from_str::<LegacyToml>(&data).map(Skill::from) else { continue };
+        let Ok(data) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(skill) = toml::from_str::<LegacyToml>(&data).map(Skill::from) else {
+            continue;
+        };
         save_skill(marlin_dir, &skill)?;
         std::fs::remove_file(&path)?;
         migrated += 1;
@@ -355,10 +377,15 @@ mod tests {
     fn default_skills_pass_validation_cleanly() {
         for skill in default_skills() {
             let issues = crate::preflight::validate_skill(&skill);
-            let errors: Vec<_> = issues.iter()
+            let errors: Vec<_> = issues
+                .iter()
                 .filter(|i| i.severity == crate::preflight::Severity::Error)
                 .collect();
-            assert!(errors.is_empty(), "skill '{}' has validation errors: {errors:?}", skill.name);
+            assert!(
+                errors.is_empty(),
+                "skill '{}' has validation errors: {errors:?}",
+                skill.name
+            );
         }
     }
 
@@ -368,7 +395,12 @@ mod tests {
             let rendered = qmd::to_string(&skill).unwrap();
             let reparsed = qmd::parse(&rendered).unwrap();
             assert_eq!(reparsed.name, skill.name);
-            assert_eq!(reparsed.chunks.len(), skill.chunks.len(), "skill {}", skill.name);
+            assert_eq!(
+                reparsed.chunks.len(),
+                skill.chunks.len(),
+                "skill {}",
+                skill.name
+            );
         }
     }
 
@@ -418,10 +450,14 @@ template = "Do this: {input}"
         std::fs::write(
             skills_subdir.join("broken.qmd"),
             "---\nname: broken_skill\ndescriptio: oops typo\n---\n\n```{sh}\necho hi\n```\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let (loaded, diagnostics) = load_all(&dir);
-        assert!(loaded.iter().all(|s| s.name != "broken_skill"), "broken skill should not load");
+        assert!(
+            loaded.iter().all(|s| s.name != "broken_skill"),
+            "broken skill should not load"
+        );
         assert!(
             diagnostics.iter().any(|d| d.contains("broken.qmd")),
             "broken skill's frontmatter error should be reported, not silently dropped: {diagnostics:?}"
@@ -443,12 +479,22 @@ template = "Do this: {input}"
         ).unwrap();
 
         let (before, _) = load_all(&dir);
-        let before_skill = before.iter().find(|s| s.name == "legacy_echo").unwrap().clone();
+        let before_skill = before
+            .iter()
+            .find(|s| s.name == "legacy_echo")
+            .unwrap()
+            .clone();
 
         let migrated = migrate_all(&dir).unwrap();
         assert_eq!(migrated, 1);
-        assert!(!skills_subdir.join("legacy_echo.toml").exists(), "the .toml should be removed after migration");
-        assert!(skills_subdir.join("legacy_echo.qmd").exists(), "a .qmd twin should exist after migration");
+        assert!(
+            !skills_subdir.join("legacy_echo.toml").exists(),
+            "the .toml should be removed after migration"
+        );
+        assert!(
+            skills_subdir.join("legacy_echo.qmd").exists(),
+            "a .qmd twin should exist after migration"
+        );
 
         let (after, _) = load_all(&dir);
         let after_skill = after.iter().find(|s| s.name == "legacy_echo").unwrap();

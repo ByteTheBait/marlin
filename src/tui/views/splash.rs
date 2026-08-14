@@ -8,8 +8,7 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 use tachyonfx::{
-    fx, Effect, EffectRenderer, EffectTimer, Interpolatable, Interpolation,
-    Duration as FxDuration,
+    fx, Duration as FxDuration, Effect, EffectRenderer, EffectTimer, Interpolatable, Interpolation,
 };
 
 use crate::tui::styles::*;
@@ -85,10 +84,7 @@ impl SplashView {
     pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
         // Static content — tachyonfx drives the reveal animation
         let lines: Vec<Line> = vec![
-            Line::from(Span::styled(
-                "><(((o>",
-                Style::default().fg(COL_AQUA),
-            )),
+            Line::from(Span::styled("><(((o>", Style::default().fg(COL_AQUA))),
             Line::from(""),
             Line::from(Span::styled(
                 "m a r l i n",
@@ -128,7 +124,14 @@ impl SplashView {
                 Style::default().fg(Color::Rgb(32, 46, 65)),
             )))
             .alignment(Alignment::Center)
-            .render(Rect { y: hint_y, height: 1, ..area }, buf);
+            .render(
+                Rect {
+                    y: hint_y,
+                    height: 1,
+                    ..area
+                },
+                buf,
+            );
         }
 
         // Drive the tachyonfx effect — must happen after widget renders

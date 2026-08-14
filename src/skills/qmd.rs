@@ -28,14 +28,12 @@ pub fn parse(data: &str) -> Result<Skill> {
         anyhow!("missing YAML frontmatter — a .qmd skill must start with a `---` block")
     })?;
     // Frontmatter ends at the next line that is exactly "---".
-    let end = find_closing_fence(rest).ok_or_else(|| {
-        anyhow!("frontmatter is never closed — expected a line with just `---`")
-    })?;
+    let end = find_closing_fence(rest)
+        .ok_or_else(|| anyhow!("frontmatter is never closed — expected a line with just `---`"))?;
     let yaml = &rest[..end];
     let body_source = &rest[end..].trim_start_matches('-').trim_start_matches('\n');
 
-    let fm: Frontmatter = serde_yaml::from_str(yaml)
-        .map_err(|e| anyhow!("frontmatter: {e}"))?;
+    let fm: Frontmatter = serde_yaml::from_str(yaml).map_err(|e| anyhow!("frontmatter: {e}"))?;
 
     let (body, chunks) = split_chunks(body_source);
 
@@ -73,7 +71,9 @@ fn split_chunks(body: &str) -> (String, Vec<Chunk>) {
 
     while let Some(line) = lines.next() {
         let trimmed = line.trim_start();
-        let lang = trimmed.strip_prefix("```{sh}").map(|_| "sh")
+        let lang = trimmed
+            .strip_prefix("```{sh}")
+            .map(|_| "sh")
             .or_else(|| trimmed.strip_prefix("```{bash}").map(|_| "bash"));
 
         let Some(lang) = lang else {
@@ -90,7 +90,10 @@ fn split_chunks(body: &str) -> (String, Vec<Chunk>) {
             source.push_str(chunk_line);
             source.push('\n');
         }
-        chunks.push(Chunk { lang: lang.to_string(), source: source.trim_end_matches('\n').to_string() });
+        chunks.push(Chunk {
+            lang: lang.to_string(),
+            source: source.trim_end_matches('\n').to_string(),
+        });
     }
 
     (prose.trim().to_string(), chunks)
@@ -143,7 +146,8 @@ mod tests {
 
     #[test]
     fn parses_prompt_only_skill() {
-        let src = "---\nname: summarize\ndescription: Summarize input\n---\n\nSummarize this: {input}\n";
+        let src =
+            "---\nname: summarize\ndescription: Summarize input\n---\n\nSummarize this: {input}\n";
         let skill = parse(src).unwrap();
         assert!(skill.chunks.is_empty());
         assert_eq!(skill.body, "Summarize this: {input}");
@@ -176,7 +180,10 @@ mod tests {
             description: "a round trip test".into(),
             triggers: vec!["rt".into()],
             body: "Some prose here.".into(),
-            chunks: vec![Chunk { lang: "sh".into(), source: "echo {query}".into() }],
+            chunks: vec![Chunk {
+                lang: "sh".into(),
+                source: "echo {query}".into(),
+            }],
             format: super::super::SkillFormat::Qmd,
         };
         let rendered = to_string(&original).unwrap();

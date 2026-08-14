@@ -9,7 +9,7 @@ use crate::engine::UiUpdate;
 use crate::tui::widgets::config_menu::ConfigMenu;
 use crate::tui::widgets::diff::DiffPane;
 use crate::tui::widgets::editor::EditorPane;
-use crate::tui::widgets::suggestions::{CmdDef, all_commands};
+use crate::tui::widgets::suggestions::{all_commands, CmdDef};
 use crate::tui::widgets::viewer::ViewerPane;
 
 use super::entry::{ChatEntry, EntryRole};
@@ -242,7 +242,11 @@ impl ChatView {
                 });
                 self.maybe_scroll_to_bottom();
             }
-            UiUpdate::ToolResult { name, output, is_error } => {
+            UiUpdate::ToolResult {
+                name,
+                output,
+                is_error,
+            } => {
                 // The mark_complete result ("Acknowledged.") is a pure signal —
                 // hide it along with its tool call.
                 if name == "mark_complete" {
@@ -288,7 +292,9 @@ impl ChatView {
                 self.rate_limit_secs = secs;
                 self.rate_limit_total = secs;
                 self.streaming = false;
-                self.add_system(&format!("Rate limited. Resuming automatically in {secs}s..."));
+                self.add_system(&format!(
+                    "Rate limited. Resuming automatically in {secs}s..."
+                ));
             }
             UiUpdate::GoalComplete { tool_count } => {
                 self.streaming = false;
@@ -376,18 +382,27 @@ impl ChatView {
             }
             // TaskUpdate, TokenUsage, AstMode, PromptBudget, and Subagent* are
             // consumed by the runner/sidebar.
-            UiUpdate::TaskUpdate(_) | UiUpdate::PlanUpdate(_) | UiUpdate::TokenUsage { .. } | UiUpdate::AstMode(_)
-                | UiUpdate::PromptBudget(_) | UiUpdate::SubagentStarted { .. }
-                | UiUpdate::SubagentToolCall { .. } | UiUpdate::SubagentFinished { .. } => {}
+            UiUpdate::TaskUpdate(_)
+            | UiUpdate::PlanUpdate(_)
+            | UiUpdate::TokenUsage { .. }
+            | UiUpdate::AstMode(_)
+            | UiUpdate::PromptBudget(_)
+            | UiUpdate::SubagentStarted { .. }
+            | UiUpdate::SubagentToolCall { .. }
+            | UiUpdate::SubagentFinished { .. } => {}
             UiUpdate::IndexBuilt => {}
-            UiUpdate::ToolStreamChunk { chunk, .. } => {
+            UiUpdate::ToolStreamChunk { chunk } => {
                 // Stream tool output into the tool-call bubble buffer so it
                 // stays inside the tool box instead of bleeding into the main
                 // chat stream (which is model text).
                 self.tool_stream_buf.push_str(&chunk);
                 self.maybe_scroll_to_bottom();
             }
-            UiUpdate::DiffPreview { tool_id, path, diff } => {
+            UiUpdate::DiffPreview {
+                tool_id,
+                path,
+                diff,
+            } => {
                 self.close_overlay_panes();
                 self.diff_pane = Some(DiffPane::new(path, diff));
                 // Store the tool_id so on_key can send AcceptDiff/RejectDiff
@@ -397,7 +412,9 @@ impl ChatView {
     }
 
     pub fn tick_rate_limit(&mut self) -> bool {
-        if !self.rate_limited || self.rate_limit_secs == 0 { return false; }
+        if !self.rate_limited || self.rate_limit_secs == 0 {
+            return false;
+        }
         self.rate_limit_secs -= 1;
         if self.rate_limit_secs == 0 {
             self.rate_limited = false;
@@ -447,9 +464,7 @@ impl ChatView {
 
         let mut matches: Vec<String> = entries
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name().to_string_lossy().starts_with(&file_prefix)
-            })
+            .filter(|e| e.file_name().to_string_lossy().starts_with(&file_prefix))
             .map(|e| {
                 let name = e.file_name().to_string_lossy().to_string();
                 if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
@@ -469,7 +484,8 @@ impl ChatView {
         if matches.len() == 1 {
             // Single match — complete it
             let rel = if partial.contains('/') {
-                let dir_prefix = partial[..partial.rfind('/').map(|i| i + 1).unwrap_or(0)].to_string();
+                let dir_prefix =
+                    partial[..partial.rfind('/').map(|i| i + 1).unwrap_or(0)].to_string();
                 format!("{dir_prefix}{}", matches[0])
             } else {
                 matches[0].clone()
@@ -488,7 +504,8 @@ impl ChatView {
             }
             if common.len() > file_prefix.len() {
                 let rel = if partial.contains('/') {
-                    let dir_prefix = partial[..partial.rfind('/').map(|i| i + 1).unwrap_or(0)].to_string();
+                    let dir_prefix =
+                        partial[..partial.rfind('/').map(|i| i + 1).unwrap_or(0)].to_string();
                     format!("{dir_prefix}{common}")
                 } else {
                     common

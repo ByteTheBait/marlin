@@ -90,7 +90,11 @@ fn last_checkpoint(work_dir: &str) -> Option<String> {
         return None;
     }
     let hash = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if hash.is_empty() { None } else { Some(hash) }
+    if hash.is_empty() {
+        None
+    } else {
+        Some(hash)
+    }
 }
 
 /// Undo the most recent turn: hard-reset the working tree to the last
@@ -140,13 +144,21 @@ mod tests {
     fn temp_git_repo() -> String {
         let dir = std::env::temp_dir().join(format!("marlin_ckpt_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let _ = Command::new("git").args(["init", "-q"]).current_dir(&dir).output().unwrap();
+        let _ = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
         let _ = Command::new("git")
             .args(["config", "user.email", "test@example.com"])
-            .current_dir(&dir).output().unwrap();
+            .current_dir(&dir)
+            .output()
+            .unwrap();
         let _ = Command::new("git")
             .args(["config", "user.name", "Test"])
-            .current_dir(&dir).output().unwrap();
+            .current_dir(&dir)
+            .output()
+            .unwrap();
         dir.to_string_lossy().to_string()
     }
 
@@ -191,8 +203,16 @@ mod tests {
     fn undo_without_checkpoint_is_an_error() {
         let dir = temp_git_repo();
         std::fs::write(Path::new(&dir).join("a.txt"), "v1").unwrap();
-        let _ = Command::new("git").args(["add", "-A"]).current_dir(&dir).output().unwrap();
-        let _ = Command::new("git").args(["commit", "-m", "initial"]).current_dir(&dir).output().unwrap();
+        let _ = Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let _ = Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
 
         assert!(undo(&dir).is_err(), "no marlin checkpoint should error");
 

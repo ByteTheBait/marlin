@@ -27,9 +27,14 @@ impl LoopGuard {
 
     /// Call after any tool call. Returns a system intercept message if stuck.
     pub fn check(&mut self, tool: &str, failed: bool) -> Option<String> {
-        let entry = Entry { cmd: tool.to_string(), failed };
+        let entry = Entry {
+            cmd: tool.to_string(),
+            failed,
+        };
 
-        let repeat_fails = self.history.iter()
+        let repeat_fails = self
+            .history
+            .iter()
             .filter(|e| e.cmd == tool && e.failed)
             .count();
 
@@ -49,7 +54,12 @@ impl LoopGuard {
     }
 
     /// Call after edit_file or write_file. Returns intercept if the file didn't actually change.
-    pub fn check_file_edit(&mut self, path: &str, new_content: &[u8], failed: bool) -> Option<String> {
+    pub fn check_file_edit(
+        &mut self,
+        path: &str,
+        new_content: &[u8],
+        failed: bool,
+    ) -> Option<String> {
         let mut hasher = Sha256::new();
         hasher.update(new_content);
         let hash: [u8; 32] = hasher.finalize().into();
@@ -71,7 +81,8 @@ impl LoopGuard {
                 *count = if failed { 1 } else { 0 };
             }
         } else {
-            self.edit_hashes.insert(path.to_string(), (hash, if failed { 1 } else { 0 }));
+            self.edit_hashes
+                .insert(path.to_string(), (hash, if failed { 1 } else { 0 }));
         }
 
         self.check("edit_file", failed)

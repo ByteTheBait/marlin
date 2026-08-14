@@ -65,7 +65,9 @@ pub fn commands_dir(marlin_dir: &Path) -> PathBuf {
 pub fn load_all(marlin_dir: &Path) -> Vec<UserCommand> {
     let dir = commands_dir(marlin_dir);
     let mut commands = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&dir) else { return commands };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return commands;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("toml") {

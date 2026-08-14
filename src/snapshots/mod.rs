@@ -27,7 +27,9 @@ fn snap_dir(marlin_dir: &Path, work_dir: &str, abs_path: &str) -> PathBuf {
 }
 
 pub fn take(marlin_dir: &Path, work_dir: &str, abs_path: &str, tool: &str) {
-    if !Path::new(abs_path).exists() { return; }
+    if !Path::new(abs_path).exists() {
+        return;
+    }
     let dir = snap_dir(marlin_dir, work_dir, abs_path);
     let _ = std::fs::create_dir_all(&dir);
 
@@ -141,9 +143,13 @@ pub fn diff_lines(old: &str, new: &str) -> Option<Vec<DiffLine>> {
 }
 
 pub fn human_size(bytes: u64) -> String {
-    if bytes < 1024 { format!("{bytes}B") }
-    else if bytes < 1024 * 1024 { format!("{:.1}KB", bytes as f64 / 1024.0) }
-    else { format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0)) }
+    if bytes < 1024 {
+        format!("{bytes}B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1}KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+    }
 }
 
 #[cfg(test)]
@@ -153,48 +159,63 @@ mod diff_tests {
     #[test]
     fn identical_files_are_all_context() {
         let ops = diff_lines("a\nb\nc", "a\nb\nc").unwrap();
-        assert_eq!(ops, vec![
-            DiffLine::Context("a".into()),
-            DiffLine::Context("b".into()),
-            DiffLine::Context("c".into()),
-        ]);
+        assert_eq!(
+            ops,
+            vec![
+                DiffLine::Context("a".into()),
+                DiffLine::Context("b".into()),
+                DiffLine::Context("c".into()),
+            ]
+        );
     }
 
     #[test]
     fn pure_addition() {
         let ops = diff_lines("a\nb", "a\nb\nc").unwrap();
-        assert_eq!(ops, vec![
-            DiffLine::Context("a".into()),
-            DiffLine::Context("b".into()),
-            DiffLine::Added("c".into()),
-        ]);
+        assert_eq!(
+            ops,
+            vec![
+                DiffLine::Context("a".into()),
+                DiffLine::Context("b".into()),
+                DiffLine::Added("c".into()),
+            ]
+        );
     }
 
     #[test]
     fn pure_removal() {
         let ops = diff_lines("a\nb\nc", "a\nc").unwrap();
-        assert_eq!(ops, vec![
-            DiffLine::Context("a".into()),
-            DiffLine::Removed("b".into()),
-            DiffLine::Context("c".into()),
-        ]);
+        assert_eq!(
+            ops,
+            vec![
+                DiffLine::Context("a".into()),
+                DiffLine::Removed("b".into()),
+                DiffLine::Context("c".into()),
+            ]
+        );
     }
 
     #[test]
     fn line_replaced_in_the_middle() {
         let ops = diff_lines("a\nb\nc", "a\nx\nc").unwrap();
-        assert_eq!(ops, vec![
-            DiffLine::Context("a".into()),
-            DiffLine::Removed("b".into()),
-            DiffLine::Added("x".into()),
-            DiffLine::Context("c".into()),
-        ]);
+        assert_eq!(
+            ops,
+            vec![
+                DiffLine::Context("a".into()),
+                DiffLine::Removed("b".into()),
+                DiffLine::Added("x".into()),
+                DiffLine::Context("c".into()),
+            ]
+        );
     }
 
     #[test]
     fn empty_old_file_is_all_additions() {
         let ops = diff_lines("", "a\nb").unwrap();
-        assert_eq!(ops, vec![DiffLine::Added("a".into()), DiffLine::Added("b".into())]);
+        assert_eq!(
+            ops,
+            vec![DiffLine::Added("a".into()), DiffLine::Added("b".into())]
+        );
     }
 
     #[test]

@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 
+use super::{claude::ClaudeProvider, openai_compat::OpenAiCompatProvider, Provider};
 use crate::config::Config;
-use super::{Provider, claude::ClaudeProvider, openai_compat::OpenAiCompatProvider};
 
 pub struct Registry {
     providers: HashMap<String, Arc<dyn Provider>>,
@@ -18,47 +18,86 @@ impl Registry {
         let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
 
         let claude_cfg = cfg.providers.get("claude").cloned().unwrap_or_default();
-        providers.insert("claude".into(), Arc::new(ClaudeProvider::new(claude_cfg.api_key)));
+        providers.insert(
+            "claude".into(),
+            Arc::new(ClaudeProvider::new(claude_cfg.api_key)),
+        );
 
         let ollama_cfg = cfg.providers.get("ollama").cloned().unwrap_or_default();
-        let ollama_model = if ollama_cfg.model.is_empty() { "llama3" } else { &ollama_cfg.model };
-        providers.insert("ollama".into(), Arc::new(
-            OpenAiCompatProvider::new_ollama(&ollama_cfg.endpoint, ollama_model)
-        ));
+        let ollama_model = if ollama_cfg.model.is_empty() {
+            "llama3"
+        } else {
+            &ollama_cfg.model
+        };
+        providers.insert(
+            "ollama".into(),
+            Arc::new(OpenAiCompatProvider::new_ollama(
+                &ollama_cfg.endpoint,
+                ollama_model,
+            )),
+        );
 
         let fw_cfg = cfg.providers.get("fireworks").cloned().unwrap_or_default();
-        providers.insert("fireworks".into(), Arc::new(
-            OpenAiCompatProvider::new_fireworks(&fw_cfg.api_key, &fw_cfg.endpoint)
-        ));
+        providers.insert(
+            "fireworks".into(),
+            Arc::new(OpenAiCompatProvider::new_fireworks(
+                &fw_cfg.api_key,
+                &fw_cfg.endpoint,
+            )),
+        );
 
         let groq_cfg = cfg.providers.get("groq").cloned().unwrap_or_default();
-        providers.insert("groq".into(), Arc::new(
-            OpenAiCompatProvider::new_groq(&groq_cfg.api_key, &groq_cfg.endpoint)
-        ));
+        providers.insert(
+            "groq".into(),
+            Arc::new(OpenAiCompatProvider::new_groq(
+                &groq_cfg.api_key,
+                &groq_cfg.endpoint,
+            )),
+        );
 
         let ms_cfg = cfg.providers.get("moonshot").cloned().unwrap_or_default();
-        providers.insert("moonshot".into(), Arc::new(
-            OpenAiCompatProvider::new_moonshot(&ms_cfg.api_key, &ms_cfg.endpoint)
-        ));
+        providers.insert(
+            "moonshot".into(),
+            Arc::new(OpenAiCompatProvider::new_moonshot(
+                &ms_cfg.api_key,
+                &ms_cfg.endpoint,
+            )),
+        );
 
         let or_cfg = cfg.providers.get("openrouter").cloned().unwrap_or_default();
-        providers.insert("openrouter".into(), Arc::new(
-            OpenAiCompatProvider::new_openrouter(&or_cfg.api_key, &or_cfg.endpoint)
-        ));
+        providers.insert(
+            "openrouter".into(),
+            Arc::new(OpenAiCompatProvider::new_openrouter(
+                &or_cfg.api_key,
+                &or_cfg.endpoint,
+            )),
+        );
 
         let custom_cfg = cfg.providers.get("custom").cloned().unwrap_or_default();
-        providers.insert("custom".into(), Arc::new(
-            OpenAiCompatProvider::new_custom(&custom_cfg.api_key, &custom_cfg.endpoint)
-        ));
+        providers.insert(
+            "custom".into(),
+            Arc::new(OpenAiCompatProvider::new_custom(
+                &custom_cfg.api_key,
+                &custom_cfg.endpoint,
+            )),
+        );
 
         // Load user-defined providers from ~/.marlin/providers/*.toml.
         // These are always OpenAI-compatible and don't override built-ins.
         if let Some(dir) = marlin_dir {
             for up in super::user_providers::load_all(dir) {
-                if providers.contains_key(&up.name) { continue; } // built-ins win
-                providers.insert(up.name.clone(), Arc::new(
-                    OpenAiCompatProvider::new_generic(&up.name, &up.endpoint, &up.api_key, up.model_list())
-                ));
+                if providers.contains_key(&up.name) {
+                    continue;
+                } // built-ins win
+                providers.insert(
+                    up.name.clone(),
+                    Arc::new(OpenAiCompatProvider::new_generic(
+                        &up.name,
+                        &up.endpoint,
+                        &up.api_key,
+                        up.model_list(),
+                    )),
+                );
             }
         }
 

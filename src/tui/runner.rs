@@ -2,7 +2,10 @@ use std::io;
 use std::time::Duration;
 
 use crossterm::{
-    event::{self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyModifiers, MouseEventKind,
+    },
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -38,7 +41,12 @@ pub fn run(
     let mut stdout = io::stdout();
     // Without this, a scroll wheel event never reaches the app at all — the
     // terminal emulator just scrolls its own native scrollback buffer instead.
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -152,7 +160,11 @@ pub fn run(
                     splash.render(area, buf);
                 }
                 View::Chat => {
-                    let status_area = Rect { y: area.y, height: 1, ..area };
+                    let status_area = Rect {
+                        y: area.y,
+                        height: 1,
+                        ..area
+                    };
                     let body_area = Rect {
                         y: area.y + 1,
                         height: area.height.saturating_sub(1),
@@ -219,7 +231,9 @@ pub fn run(
         if event::poll(Duration::from_millis(16))? {
             match event::read()? {
                 Event::Key(key) => {
-                    if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    if key.code == KeyCode::Char('q')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
                         let _ = action_tx.blocking_send(Action::Quit);
                         break;
                     }
@@ -295,7 +309,12 @@ pub fn run(
     }
 
     terminal::disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        DisableBracketedPaste
+    )?;
     Ok(())
 }
 
@@ -304,7 +323,12 @@ fn render_approval_modal(cmd: &str, area: Rect, buf: &mut Buffer) {
     let modal_h = 7u16;
     let x = area.x + (area.width.saturating_sub(modal_w)) / 2;
     let y = area.y + (area.height.saturating_sub(modal_h)) / 2;
-    let modal_area = Rect { x, y, width: modal_w, height: modal_h };
+    let modal_area = Rect {
+        x,
+        y,
+        width: modal_w,
+        height: modal_h,
+    };
 
     // Clear the background
     Clear.render(modal_area, buf);
@@ -313,10 +337,16 @@ fn render_approval_modal(cmd: &str, area: Rect, buf: &mut Buffer) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
-        .border_style(Style::default().fg(Color::Rgb(215, 50, 50)).add_modifier(Modifier::BOLD))
+        .border_style(
+            Style::default()
+                .fg(Color::Rgb(215, 50, 50))
+                .add_modifier(Modifier::BOLD),
+        )
         .title(Span::styled(
             " ⚠  Destructive Command ",
-            Style::default().fg(Color::Rgb(215, 50, 50)).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Rgb(215, 50, 50))
+                .add_modifier(Modifier::BOLD),
         ));
 
     let inner = block.inner(modal_area);
@@ -324,22 +354,43 @@ fn render_approval_modal(cmd: &str, area: Rect, buf: &mut Buffer) {
 
     let max_cmd = inner.width.saturating_sub(2) as usize;
     let cmd_display = if cmd.chars().count() > max_cmd {
-        cmd.chars().take(max_cmd.saturating_sub(1)).collect::<String>() + "…"
+        cmd.chars()
+            .take(max_cmd.saturating_sub(1))
+            .collect::<String>()
+            + "…"
     } else {
         cmd.to_string()
     };
 
     let lines = vec![
-        Line::from(Span::styled(&cmd_display, Style::default().fg(Color::Rgb(240, 180, 60)).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            &cmd_display,
+            Style::default()
+                .fg(Color::Rgb(240, 180, 60))
+                .add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
         Line::from(Span::styled(
             "Allow this command to run?",
             Style::default().fg(Color::Rgb(210, 220, 240)),
         )),
         Line::from(vec![
-            Span::styled("  [y] ", Style::default().fg(Color::Rgb(70, 195, 110)).add_modifier(Modifier::BOLD)),
-            Span::styled("Yes, run it", Style::default().fg(Color::Rgb(150, 220, 170))),
-            Span::styled("     [n] ", Style::default().fg(Color::Rgb(215, 70, 70)).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "  [y] ",
+                Style::default()
+                    .fg(Color::Rgb(70, 195, 110))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Yes, run it",
+                Style::default().fg(Color::Rgb(150, 220, 170)),
+            ),
+            Span::styled(
+                "     [n] ",
+                Style::default()
+                    .fg(Color::Rgb(215, 70, 70))
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("No, deny", Style::default().fg(Color::Rgb(220, 150, 150))),
         ]),
     ];
@@ -354,7 +405,12 @@ fn render_ask_modal(question: &str, area: Rect, buf: &mut Buffer) {
     let modal_h = 8u16;
     let x = area.x + (area.width.saturating_sub(modal_w)) / 2;
     let y = area.y + (area.height.saturating_sub(modal_h)) / 2;
-    let modal_area = Rect { x, y, width: modal_w, height: modal_h };
+    let modal_area = Rect {
+        x,
+        y,
+        width: modal_w,
+        height: modal_h,
+    };
 
     // Clear the background
     Clear.render(modal_area, buf);
@@ -363,10 +419,16 @@ fn render_ask_modal(question: &str, area: Rect, buf: &mut Buffer) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
-        .border_style(Style::default().fg(Color::Rgb(0, 200, 200)).add_modifier(Modifier::BOLD))
+        .border_style(
+            Style::default()
+                .fg(Color::Rgb(0, 200, 200))
+                .add_modifier(Modifier::BOLD),
+        )
         .title(Span::styled(
             " ❓  Marlin asks ",
-            Style::default().fg(Color::Rgb(0, 200, 200)).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Rgb(0, 200, 200))
+                .add_modifier(Modifier::BOLD),
         ));
 
     let inner = block.inner(modal_area);
@@ -374,22 +436,39 @@ fn render_ask_modal(question: &str, area: Rect, buf: &mut Buffer) {
 
     let max_q = inner.width.saturating_sub(2) as usize;
     let q_display = if question.chars().count() > max_q {
-        question.chars().take(max_q.saturating_sub(1)).collect::<String>() + "…"
+        question
+            .chars()
+            .take(max_q.saturating_sub(1))
+            .collect::<String>()
+            + "…"
     } else {
         question.to_string()
     };
 
     let lines = vec![
-        Line::from(Span::styled(&q_display, Style::default().fg(Color::Rgb(220, 230, 240)))),
+        Line::from(Span::styled(
+            &q_display,
+            Style::default().fg(Color::Rgb(220, 230, 240)),
+        )),
         Line::from(""),
         Line::from(Span::styled(
             "Type your answer below, then press Enter.",
             Style::default().fg(Color::Rgb(150, 180, 200)),
         )),
         Line::from(vec![
-            Span::styled("  [enter] ", Style::default().fg(Color::Rgb(70, 195, 110)).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "  [enter] ",
+                Style::default()
+                    .fg(Color::Rgb(70, 195, 110))
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Submit", Style::default().fg(Color::Rgb(150, 220, 170))),
-            Span::styled("     [esc] ", Style::default().fg(Color::Rgb(215, 70, 70)).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "     [esc] ",
+                Style::default()
+                    .fg(Color::Rgb(215, 70, 70))
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Cancel", Style::default().fg(Color::Rgb(220, 150, 150))),
         ]),
     ];

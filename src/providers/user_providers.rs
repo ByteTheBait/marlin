@@ -26,10 +26,17 @@ pub fn validate_endpoint(endpoint: &str) -> std::result::Result<(), String> {
 /// change might be redirecting a *stored API key* somewhere the user didn't
 /// intend, not to gate self-hosted use.
 pub fn endpoint_is_private_host(endpoint: &str) -> bool {
-    let Ok(url) = reqwest::Url::parse(endpoint) else { return false };
-    let Some(host) = url.host_str() else { return false };
+    let Ok(url) = reqwest::Url::parse(endpoint) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
     // IPv6 literals come back bracketed (e.g. "[::1]") — strip for parsing.
-    let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
     if host.eq_ignore_ascii_case("localhost") {
         return true;
     }
@@ -86,10 +93,14 @@ pub fn providers_dir(marlin_dir: &Path) -> PathBuf {
 pub fn load_all(marlin_dir: &Path) -> Vec<UserProvider> {
     let dir = providers_dir(marlin_dir);
     let mut providers = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&dir) else { return providers };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return providers;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("toml") { continue; }
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
         if let Ok(data) = std::fs::read_to_string(&path) {
             match toml::from_str::<UserProvider>(&data) {
                 Ok(p) => providers.push(p),
@@ -106,12 +117,20 @@ pub fn load_all(marlin_dir: &Path) -> Vec<UserProvider> {
 /// callers should fall back to built-in config storage in that case.
 fn set_field(marlin_dir: &Path, name: &str, f: impl FnOnce(&mut UserProvider)) -> Result<bool> {
     let dir = providers_dir(marlin_dir);
-    let Ok(entries) = std::fs::read_dir(&dir) else { return Ok(false) };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(false);
+    };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("toml") { continue; }
-        let Ok(data) = std::fs::read_to_string(&path) else { continue };
-        let Ok(mut p) = toml::from_str::<UserProvider>(&data) else { continue };
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let Ok(data) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(mut p) = toml::from_str::<UserProvider>(&data) else {
+            continue;
+        };
         if p.name.eq_ignore_ascii_case(name) {
             f(&mut p);
             std::fs::write(&path, toml::to_string_pretty(&p)?)?;
@@ -142,34 +161,50 @@ fn write_provider(marlin_dir: &Path, p: &UserProvider) -> Result<PathBuf> {
 }
 
 pub fn save_template(marlin_dir: &Path, name: &str) -> Result<PathBuf> {
-    write_provider(marlin_dir, &UserProvider {
-        name: name.to_string(),
-        endpoint: "https://api.example.com/v1".into(),
-        api_key: String::new(),
-        model: "model-name".into(),
-        models: vec!["model-name".into(), "model-name-fast".into()],
-    })
+    write_provider(
+        marlin_dir,
+        &UserProvider {
+            name: name.to_string(),
+            endpoint: "https://api.example.com/v1".into(),
+            api_key: String::new(),
+            model: "model-name".into(),
+            models: vec!["model-name".into(), "model-name-fast".into()],
+        },
+    )
 }
 
 /// Create a user-defined provider from values gathered interactively (the
 /// config menu's "New provider" wizard). Blank `endpoint`/`model` fall back
 /// to the same placeholders `save_template` uses, so the file is still valid
 /// TOML the user can hand-edit later; a non-blank endpoint is validated.
-pub fn save_new(marlin_dir: &Path, name: &str, endpoint: &str, model: &str, api_key: &str) -> Result<PathBuf> {
+pub fn save_new(
+    marlin_dir: &Path,
+    name: &str,
+    endpoint: &str,
+    model: &str,
+    api_key: &str,
+) -> Result<PathBuf> {
     let endpoint = if endpoint.is_empty() {
         "https://api.example.com/v1".to_string()
     } else {
         validate_endpoint(endpoint).map_err(|e| anyhow::anyhow!(e))?;
         endpoint.to_string()
     };
-    let model = if model.is_empty() { "model-name".to_string() } else { model.to_string() };
-    write_provider(marlin_dir, &UserProvider {
-        name: name.to_string(),
-        endpoint,
-        api_key: api_key.to_string(),
-        model: model.clone(),
-        models: vec![model],
-    })
+    let model = if model.is_empty() {
+        "model-name".to_string()
+    } else {
+        model.to_string()
+    };
+    write_provider(
+        marlin_dir,
+        &UserProvider {
+            name: name.to_string(),
+            endpoint,
+            api_key: api_key.to_string(),
+            model: model.clone(),
+            models: vec![model],
+        },
+    )
 }
 
 // ── Default providers ─────────────────────────────────────────────────────────

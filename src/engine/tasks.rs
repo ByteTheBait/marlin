@@ -22,16 +22,30 @@ pub struct TaskStep {
 impl TaskStep {
     #[allow(dead_code)]
     pub fn goal(desc: impl Into<String>) -> Self {
-        Self { description: desc.into(), status: TaskStatus::InProgress, tool_name: None, parallel_group: None }
+        Self {
+            description: desc.into(),
+            status: TaskStatus::InProgress,
+            tool_name: None,
+            parallel_group: None,
+        }
     }
 
     /// Upfront plan step, shown Pending in the sidebar until the matching
     /// batch of tool calls completes (see `Engine::maybe_generate_plan`).
     pub fn planned(desc: impl Into<String>) -> Self {
-        Self { description: desc.into(), status: TaskStatus::Pending, tool_name: None, parallel_group: None }
+        Self {
+            description: desc.into(),
+            status: TaskStatus::Pending,
+            tool_name: None,
+            parallel_group: None,
+        }
     }
 
-    pub fn tool_pending(name: &str, desc: impl Into<String>, parallel_group: Option<usize>) -> Self {
+    pub fn tool_pending(
+        name: &str,
+        desc: impl Into<String>,
+        parallel_group: Option<usize>,
+    ) -> Self {
         Self {
             description: desc.into(),
             status: TaskStatus::InProgress,
@@ -55,10 +69,10 @@ impl TaskStep {
     #[allow(dead_code)]
     pub fn status_char(&self) -> char {
         match self.status {
-            TaskStatus::Pending    => ' ',
+            TaskStatus::Pending => ' ',
             TaskStatus::InProgress => '>',
-            TaskStatus::Completed  => 'x',
-            TaskStatus::Failed     => '!',
+            TaskStatus::Completed => 'x',
+            TaskStatus::Failed => '!',
         }
     }
 }

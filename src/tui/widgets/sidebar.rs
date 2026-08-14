@@ -68,7 +68,8 @@ impl Sidebar {
     /// without a tool name fall into a catch-all "other" bucket.
     pub fn task_categories(&self) -> Vec<(String, Vec<&TaskStep>)> {
         let mut order: Vec<String> = Vec::new();
-        let mut map: std::collections::HashMap<String, Vec<&TaskStep>> = std::collections::HashMap::new();
+        let mut map: std::collections::HashMap<String, Vec<&TaskStep>> =
+            std::collections::HashMap::new();
         for t in &self.tasks {
             let key = t.tool_name.clone().unwrap_or_else(|| "other".to_string());
             if !map.contains_key(&key) {
@@ -76,13 +77,19 @@ impl Sidebar {
             }
             map.entry(key).or_default().push(t);
         }
-        order.into_iter().map(|k| (k.clone(), map.remove(&k).unwrap_or_default())).collect()
+        order
+            .into_iter()
+            .map(|k| (k.clone(), map.remove(&k).unwrap_or_default()))
+            .collect()
     }
 
     /// Move the selected category up/down by `delta` (clamped to range).
     pub fn move_selection(&mut self, delta: isize) {
         let cats = self.task_categories();
-        if cats.is_empty() { self.selected_category = None; return; }
+        if cats.is_empty() {
+            self.selected_category = None;
+            return;
+        }
         let cur = self.selected_category.unwrap_or(0) as isize;
         let next = (cur + delta).clamp(0, cats.len() as isize - 1) as usize;
         self.selected_category = Some(next);
@@ -105,10 +112,21 @@ impl Sidebar {
     pub fn subagent_started(&mut self, id: String, label: String) {
         // Trim finished entries (never running ones) before adding a new one.
         while self.subagents.len() >= MAX_SUBAGENT_ENTRIES {
-            let Some(idx) = self.subagents.iter().position(|s| s.status != SubagentStatus::Running) else { break };
+            let Some(idx) = self
+                .subagents
+                .iter()
+                .position(|s| s.status != SubagentStatus::Running)
+            else {
+                break;
+            };
             self.subagents.remove(idx);
         }
-        self.subagents.push(SubagentEntry { id, label, status: SubagentStatus::Running, current_tool: None });
+        self.subagents.push(SubagentEntry {
+            id,
+            label,
+            status: SubagentStatus::Running,
+            current_tool: None,
+        });
     }
 
     pub fn subagent_tool_call(&mut self, id: &str, name: String) {
@@ -119,7 +137,11 @@ impl Sidebar {
 
     pub fn subagent_finished(&mut self, id: &str, ok: bool) {
         if let Some(s) = self.subagents.iter_mut().find(|s| s.id == id) {
-            s.status = if ok { SubagentStatus::Done } else { SubagentStatus::Failed };
+            s.status = if ok {
+                SubagentStatus::Done
+            } else {
+                SubagentStatus::Failed
+            };
             s.current_tool = None;
         }
     }
@@ -127,7 +149,9 @@ impl Sidebar {
 
 impl Widget for Sidebar {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        if area.width < 4 || area.height < 4 { return; }
+        if area.width < 4 || area.height < 4 {
+            return;
+        }
 
         let block = Block::default()
             .borders(Borders::LEFT)
@@ -135,7 +159,9 @@ impl Widget for Sidebar {
         let inner = block.inner(area);
         block.render(area, buf);
 
-        if inner.height == 0 { return; }
+        if inner.height == 0 {
+            return;
+        }
 
         let mut y = inner.y;
 
@@ -147,7 +173,10 @@ impl Widget for Sidebar {
 
         // Section label
         if y < inner.bottom() {
-            let label = Span::styled("Context Budget", style_system().add_modifier(Modifier::BOLD));
+            let label = Span::styled(
+                "Context Budget",
+                style_system().add_modifier(Modifier::BOLD),
+            );
             buf.set_span(inner.x, y, &label, inner.width);
             y += 1;
         }
@@ -156,7 +185,9 @@ impl Widget for Sidebar {
         if y < inner.bottom() {
             let pct = if self.token_budget > 0 {
                 (self.token_used as f64 / self.token_budget as f64).min(1.0)
-            } else { 0.0 };
+            } else {
+                0.0
+            };
             let bar_w = inner.width.saturating_sub(2) as usize;
             let filled = (pct * bar_w as f64).round() as usize;
             let empty = bar_w.saturating_sub(filled);
@@ -170,13 +201,18 @@ impl Widget for Sidebar {
             };
 
             let filled_str = "█".repeat(filled);
-            let empty_str  = "░".repeat(empty);
+            let empty_str = "░".repeat(empty);
             let line = Line::from(vec![
                 Span::styled(filled_str, Style::default().fg(bar_color)),
                 Span::styled(empty_str, style_separator()),
             ]);
             Paragraph::new(line).render(
-                Rect { x: inner.x, y, width: inner.width, height: 1 },
+                Rect {
+                    x: inner.x,
+                    y,
+                    width: inner.width,
+                    height: 1,
+                },
                 buf,
             );
             y += 1;
@@ -199,7 +235,10 @@ impl Widget for Sidebar {
         // Token history line graph
         let chart_h = 6u16;
         if self.token_history.len() >= 2 && inner.bottom().saturating_sub(y) > chart_h + 2 {
-            let data: Vec<(f64, f64)> = self.token_history.iter().enumerate()
+            let data: Vec<(f64, f64)> = self
+                .token_history
+                .iter()
+                .enumerate()
                 .map(|(i, &v)| (i as f64, v as f64))
                 .collect();
             let x_max = (TOKEN_HISTORY_LEN - 1) as f64;
@@ -216,7 +255,12 @@ impl Widget for Sidebar {
                 .y_axis(Axis::default().bounds([0.0, y_max]));
 
             chart.render(
-                Rect { x: inner.x, y, width: inner.width, height: chart_h },
+                Rect {
+                    x: inner.x,
+                    y,
+                    width: inner.width,
+                    height: chart_h,
+                },
                 buf,
             );
             y += chart_h;
@@ -245,18 +289,24 @@ impl Widget for Sidebar {
             let start = self.plan.len().saturating_sub(available_rows);
 
             for step in self.plan[start..].iter() {
-                if y >= inner.bottom() { break; }
+                if y >= inner.bottom() {
+                    break;
+                }
 
                 let (marker, marker_style) = match step.status {
-                    TaskStatus::Completed  => ("x", style_success()),
-                    TaskStatus::Failed     => ("!", style_error()),
+                    TaskStatus::Completed => ("x", style_success()),
+                    TaskStatus::Failed => ("!", style_error()),
                     TaskStatus::InProgress => (">", style_prompt_active()),
-                    TaskStatus::Pending    => (" ", style_system()),
+                    TaskStatus::Pending => (" ", style_system()),
                 };
 
                 let max_desc = inner.width.saturating_sub(4) as usize;
                 let desc = if step.description.chars().count() > max_desc {
-                    step.description.chars().take(max_desc.saturating_sub(1)).collect::<String>() + "…"
+                    step.description
+                        .chars()
+                        .take(max_desc.saturating_sub(1))
+                        .collect::<String>()
+                        + "…"
                 } else {
                     step.description.clone()
                 };
@@ -268,7 +318,12 @@ impl Widget for Sidebar {
                     Span::styled(desc, style_inline_text()),
                 ]);
                 Paragraph::new(line).render(
-                    Rect { x: inner.x, y, width: inner.width, height: 1 },
+                    Rect {
+                        x: inner.x,
+                        y,
+                        width: inner.width,
+                        height: 1,
+                    },
                     buf,
                 );
                 y += 1;
@@ -300,10 +355,15 @@ impl Widget for Sidebar {
             // just the tool name + count; the selected category expands to show
             // each individual task description.
             let cats = self.task_categories();
-            let sel = self.selected_category.unwrap_or(0).min(cats.len().saturating_sub(1));
+            let sel = self
+                .selected_category
+                .unwrap_or(0)
+                .min(cats.len().saturating_sub(1));
 
             for (ci, (name, steps)) in cats.iter().enumerate() {
-                if y >= inner.bottom() { break; }
+                if y >= inner.bottom() {
+                    break;
+                }
                 let is_sel = ci == sel;
                 let is_expanded = is_sel && self.expanded;
 
@@ -322,7 +382,12 @@ impl Widget for Sidebar {
                     Span::styled(format!("{name} ({count})"), cat_style),
                 ]);
                 Paragraph::new(cat_line).render(
-                    Rect { x: inner.x, y, width: inner.width, height: 1 },
+                    Rect {
+                        x: inner.x,
+                        y,
+                        width: inner.width,
+                        height: 1,
+                    },
                     buf,
                 );
                 y += 1;
@@ -330,12 +395,14 @@ impl Widget for Sidebar {
                 // Expanded: show each task in this category
                 if is_expanded {
                     for step in steps {
-                        if y >= inner.bottom() { break; }
+                        if y >= inner.bottom() {
+                            break;
+                        }
                         let (marker, marker_style) = match step.status {
-                            TaskStatus::Completed  => ("x", style_success()),
-                            TaskStatus::Failed     => ("!", style_error()),
+                            TaskStatus::Completed => ("x", style_success()),
+                            TaskStatus::Failed => ("!", style_error()),
                             TaskStatus::InProgress => (">", style_prompt_active()),
-                            TaskStatus::Pending    => (" ", style_system()),
+                            TaskStatus::Pending => (" ", style_system()),
                         };
                         let (lead, max_desc) = if step.parallel_group.is_some() {
                             ("∥", inner.width.saturating_sub(6) as usize)
@@ -343,7 +410,11 @@ impl Widget for Sidebar {
                             (" ", inner.width.saturating_sub(5) as usize)
                         };
                         let desc = if step.description.chars().count() > max_desc {
-                            step.description.chars().take(max_desc.saturating_sub(1)).collect::<String>() + "…"
+                            step.description
+                                .chars()
+                                .take(max_desc.saturating_sub(1))
+                                .collect::<String>()
+                                + "…"
                         } else {
                             step.description.clone()
                         };
@@ -356,7 +427,12 @@ impl Widget for Sidebar {
                             Span::styled(desc, style_inline_text()),
                         ]);
                         Paragraph::new(line).render(
-                            Rect { x: inner.x, y, width: inner.width, height: 1 },
+                            Rect {
+                                x: inner.x,
+                                y,
+                                width: inner.width,
+                                height: 1,
+                            },
                             buf,
                         );
                         y += 1;
@@ -391,7 +467,9 @@ impl Widget for Sidebar {
         let start = self.subagents.len().saturating_sub(available_rows);
 
         for sa in self.subagents[start..].iter() {
-            if y >= inner.bottom() { break; }
+            if y >= inner.bottom() {
+                break;
+            }
 
             let (marker, marker_style) = match sa.status {
                 SubagentStatus::Running => (">", style_prompt_active()),
@@ -406,7 +484,11 @@ impl Widget for Sidebar {
 
             let max_desc = inner.width.saturating_sub(4) as usize;
             let desc = if detail.chars().count() > max_desc {
-                detail.chars().take(max_desc.saturating_sub(1)).collect::<String>() + "…"
+                detail
+                    .chars()
+                    .take(max_desc.saturating_sub(1))
+                    .collect::<String>()
+                    + "…"
             } else {
                 detail
             };
@@ -418,7 +500,12 @@ impl Widget for Sidebar {
                 Span::styled(desc, style_inline_text()),
             ]);
             Paragraph::new(line).render(
-                Rect { x: inner.x, y, width: inner.width, height: 1 },
+                Rect {
+                    x: inner.x,
+                    y,
+                    width: inner.width,
+                    height: 1,
+                },
                 buf,
             );
             y += 1;
@@ -428,6 +515,9 @@ impl Widget for Sidebar {
 
 // A sensible foreground color to pair with col_app_bg() in the sidebar.
 fn fg_on_app_bg() -> Color {
-    if is_light() { Color::Rgb(30, 50, 90) } else { Color::Rgb(180, 200, 230) }
+    if is_light() {
+        Color::Rgb(30, 50, 90)
+    } else {
+        Color::Rgb(180, 200, 230)
+    }
 }
-

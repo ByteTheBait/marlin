@@ -35,11 +35,19 @@ pub struct Invocation {
 
 impl Invocation {
     pub fn shell(tool_name: impl Into<String>, command: impl Into<String>) -> Self {
-        Self { tool_name: tool_name.into(), command: Some(command.into()), paths: vec![] }
+        Self {
+            tool_name: tool_name.into(),
+            command: Some(command.into()),
+            paths: vec![],
+        }
     }
 
     pub fn paths(tool_name: impl Into<String>, paths: Vec<String>) -> Self {
-        Self { tool_name: tool_name.into(), command: None, paths }
+        Self {
+            tool_name: tool_name.into(),
+            command: None,
+            paths,
+        }
     }
 }
 
@@ -91,7 +99,8 @@ fn path_escape(tool_name: &str, path: &str, work_dir: &str) -> Option<String> {
     // Canonicalize work_dir *before* joining so both sides agree on symlinks
     // (e.g. macOS /tmp -> /private/tmp) — otherwise an in-bounds relative path
     // can spuriously look like an escape.
-    let work_norm = std::fs::canonicalize(work_dir).unwrap_or_else(|_| normalize(Path::new(work_dir)));
+    let work_norm =
+        std::fs::canonicalize(work_dir).unwrap_or_else(|_| normalize(Path::new(work_dir)));
     let resolved = executor::resolve_path(path, &work_norm.to_string_lossy());
     let resolved_norm = normalize(Path::new(&resolved));
 
@@ -124,7 +133,8 @@ fn is_always_allowed_tmp(path: &Path, work_dir_norm: &Path) -> bool {
     roots.iter().any(|root| {
         let root_norm = std::fs::canonicalize(root).unwrap_or_else(|_| normalize(root));
         let in_root = path.starts_with(&root_norm) || path.starts_with(root);
-        let work_dir_in_root = work_dir_norm.starts_with(&root_norm) || work_dir_norm.starts_with(root);
+        let work_dir_in_root =
+            work_dir_norm.starts_with(&root_norm) || work_dir_norm.starts_with(root);
         in_root && !work_dir_in_root
     })
 }
@@ -134,7 +144,9 @@ fn normalize(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in p.components() {
         match comp {
-            std::path::Component::ParentDir => { out.pop(); }
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
             std::path::Component::CurDir => {}
             other => out.push(other.as_os_str()),
         }
@@ -143,16 +155,20 @@ fn normalize(p: &Path) -> PathBuf {
 }
 
 const DESTRUCTIVE_BINS: &[&str] = &[
-    "rm", "rmdir", "dd", "mkfs", "fdisk",
-    "shutdown", "reboot", "halt", "poweroff",
-    "kill", "pkill", "killall",
+    "rm", "rmdir", "dd", "mkfs", "fdisk", "shutdown", "reboot", "halt", "poweroff", "kill",
+    "pkill", "killall",
 ];
 
 /// Tokenized destructive-command classifier. Replaces the old substring match,
 /// which never fired for `/bin/rm x` (absolute path) or `find . -delete`
 /// (no literal "rm"), and which never ran at all for skill-routed commands.
 pub fn is_destructive_cmd(cmd: &str) -> bool {
-    if cmd.chars().filter(|c| !c.is_whitespace()).collect::<String>().contains(":(){:|:&};:") {
+    if cmd
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .contains(":(){:|:&};:")
+    {
         return true; // fork bomb
     }
 
@@ -165,7 +181,9 @@ pub fn is_destructive_cmd(cmd: &str) -> bool {
 
     for segment in split_segments(cmd) {
         let tokens: Vec<&str> = segment.split_whitespace().collect();
-        let Some(&first) = tokens.first() else { continue };
+        let Some(&first) = tokens.first() else {
+            continue;
+        };
         let argv0 = basename(first);
 
         if DESTRUCTIVE_BINS.contains(&argv0.as_str()) {
@@ -192,7 +210,9 @@ pub fn is_destructive_cmd(cmd: &str) -> bool {
                 if sub == "reset" && rest.contains(&"--hard") {
                     return true;
                 }
-                if sub == "clean" && (has_force || rest.iter().any(|t| t.starts_with('-') && t.contains('f'))) {
+                if sub == "clean"
+                    && (has_force || rest.iter().any(|t| t.starts_with('-') && t.contains('f')))
+                {
                     return true;
                 }
             }
@@ -204,7 +224,11 @@ pub fn is_destructive_cmd(cmd: &str) -> bool {
 }
 
 fn basename(argv0: &str) -> String {
-    Path::new(argv0).file_name().and_then(|s| s.to_str()).unwrap_or(argv0).to_string()
+    Path::new(argv0)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(argv0)
+        .to_string()
 }
 
 /// Split a command into segments on `&&`, `||`, `;`, and `|`, respecting quotes,
@@ -219,8 +243,16 @@ fn split_segments(cmd: &str) -> Vec<String> {
     while i < chars.len() {
         let c = chars[i];
         match c {
-            '\'' if !in_double => { in_single = !in_single; current.push(c); i += 1; }
-            '"' if !in_single => { in_double = !in_double; current.push(c); i += 1; }
+            '\'' if !in_double => {
+                in_single = !in_single;
+                current.push(c);
+                i += 1;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                current.push(c);
+                i += 1;
+            }
             '&' if !in_single && !in_double && chars.get(i + 1) == Some(&'&') => {
                 segments.push(std::mem::take(&mut current));
                 i += 2;
@@ -233,7 +265,10 @@ fn split_segments(cmd: &str) -> Vec<String> {
                 segments.push(std::mem::take(&mut current));
                 i += 1;
             }
-            _ => { current.push(c); i += 1; }
+            _ => {
+                current.push(c);
+                i += 1;
+            }
         }
     }
     segments.push(current);
@@ -247,7 +282,10 @@ fn split_segments(cmd: &str) -> Vec<String> {
 // issues are reported but the skill still loads.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Severity { Warning, Error }
+pub enum Severity {
+    Warning,
+    Error,
+}
 
 #[derive(Debug, Clone)]
 pub struct Issue {
@@ -256,8 +294,18 @@ pub struct Issue {
 }
 
 impl Issue {
-    fn warn(msg: impl Into<String>) -> Self { Self { severity: Severity::Warning, message: msg.into() } }
-    fn error(msg: impl Into<String>) -> Self { Self { severity: Severity::Error, message: msg.into() } }
+    fn warn(msg: impl Into<String>) -> Self {
+        Self {
+            severity: Severity::Warning,
+            message: msg.into(),
+        }
+    }
+    fn error(msg: impl Into<String>) -> Self {
+        Self {
+            severity: Severity::Error,
+            message: msg.into(),
+        }
+    }
 }
 
 pub fn validate_skill(skill: &Skill) -> Vec<Issue> {
@@ -271,12 +319,18 @@ pub fn validate_skill(skill: &Skill) -> Vec<Issue> {
     }
 
     if skill.chunks.is_empty() && skill.body.trim().is_empty() {
-        issues.push(Issue::error("skill has neither a shell chunk nor a prompt body"));
+        issues.push(Issue::error(
+            "skill has neither a shell chunk nor a prompt body",
+        ));
         return issues;
     }
 
     for (i, chunk) in skill.chunks.iter().enumerate() {
-        let label = if skill.chunks.len() > 1 { format!("chunk {}", i + 1) } else { "command".to_string() };
+        let label = if skill.chunks.len() > 1 {
+            format!("chunk {}", i + 1)
+        } else {
+            "command".to_string()
+        };
         let cmd = &chunk.source;
         if cmd.trim().is_empty() {
             issues.push(Issue::error(format!("{label} is empty")));
@@ -301,7 +355,9 @@ pub fn validate_skill(skill: &Skill) -> Vec<Issue> {
         }
         if let Some(bin) = first_binary(cmd) {
             if !bin.is_empty() && !binary_exists(&bin) {
-                issues.push(Issue::warn(format!("{label}: binary '{bin}' not found in PATH")));
+                issues.push(Issue::warn(format!(
+                    "{label}: binary '{bin}' not found in PATH"
+                )));
             }
         }
         if shellcheck_available() {
@@ -313,9 +369,10 @@ pub fn validate_skill(skill: &Skill) -> Vec<Issue> {
         }
     }
 
-    if skill.chunks.is_empty() && !skill.body.contains("{input}") && !skill.body.contains("{query}") {
+    if skill.chunks.is_empty() && !skill.body.contains("{input}") && !skill.body.contains("{query}")
+    {
         issues.push(Issue::warn(
-            "prompt body never references {input} or {query} — the caller's input will be ignored"
+            "prompt body never references {input} or {query} — the caller's input will be ignored",
         ));
     }
 
@@ -405,26 +462,37 @@ fn run_shellcheck(cmd: &str) -> Vec<Issue> {
 // startup; it exists because parse failures used to be eprintln!'d into a
 // terminal the TUI had already taken over, making them invisible.
 
-pub fn startup(cfg: &Config, marlin_dir: &Path, work_dir: &str, idx: Option<&crate::index::Index>) -> Vec<String> {
+pub fn startup(
+    cfg: &Config,
+    marlin_dir: &Path,
+    work_dir: &str,
+    idx: Option<&crate::index::Index>,
+) -> Vec<String> {
     let mut lines = Vec::new();
 
     match cfg.providers.get(&cfg.active_provider) {
-        Some(p) if p.api_key.is_empty()
-            && cfg.active_provider != "ollama"
-            && cfg.active_provider != "custom" =>
+        Some(p)
+            if p.api_key.is_empty()
+                && cfg.active_provider != "ollama"
+                && cfg.active_provider != "custom" =>
         {
             lines.push(format!(
                 "no API key set for active provider '{}' — use /key {} <key>",
                 cfg.active_provider, cfg.active_provider
             ));
         }
-        None => lines.push(format!("active provider '{}' has no configuration", cfg.active_provider)),
+        None => lines.push(format!(
+            "active provider '{}' has no configuration",
+            cfg.active_provider
+        )),
         _ => {}
     }
 
     for bin in ["rg", "gh", "ast-compiler", "ast-harness"] {
         if !binary_exists(bin) {
-            lines.push(format!("'{bin}' not found in PATH — related features will be degraded"));
+            lines.push(format!(
+                "'{bin}' not found in PATH — related features will be degraded"
+            ));
         }
     }
     if !executor::detect_mxc() {
@@ -434,18 +502,32 @@ pub fn startup(cfg: &Config, marlin_dir: &Path, work_dir: &str, idx: Option<&cra
         ));
     }
 
-    check_toml_file::<crate::config::ThemePalette>(&marlin_dir.join("theme.toml"), "theme.toml", &mut lines);
-    check_toml_file::<crate::config::LayoutConfig>(&marlin_dir.join("layout.toml"), "layout.toml", &mut lines);
+    check_toml_file::<crate::config::ThemePalette>(
+        &marlin_dir.join("theme.toml"),
+        "theme.toml",
+        &mut lines,
+    );
+    check_toml_file::<crate::config::LayoutConfig>(
+        &marlin_dir.join("layout.toml"),
+        "layout.toml",
+        &mut lines,
+    );
     // Skills aren't scanned here — .qmd isn't TOML, and skills::load_all already
     // runs validate_skill (parse errors + issues) as part of Engine::new/`/skill reload`.
     scan_toml_dir::<crate::tools::external::ExternalTool>(
-        &crate::tools::external::tools_dir(marlin_dir), "tool", &mut lines,
+        &crate::tools::external::tools_dir(marlin_dir),
+        "tool",
+        &mut lines,
     );
     scan_toml_dir::<crate::commands::UserCommand>(
-        &crate::commands::commands_dir(marlin_dir), "command", &mut lines,
+        &crate::commands::commands_dir(marlin_dir),
+        "command",
+        &mut lines,
     );
     scan_toml_dir::<crate::providers::user_providers::UserProvider>(
-        &crate::providers::user_providers::providers_dir(marlin_dir), "provider", &mut lines,
+        &crate::providers::user_providers::providers_dir(marlin_dir),
+        "provider",
+        &mut lines,
     );
 
     if let Some(idx) = idx {
@@ -453,7 +535,9 @@ pub fn startup(cfg: &Config, marlin_dir: &Path, work_dir: &str, idx: Option<&cra
             let built_at = std::time::UNIX_EPOCH
                 + std::time::Duration::from_secs(idx.built_at.timestamp().max(0) as u64);
             if newest > built_at {
-                lines.push("code index is stale — source files changed since the last /index build".into());
+                lines.push(
+                    "code index is stale — source files changed since the last /index build".into(),
+                );
             }
         }
     }
@@ -461,7 +545,11 @@ pub fn startup(cfg: &Config, marlin_dir: &Path, work_dir: &str, idx: Option<&cra
     lines
 }
 
-fn check_toml_file<T: serde::de::DeserializeOwned>(path: &Path, label: &str, lines: &mut Vec<String>) {
+fn check_toml_file<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    label: &str,
+    lines: &mut Vec<String>,
+) {
     if !path.exists() {
         return;
     }
@@ -476,7 +564,9 @@ fn check_toml_file<T: serde::de::DeserializeOwned>(path: &Path, label: &str, lin
 }
 
 fn scan_toml_dir<T: serde::de::DeserializeOwned>(dir: &Path, label: &str, lines: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("toml") {
@@ -484,7 +574,10 @@ fn scan_toml_dir<T: serde::de::DeserializeOwned>(dir: &Path, label: &str, lines:
         }
         if let Ok(data) = std::fs::read_to_string(&path) {
             if let Err(e) = toml::from_str::<T>(&data) {
-                lines.push(format!("✗ {label} {:?}: {e}", path.file_name().unwrap_or_default()));
+                lines.push(format!(
+                    "✗ {label} {:?}: {e}",
+                    path.file_name().unwrap_or_default()
+                ));
             }
         }
     }
@@ -493,11 +586,18 @@ fn scan_toml_dir<T: serde::de::DeserializeOwned>(dir: &Path, label: &str, lines:
 /// Newest mtime among source files under `work_dir`, skipping common junk dirs.
 /// Bounded so a huge repo can't stall startup.
 fn newest_source_mtime(work_dir: &str) -> Option<std::time::SystemTime> {
-    fn walk(dir: &Path, depth: usize, budget: &mut usize, newest: &mut Option<std::time::SystemTime>) {
+    fn walk(
+        dir: &Path,
+        depth: usize,
+        budget: &mut usize,
+        newest: &mut Option<std::time::SystemTime>,
+    ) {
         if depth > 8 || *budget == 0 {
             return;
         }
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
         for entry in entries.flatten() {
             if *budget == 0 {
                 return;
@@ -506,7 +606,10 @@ fn newest_source_mtime(work_dir: &str) -> Option<std::time::SystemTime> {
             let path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if matches!(name.as_ref(), ".git" | "node_modules" | "target" | "__pycache__") {
+            if matches!(
+                name.as_ref(),
+                ".git" | "node_modules" | "target" | "__pycache__"
+            ) {
                 continue;
             }
             if path.is_dir() {
@@ -653,7 +756,10 @@ mod tests {
         // work_dir and the tested path share a root by environmental accident.
         let cfg = cfg_with("/Users/nonexistent_marlin_test_project");
         // Absolute /tmp path, unrelated to work_dir — would normally be an escape.
-        let inv = Invocation::paths("write_file", vec!["/tmp/marlin_scratch_test.txt".to_string()]);
+        let inv = Invocation::paths(
+            "write_file",
+            vec!["/tmp/marlin_scratch_test.txt".to_string()],
+        );
         assert_eq!(check(&inv, &cfg, &[]), Verdict::Allow);
     }
 
@@ -665,7 +771,10 @@ mod tests {
         // A sibling path under the SAME tmp root as work_dir, but outside work_dir —
         // must NOT be silently allowed just because it's "under tmp somewhere" (the
         // regression: work_dir itself lives under a sandboxed session's tmp root).
-        let sibling = dir.parent().unwrap().join("marlin_preflight_test_sibling_secret.txt");
+        let sibling = dir
+            .parent()
+            .unwrap()
+            .join("marlin_preflight_test_sibling_secret.txt");
         let inv = Invocation::paths("write_file", vec![sibling.to_str().unwrap().to_string()]);
         assert!(matches!(check(&inv, &cfg, &[]), Verdict::NeedApproval(_)));
     }
@@ -694,7 +803,10 @@ mod tests {
             description: "a test skill".into(),
             triggers: vec![],
             body: String::new(),
-            chunks: vec![Chunk { lang: "sh".into(), source: command.into() }],
+            chunks: vec![Chunk {
+                lang: "sh".into(),
+                source: command.into(),
+            }],
             format: SkillFormat::Qmd,
         }
     }
@@ -713,7 +825,9 @@ mod tests {
     #[test]
     fn clean_shell_skill_has_no_errors() {
         let skill = shell_skill("rg {query} --color never --heading");
-        assert!(validate_skill(&skill).iter().all(|i| i.severity != Severity::Error));
+        assert!(validate_skill(&skill)
+            .iter()
+            .all(|i| i.severity != Severity::Error));
     }
 
     #[test]
@@ -758,6 +872,8 @@ mod tests {
     #[test]
     fn clean_prompt_skill_has_no_errors() {
         let skill = prompt_skill("Summarize: {input}");
-        assert!(validate_skill(&skill).iter().all(|i| i.severity != Severity::Error));
+        assert!(validate_skill(&skill)
+            .iter()
+            .all(|i| i.severity != Severity::Error));
     }
 }

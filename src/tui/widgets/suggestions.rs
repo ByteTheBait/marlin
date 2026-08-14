@@ -65,15 +65,19 @@ pub fn all_commands() -> Vec<CmdDef> {
         ("/mcp",       "[list|new|reload]",  "manage MCP server connections (~/.marlin/mcp/)"),
         ("/provider",  "[list|new <name>|<name>]", "list/create user providers or switch provider"),
     ];
-    raw.iter().map(|(c, a, d)| CmdDef {
-        cmd: c.to_string(),
-        args: a.to_string(),
-        desc: d.to_string(),
-    }).collect()
+    raw.iter()
+        .map(|(c, a, d)| CmdDef {
+            cmd: c.to_string(),
+            args: a.to_string(),
+            desc: d.to_string(),
+        })
+        .collect()
 }
 
 pub fn filter_suggestions<'a>(typed: &str, defs: &'a [CmdDef]) -> Vec<&'a CmdDef> {
-    if !typed.starts_with('/') || typed.contains(' ') { return vec![]; }
+    if !typed.starts_with('/') || typed.contains(' ') {
+        return vec![];
+    }
     defs.iter()
         .filter(|d| d.cmd.starts_with(typed))
         .take(6)
@@ -81,16 +85,26 @@ pub fn filter_suggestions<'a>(typed: &str, defs: &'a [CmdDef]) -> Vec<&'a CmdDef
 }
 
 pub fn tab_complete(typed: &str, suggestions: &[&CmdDef]) -> Option<String> {
-    if suggestions.is_empty() { return None; }
-    if suggestions.len() == 1 { return Some(suggestions[0].cmd.clone()); }
+    if suggestions.is_empty() {
+        return None;
+    }
+    if suggestions.len() == 1 {
+        return Some(suggestions[0].cmd.clone());
+    }
     let mut prefix = suggestions[0].cmd.clone();
     for s in &suggestions[1..] {
         while !s.cmd.starts_with(&prefix) {
             prefix.pop();
-            if prefix.is_empty() { return None; }
+            if prefix.is_empty() {
+                return None;
+            }
         }
     }
-    if prefix.len() > typed.len() { Some(prefix) } else { None }
+    if prefix.len() > typed.len() {
+        Some(prefix)
+    } else {
+        None
+    }
 }
 
 /// A lightweight skill hint shown in the suggestion panel.
@@ -144,7 +158,11 @@ impl<'a> Widget for SuggestionPanel<'a> {
                     Span::styled(dots, style_bubble_dots()),
                 ]);
                 Paragraph::new(line).render(
-                    Rect { y, height: 1, ..inner },
+                    Rect {
+                        y,
+                        height: 1,
+                        ..inner
+                    },
                     buf,
                 );
             }
@@ -158,30 +176,35 @@ impl<'a> Widget for SuggestionPanel<'a> {
             let inner = block.inner(area);
             block.render(area, buf);
 
-            let lines: Vec<Line> = self.suggestions.iter().map(|s| {
-                let exact = s.cmd == self.typed;
-                let cmd_style = if exact {
-                    style_suggestion_cmd_exact()
-                } else {
-                    style_suggestion_cmd()
-                };
+            let lines: Vec<Line> = self
+                .suggestions
+                .iter()
+                .map(|s| {
+                    let exact = s.cmd == self.typed;
+                    let cmd_style = if exact {
+                        style_suggestion_cmd_exact()
+                    } else {
+                        style_suggestion_cmd()
+                    };
 
-                let raw_len = s.cmd.len()
-                    + if s.args.is_empty() { 0 } else { 2 + s.args.len() };
-                let pad = 30usize.saturating_sub(raw_len).max(2);
+                    let raw_len = s.cmd.len()
+                        + if s.args.is_empty() {
+                            0
+                        } else {
+                            2 + s.args.len()
+                        };
+                    let pad = 30usize.saturating_sub(raw_len).max(2);
 
-                let mut spans = vec![
-                    Span::raw("  "),
-                    Span::styled(s.cmd.clone(), cmd_style),
-                ];
-                if !s.args.is_empty() {
-                    spans.push(Span::raw("  "));
-                    spans.push(Span::styled(s.args.clone(), style_suggestion_args()));
-                }
-                spans.push(Span::raw(" ".repeat(pad)));
-                spans.push(Span::styled(s.desc.clone(), style_suggestion_desc()));
-                Line::from(spans)
-            }).collect();
+                    let mut spans = vec![Span::raw("  "), Span::styled(s.cmd.clone(), cmd_style)];
+                    if !s.args.is_empty() {
+                        spans.push(Span::raw("  "));
+                        spans.push(Span::styled(s.args.clone(), style_suggestion_args()));
+                    }
+                    spans.push(Span::raw(" ".repeat(pad)));
+                    spans.push(Span::styled(s.desc.clone(), style_suggestion_desc()));
+                    Line::from(spans)
+                })
+                .collect();
 
             Paragraph::new(lines).render(inner, buf);
         } else if !self.skill_hints.is_empty() {
@@ -195,15 +218,19 @@ impl<'a> Widget for SuggestionPanel<'a> {
             let inner = block.inner(area);
             block.render(area, buf);
 
-            let lines: Vec<Line> = self.skill_hints.iter().map(|h| {
-                let pad = 20usize.saturating_sub(h.name.len()).max(2);
-                Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(h.name.clone(), style_suggestion_cmd()),
-                    Span::raw(" ".repeat(pad)),
-                    Span::styled(h.description.clone(), style_suggestion_desc()),
-                ])
-            }).collect();
+            let lines: Vec<Line> = self
+                .skill_hints
+                .iter()
+                .map(|h| {
+                    let pad = 20usize.saturating_sub(h.name.len()).max(2);
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(h.name.clone(), style_suggestion_cmd()),
+                        Span::raw(" ".repeat(pad)),
+                        Span::styled(h.description.clone(), style_suggestion_desc()),
+                    ])
+                })
+                .collect();
 
             Paragraph::new(lines).render(inner, buf);
         }

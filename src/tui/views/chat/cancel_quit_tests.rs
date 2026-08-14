@@ -71,14 +71,24 @@ fn mouse_scroll_in_base_state_never_triggers_input_history_nav() {
     // notch must scroll the viewport instead, never touch input history.
     chat.on_mouse_scroll(true);
     assert_eq!(chat.history_idx, -1);
-    assert!(chat.textarea.lines().first().map(String::as_str).unwrap_or("").is_empty());
+    assert!(chat
+        .textarea
+        .lines()
+        .first()
+        .map(String::as_str)
+        .unwrap_or("")
+        .is_empty());
 }
 
 #[test]
 fn mouse_scroll_routes_through_overlay_when_one_is_open() {
     let mut chat = ChatView::new(80, 24);
     chat.viewer = Some(ViewerPane::new(
-        "f.txt".into(), (1..=50).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n"),
+        "f.txt".into(),
+        (1..=50)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
     ));
     // Routed into the viewer pane's own on_key (Up/Down), not viewport
     // scroll or input-history nav — ViewerOutcome::None means no Action.

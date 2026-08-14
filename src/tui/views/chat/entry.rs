@@ -11,7 +11,9 @@ pub enum EntryRole {
     #[allow(dead_code)]
     Output,
     ToolCall,
-    ToolResult { is_error: bool },
+    ToolResult {
+        is_error: bool,
+    },
     /// The final summary text from a `mark_complete` tool call — rendered in a
     /// muted/grayed-out style rather than as a normal assistant message.
     Summary,
@@ -31,9 +33,19 @@ pub struct ChatEntry {
 
 impl ChatEntry {
     pub(super) fn system(content: &str) -> Self {
-        Self { role: EntryRole::System, content: content.into(), tool_name: String::new(), time: Local::now() }
+        Self {
+            role: EntryRole::System,
+            content: content.into(),
+            tool_name: String::new(),
+            time: Local::now(),
+        }
     }
     pub(super) fn error(content: &str) -> Self {
-        Self { role: EntryRole::Error, content: content.into(), tool_name: String::new(), time: Local::now() }
+        Self {
+            role: EntryRole::Error,
+            content: content.into(),
+            tool_name: String::new(),
+            time: Local::now(),
+        }
     }
 }

@@ -46,8 +46,11 @@ fn subagent_tools() -> Vec<crate::providers::ToolDef> {
 /// them); prompt-only skills hand it the expanded template directly.
 pub fn build_task(skill: &crate::skills::Skill, query: &str) -> Result<String, String> {
     if skill.is_shell() {
-        let cmds = crate::skills::executor::resolve_chunks(skill, query).map_err(|e| e.to_string())?;
-        let numbered = cmds.iter().enumerate()
+        let cmds =
+            crate::skills::executor::resolve_chunks(skill, query).map_err(|e| e.to_string())?;
+        let numbered = cmds
+            .iter()
+            .enumerate()
             .map(|(i, c)| format!("{}. {c}", i + 1))
             .collect::<Vec<_>>()
             .join("\n");
@@ -67,7 +70,10 @@ pub fn build_task(skill: &crate::skills::Skill, query: &str) -> Result<String, S
     } else if skill.is_prompt() {
         crate::skills::executor::expand_prompt(skill, query).map_err(|e| e.to_string())
     } else {
-        Err(format!("skill '{}' has neither a shell chunk nor a prompt body", skill.name))
+        Err(format!(
+            "skill '{}' has neither a shell chunk nor a prompt body",
+            skill.name
+        ))
     }
 }
 
@@ -87,7 +93,12 @@ pub async fn run(
     cancel_flag: &Arc<AtomicBool>,
 ) -> SubagentResult {
     let id = uuid::Uuid::new_v4().to_string();
-    let _ = ui_tx.send(UiUpdate::SubagentStarted { id: id.clone(), label: label.to_string() }).await;
+    let _ = ui_tx
+        .send(UiUpdate::SubagentStarted {
+            id: id.clone(),
+            label: label.to_string(),
+        })
+        .await;
 
     let system_prompt = format!(
         "You are a focused subagent completing one delegated task on behalf of a manager AI \
@@ -98,15 +109,7 @@ pub async fn run(
          Working directory: {work_dir}"
     );
 
-    let mut messages = vec![Message {
-        role: "user".into(),
-        content: instructions.to_string(),
-        tool_calls: vec![],
-        tool_use_id: String::new(),
-        tool_call_id: String::new(),
-        images: vec![],
-        is_error: false,
-    }];
+    let mut messages = vec![Message::new_user(instructions.to_string())];
 
     let tools = subagent_tools();
     let mut final_text = String::new();
@@ -146,7 +149,9 @@ pub async fn run(
         let mut tool_calls: Vec<ToolCall> = vec![];
 
         loop {
-            let Some(chunk) = stream.recv().await else { break };
+            let Some(chunk) = stream.recv().await else {
+                break;
+            };
 
             if let Some(e) = chunk.error {
                 final_text = format!("subagent error: {e}");
@@ -174,9 +179,14 @@ pub async fn run(
         messages.push(Message {
             role: "assistant".into(),
             content: text_buf.trim().to_string(),
-            tool_calls: tool_calls.iter().map(|tc| ToolCallMsg {
-                id: tc.id.clone(), name: tc.name.clone(), input: tc.input.clone(),
-            }).collect(),
+            tool_calls: tool_calls
+                .iter()
+                .map(|tc| ToolCallMsg {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    input: tc.input.clone(),
+                })
+                .collect(),
             tool_use_id: String::new(),
             tool_call_id: String::new(),
             images: vec![],
@@ -184,12 +194,17 @@ pub async fn run(
         });
 
         for tc in &tool_calls {
-            let _ = ui_tx.send(UiUpdate::SubagentToolCall {
-                id: id.clone(),
-                name: tc.name.clone(),
-            }).await;
+            let _ = ui_tx
+                .send(UiUpdate::SubagentToolCall {
+                    id: id.clone(),
+                    name: tc.name.clone(),
+                })
+                .await;
 
-            let result = run_one_tool(tc, cfg, allowed, work_dir, marlin_dir, code_index, ui_tx, action_rx).await;
+            let result = run_one_tool(
+                tc, cfg, allowed, work_dir, marlin_dir, code_index, ui_tx, action_rx,
+            )
+            .await;
 
             messages.push(Message {
                 role: "tool".into(),
@@ -213,7 +228,10 @@ pub async fn run(
 
     let _ = ui_tx.send(UiUpdate::SubagentFinished { id, ok }).await;
 
-    SubagentResult { output: final_text, is_error: !ok }
+    SubagentResult {
+        output: final_text,
+        is_error: !ok,
+    }
 }
 
 /// Preflight-check and execute a single tool call from a subagent, exactly
@@ -233,23 +251,33 @@ async fn run_one_tool(
     let verdict = match tc.name.as_str() {
         "run_command" => {
             let cmd = extract_cmd(&tc.input);
-            preflight::check(&preflight::Invocation::shell("run_command", cmd), cfg, allowed)
+            preflight::check(
+                &preflight::Invocation::shell("run_command", cmd),
+                cfg,
+                allowed,
+            )
         }
-        "read_file" | "write_file" | "edit_file" | "notebook_edit" | "create_directory" => {
-            match extract_path(&tc.input) {
-                Some(path) => {
-                    let resolved = executor::resolve_path(&path, work_dir);
-                    preflight::check(&preflight::Invocation::paths(tc.name.clone(), vec![resolved]), cfg, allowed)
-                }
-                None => preflight::Verdict::Allow,
+        "read_file" | "write_file" | "edit_file" | "multi_edit" | "notebook_edit"
+        | "create_directory" => match extract_path(&tc.input) {
+            Some(path) => {
+                let resolved = executor::resolve_path(&path, work_dir);
+                preflight::check(
+                    &preflight::Invocation::paths(tc.name.clone(), vec![resolved]),
+                    cfg,
+                    allowed,
+                )
             }
-        }
+            None => preflight::Verdict::Allow,
+        },
         _ => preflight::Verdict::Allow,
     };
 
     match verdict {
         preflight::Verdict::Deny(reason) => {
-            return executor::ToolResult { output: reason, is_error: true };
+            return executor::ToolResult {
+                output: reason,
+                is_error: true,
+            };
         }
         preflight::Verdict::NeedApproval(reason) => {
             let _ = ui_tx.send(UiUpdate::AwaitingApproval { cmd: reason }).await;
@@ -263,7 +291,10 @@ async fn run_one_tool(
                 }
             };
             if !approved {
-                return executor::ToolResult { output: "Command denied by user.".into(), is_error: true };
+                return executor::ToolResult {
+                    output: "Command denied by user.".into(),
+                    is_error: true,
+                };
             }
         }
         preflight::Verdict::Allow => {}
@@ -302,13 +333,19 @@ async fn run_one_tool(
             search_fn.as_deref(),
             symbol_search_fn.as_deref(),
             None,
-            None, Some(&logs_dir),
+            None,
+            Some(&logs_dir),
             clean_env,
             AstMode::Off,
             &sandbox_mode,
             &[],
         )
-    }).await.unwrap_or_else(|e| executor::ToolResult { output: e.to_string(), is_error: true })
+    })
+    .await
+    .unwrap_or_else(|e| executor::ToolResult {
+        output: e.to_string(),
+        is_error: true,
+    })
 }
 
 fn extract_cmd(input_json: &str) -> String {
@@ -335,7 +372,10 @@ mod tests {
             description: String::new(),
             triggers: vec![],
             body: String::new(),
-            chunks: vec![Chunk { lang: "sh".into(), source: cmd.into() }],
+            chunks: vec![Chunk {
+                lang: "sh".into(),
+                source: cmd.into(),
+            }],
             format: SkillFormat::Qmd,
         }
     }
@@ -408,8 +448,12 @@ mod tests {
 
     #[async_trait]
     impl Provider for FakeProvider {
-        fn name(&self) -> &str { "fake" }
-        fn models(&self) -> Vec<String> { vec!["fake-model".into()] }
+        fn name(&self) -> &str {
+            "fake"
+        }
+        fn models(&self) -> Vec<String> {
+            vec!["fake-model".into()]
+        }
 
         async fn stream(&self, _req: StreamRequest) -> anyhow::Result<mpsc::Receiver<StreamChunk>> {
             let n = self.calls.fetch_add(1, Ordering::SeqCst);
@@ -423,7 +467,8 @@ mod tests {
                         tool_calls: vec![ToolCall {
                             id: "call_1".into(),
                             name: "run_command".into(),
-                            input: serde_json::json!({"command": "echo subagent_test_ok"}).to_string(),
+                            input: serde_json::json!({"command": "echo subagent_test_ok"})
+                                .to_string(),
                         }],
                         retry_after: 0,
                         rate_limit: None,
@@ -457,7 +502,9 @@ mod tests {
         let (_action_tx, mut action_rx) = mpsc::channel(4);
         let cancel_flag = Arc::new(AtomicBool::new(false));
 
-        let provider: Arc<dyn Provider> = Arc::new(FakeProvider { calls: AtomicUsize::new(0) });
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider {
+            calls: AtomicUsize::new(0),
+        });
 
         let result = run(
             "test_skill",
@@ -472,9 +519,14 @@ mod tests {
             &ui_tx,
             &mut action_rx,
             &cancel_flag,
-        ).await;
+        )
+        .await;
 
-        assert!(!result.is_error, "subagent reported an error: {}", result.output);
+        assert!(
+            !result.is_error,
+            "subagent reported an error: {}",
+            result.output
+        );
         assert!(result.output.contains("echoed the test string"));
 
         drop(ui_tx);
@@ -482,8 +534,15 @@ mod tests {
         while let Some(u) = ui_rx.recv().await {
             events.push(u);
         }
-        assert!(matches!(events.first(), Some(UiUpdate::SubagentStarted { label, .. }) if label == "test_skill"));
-        assert!(events.iter().any(|e| matches!(e, UiUpdate::SubagentToolCall { name, .. } if name == "run_command")));
-        assert!(matches!(events.last(), Some(UiUpdate::SubagentFinished { ok: true, .. })));
+        assert!(
+            matches!(events.first(), Some(UiUpdate::SubagentStarted { label, .. }) if label == "test_skill")
+        );
+        assert!(events.iter().any(
+            |e| matches!(e, UiUpdate::SubagentToolCall { name, .. } if name == "run_command")
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(UiUpdate::SubagentFinished { ok: true, .. })
+        ));
     }
 }
