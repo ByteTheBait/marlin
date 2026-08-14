@@ -538,6 +538,10 @@ impl Engine {
                     self.rate_and_route(&text, &ui_tx).await;
                     self.maybe_generate_plan(&text, &ui_tx).await;
 
+                    // Create a git checkpoint before the turn so /undo can roll
+                    // it back (opt-in via /checkpoints on).
+                    self.maybe_checkpoint(&ui_tx).await;
+
                     // Broadcast token count immediately so the sidebar isn't stale while waiting.
                     // Prefer exact count from provider API; fall back to heuristic.
                     let system_prompt = self.effective_system_prompt();
@@ -549,6 +553,7 @@ impl Engine {
                             system_prompt: system_prompt.clone(),
                             max_tokens: 1,
                             tools: turn_tools.clone(),
+                            thinking: false,
                         };
                         p.count_tokens(&req_for_count).await
                             .unwrap_or_else(|| estimate_tokens(&self.history, &system_prompt))
@@ -584,6 +589,7 @@ impl Engine {
                         self.cancel_flag.store(false, std::sync::atomic::Ordering::SeqCst);
                         self.rate_and_route(&prompt, &ui_tx).await;
                         self.maybe_generate_plan(&prompt, &ui_tx).await;
+                        self.maybe_checkpoint(&ui_tx).await;
                         self.agentic_loop(&ui_tx, &mut action_rx).await;
                     }
                 }
@@ -678,6 +684,7 @@ impl Engine {
                 system_prompt: self.effective_system_prompt(),
                 max_tokens: self.cfg.max_tokens,
                 tools: all_tools(&self.ast_mode, &self.skill_tool_list(&self.active_goal), &self.external_tools, self.cfg.skill_subagents, &self.mcp_tools),
+                thinking: self.cfg.thinking,
             };
 
             let mut stream = match self.stream_with_retry(provider, req, ui_tx).await {
@@ -1865,6 +1872,43 @@ impl Engine {
         }
     }
 
+    /// Create a git checkpoint before an agentic turn (opt-in via
+    /// `/checkpoints on`). Best-effort and non-blocking: any failure (not a
+    /// git repo, git not installed, commit error) just logs a message and
+    /// the turn proceeds normally. Uses the engine's blocking pool so the
+    /// git subprocess never blocks the async loop.
+    async fn maybe_checkpoint(&self, ui_tx: &mpsc::Sender<UiUpdate>) {
+        if !self.cfg.checkpoints {
+            return;
+        }
+        if !crate::checkpoint::available(&self.work_dir) {
+            let _ = ui_tx.send(UiUpdate::SystemMsg(
+                "Checkpoints are on but this is not a git repository — skipping. (git required for /checkpoints)".into()
+            )).await;
+            return;
+        }
+        let work_dir = self.work_dir.clone();
+        let hash = tokio::task::spawn_blocking(move || {
+            crate::checkpoint::create(&work_dir)
+        }).await;
+        match hash {
+            Ok(Ok(h)) if !h.is_empty() => {
+                let _ = ui_tx.send(UiUpdate::SystemMsg(
+                    format!("Checkpoint created ({h}) — /undo will roll this turn back.")
+                )).await;
+            }
+            Ok(Ok(_)) => {
+                // No changes to commit — nothing to checkpoint.
+            }
+            Ok(Err(e)) => {
+                let _ = ui_tx.send(UiUpdate::SystemMsg(format!("Checkpoint skipped: {e}"))).await;
+            }
+            Err(e) => {
+                let _ = ui_tx.send(UiUpdate::SystemMsg(format!("Checkpoint skipped: {e}"))).await;
+            }
+        }
+    }
+
     /// LLM-based context compaction: summarize old turns when approaching token budget.
     async fn maybe_compact_history(&mut self, ui_tx: &mpsc::Sender<UiUpdate>) {
         const KEEP_RECENT: usize = 8;
@@ -1914,13 +1958,12 @@ impl Engine {
             system_prompt: String::new(),
             max_tokens: 1500,
             tools: vec![],
+            thinking: false,
         };
 
         let _ = ui_tx.send(UiUpdate::SystemMsg(
             format!("Compacting context (~{cur_tokens} tokens) — summarizing {split} older turns…")
-        )).await;
-
-        let mut stream = match provider.stream(summary_req).await {
+        )).await;        let mut stream = match provider.stream(summary_req).await {
             Ok(s) => s,
             Err(_) => return,
         };
@@ -2031,11 +2074,11 @@ impl Engine {
             system_prompt: String::new(),
             max_tokens: 8,
             tools: vec![],
+            thinking: false,
         };
         let mut text = String::new();
         let stream_fut = async {
-            if let Ok(mut stream) = rater.stream(req).await {
-                while let Some(chunk) = stream.recv().await {
+            if let Ok(mut stream) = rater.stream(req).await {                while let Some(chunk) = stream.recv().await {
                     text.push_str(&chunk.content);
                     if chunk.done { break; }
                 }
@@ -2077,6 +2120,7 @@ impl Engine {
             system_prompt: String::new(),
             max_tokens: 200,
             tools: vec![],
+            thinking: false,
         };
 
         let mut text = String::new();
@@ -2383,6 +2427,7 @@ impl Engine {
             system_prompt: String::new(),
             max_tokens: 1500,
             tools: vec![],
+            thinking: false,
         };
 
         let _ = ui_tx.send(UiUpdate::SteerResult(
@@ -2930,6 +2975,58 @@ impl Engine {
                         let state = if self.cfg.clean_env { "on" } else { "off" };
                         sys!(format!("Clean-env: {state}  (use /clean-env on|off)"));
                     }
+                }
+            }
+
+            "/thinking" => {
+                match args.first().copied() {
+                    Some("on") => {
+                        self.cfg.thinking = true;
+                        save_cfg!();
+                        sys!("Extended thinking ON — the model will reason before answering (Claude extended thinking / OpenAI reasoning models).");
+                    }
+                    Some("off") => {
+                        self.cfg.thinking = false;
+                        save_cfg!();
+                        sys!("Extended thinking OFF.");
+                    }
+                    _ => {
+                        let state = if self.cfg.thinking { "on" } else { "off" };
+                        sys!(format!("Extended thinking: {state}  (use /thinking on|off)"));
+                    }
+                }
+            }
+
+            "/checkpoints" => {
+                match args.first().copied() {
+                    Some("on") => {
+                        if !crate::checkpoint::available(&self.work_dir) {
+                            err!("This directory isn't a git repository — checkpoints require git.");
+                        } else {
+                            self.cfg.checkpoints = true;
+                            save_cfg!();
+                            sys!("Git checkpoints ON — a checkpoint commit is created before each turn; /undo rolls it back.");
+                        }
+                    }
+                    Some("off") => {
+                        self.cfg.checkpoints = false;
+                        save_cfg!();
+                        sys!("Git checkpoints OFF.");
+                    }
+                    _ => {
+                        let state = if self.cfg.checkpoints { "on" } else { "off" };
+                        let git = if crate::checkpoint::available(&self.work_dir) { "git repo detected" } else { "not a git repo" };
+                        sys!(format!("Checkpoints: {state}  ({git})  — use /checkpoints on|off"));
+                    }
+                }
+            }
+
+            "/undo" => {
+                let work_dir = self.work_dir.clone();
+                match tokio::task::spawn_blocking(move || crate::checkpoint::undo(&work_dir)).await {
+                    Ok(Ok(msg)) => sys!(format!("Undo complete: {msg}")),
+                    Ok(Err(e)) => err!(format!("Undo failed: {e}")),
+                    Err(e) => err!(format!("Undo failed: {e}")),
                 }
             }
 
@@ -4398,6 +4495,9 @@ fn help_text() -> String {
         ("/verify [cmd|off]", "set shell command to run after every file edit (Write-Test-Fix)"),
         ("/ast [off|sexpr|harness]", "AST context mode: off=raw, sexpr=S-expr reads, harness=JSON surgery (persists)"),
         ("/clean-env [on|off]", "strip subprocess environment for isolation (persists)"),
+        ("/thinking [on|off]", "request extended thinking / chain-of-thought reasoning (persists)"),
+        ("/checkpoints [on|off]", "git-checkpoint each turn so /undo can roll it back (persists)"),
+        ("/undo", "roll the working tree back to the last checkpoint"),
         ("/theme [dark|light|<name>]", "switch theme (persists); named themes live in ~/.marlin/themes/"),
         ("/color [<#rrggbb>|off]", "set the status bar background color for this directory (persists per workdir)"),
         ("/command [list|new|reload]", "manage user-defined slash commands (~/.marlin/commands/)"),

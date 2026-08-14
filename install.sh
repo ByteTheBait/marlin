@@ -9,8 +9,8 @@ warn()    { printf "${YELLOW}[marlin]${NC} %s\n" "$*"; }
 die()     { printf "${RED}[marlin]${NC} %s\n" "$*" >&2; exit 1; }
 
 # ── config ───────────────────────────────────────────────────────────────────
-MARLIN_REPO="https://github.com/Pkill-MyDaemons/marlin"
-AST_REPO="https://github.com/pkill-mydaemons/ast-compiler"
+MARLIN_REPO="https://github.com/ByteTheBait/marlin"
+AST_REPO="https://github.com/ByteTheBait/ast-compiler"
 MXC_REPO="https://github.com/microsoft/mxc"
 
 SKIP_AST=false

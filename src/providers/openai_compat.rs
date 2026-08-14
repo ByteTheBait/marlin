@@ -178,7 +178,7 @@ impl Provider for OpenAiCompatProvider {
         let url = format!("{}/chat/completions", self.endpoint);
         let client = super::http_client();
 
-        let mut body = build_openai_body(&req.model, &messages, &tools, max_tokens);
+        let mut body = build_openai_body(&req.model, &messages, &tools, max_tokens, req.thinking);
         let mut resp = send_openai_request(&client, &url, &self.api_key, &body).await?;
         let (tx, rx) = mpsc::channel::<StreamChunk>(64);
 
@@ -196,7 +196,7 @@ impl Provider for OpenAiCompatProvider {
                 Some(safe_max) if safe_max < max_tokens => {
                     max_tokens = safe_max;
                     learned_cache().lock().unwrap().insert(cache_key, safe_max);
-                    body = build_openai_body(&req.model, &messages, &tools, max_tokens);
+                    body = build_openai_body(&req.model, &messages, &tools, max_tokens, req.thinking);
                     resp = send_openai_request(&client, &url, &self.api_key, &body).await?;
                 }
                 _ => {
@@ -257,6 +257,12 @@ impl Provider for OpenAiCompatProvider {
                 args: String,
             }
             let mut acc: HashMap<usize, AccTool> = HashMap::new();
+            // Accumulated reasoning trace (OpenAI `reasoning_content` / DeepSeek
+            // `reasoning_content`). Emitted as a ` thinking... response` block
+            // once the first visible content arrives, so the TUI renders it
+            // dimmed/italic rather than as literal text.
+            let mut reasoning_buf = String::new();
+            let mut reasoning_emitted = false;
 
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk {
@@ -329,6 +335,20 @@ impl Provider for OpenAiCompatProvider {
 
                                     if let Some(text) = delta["content"].as_str() {
                                         if !text.is_empty() {
+                                            // Flush any accumulated reasoning before
+                                            // the visible answer.
+                                            if !reasoning_buf.is_empty() && !reasoning_emitted {
+                                                reasoning_emitted = true;
+                                                let _ = tx.send(StreamChunk {
+                                                    content: format!(" thinking{} response", reasoning_buf),
+                                                    done: false,
+                                                    error: None,
+                                                    tool_calls: vec![],
+                                                    retry_after: 0,
+                                                    rate_limit: None,
+                                                }).await;
+                                                reasoning_buf.clear();
+                                            }
                                             let _ = tx.send(StreamChunk {
                                                 content: text.to_string(),
                                                 done: false,
@@ -340,7 +360,28 @@ impl Provider for OpenAiCompatProvider {
                                         }
                                     }
 
+                                    // Reasoning trace (DeepSeek-R1, QwQ, gpt-oss, etc.)
+                                    if let Some(reasoning) = delta["reasoning_content"].as_str() {
+                                        if !reasoning.is_empty() {
+                                            reasoning_buf.push_str(reasoning);
+                                        }
+                                    }
+
                                     if let Some(tcs) = delta["tool_calls"].as_array() {
+                                        // Flush any accumulated reasoning before a
+                                        // tool call (model reasoned, then acted).
+                                        if !reasoning_buf.is_empty() && !reasoning_emitted {
+                                            reasoning_emitted = true;
+                                            let _ = tx.send(StreamChunk {
+                                                content: format!(" thinking{} response", reasoning_buf),
+                                                done: false,
+                                                error: None,
+                                                tool_calls: vec![],
+                                                retry_after: 0,
+                                                rate_limit: None,
+                                            }).await;
+                                            reasoning_buf.clear();
+                                        }
                                         for tc in tcs {
                                             let idx = tc["index"].as_u64().unwrap_or(0) as usize;
                                             let entry = acc.entry(idx).or_insert(AccTool {
@@ -389,7 +430,7 @@ impl Provider for OpenAiCompatProvider {
     }
 }
 
-fn build_openai_body(model: &str, messages: &[Value], tools: &[Value], max_tokens: usize) -> Value {
+fn build_openai_body(model: &str, messages: &[Value], tools: &[Value], max_tokens: usize, thinking: bool) -> Value {
     let mut body = serde_json::json!({
         "model": model,
         "messages": messages,
@@ -398,6 +439,14 @@ fn build_openai_body(model: &str, messages: &[Value], tools: &[Value], max_token
     });
     if !tools.is_empty() {
         body["tools"] = serde_json::json!(tools);
+    }
+    if thinking {
+        // OpenAI reasoning models (o1/o3/gpt-5, and reasoning-capable
+        // OpenRouter routes) accept a `reasoning_effort` field. Some
+        // OpenAI-compatible endpoints use `reasoning` instead; send the
+        // widely-supported `reasoning_effort` and let unknown fields be
+        // ignored by permissive servers.
+        body["reasoning_effort"] = serde_json::json!("high");
     }
     body
 }

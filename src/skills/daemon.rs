@@ -60,6 +60,7 @@ pub fn spawn(
             system_prompt: String::new(),
             max_tokens: 1200,
             tools: vec![],
+            thinking: false,
         };
 
         let mut result = String::new();

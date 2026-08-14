@@ -25,6 +25,9 @@
 /verify [cmd|off]                  run a command after every file edit (Write-Test-Fix)
 /ast [off|sexpr|harness]           AST context mode (persists)
 /clean-env [on|off]                strip subprocess environment for isolation (persists)
+/thinking [on|off]                 request extended thinking / chain-of-thought reasoning (persists)
+/checkpoints [on|off]              git-checkpoint each turn so /undo can roll it back (persists)
+/undo                              roll the working tree back to the last checkpoint
 
 /skill list                        list installed skills
 /skill run <name> [query]          run a skill

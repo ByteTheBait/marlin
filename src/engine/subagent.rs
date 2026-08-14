@@ -130,6 +130,7 @@ pub async fn run(
             system_prompt: system_prompt.clone(),
             max_tokens: cfg.max_tokens,
             tools: tools.clone(),
+            thinking: false,
         };
 
         let mut stream = match provider.stream(req).await {

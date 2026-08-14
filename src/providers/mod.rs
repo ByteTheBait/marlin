@@ -114,6 +114,10 @@ pub struct StreamRequest {
     pub system_prompt: String,
     pub max_tokens: usize,
     pub tools: Vec<ToolDef>,
+    /// Request extended thinking / chain-of-thought reasoning from the model.
+    /// Providers that support it (Claude extended thinking, OpenAI reasoning
+    /// models) emit a reasoning trace that Marlin renders dimmed/italic.
+    pub thinking: bool,
 }
 
 // ── provider trait ───────────────────────────────────────────────────────────

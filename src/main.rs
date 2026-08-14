@@ -1,4 +1,5 @@
 mod commands;
+mod checkpoint;
 mod config;
 mod engine;
 mod history;

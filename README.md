@@ -86,6 +86,26 @@ Then just talk to it:
 
 Switch model: `/model claude-opus-4-5` (or any model your provider supports). Bring your own OpenAI-compatible provider — see [Custom providers](docs/extending.md#custom-providers--marlinproviders).
 
+## Extended thinking & undo
+
+For hard tasks, ask the model to reason before answering:
+
+```
+/thinking on        # Claude extended thinking / OpenAI reasoning models
+```
+
+Reasoning traces render dimmed and collapsible, so they don't clutter the answer.
+
+Roll back an entire turn in one step with git checkpoints:
+
+```
+/checkpoints on     # create a checkpoint commit before each turn
+/undo               # reset the working tree to the last checkpoint
+```
+
+This is opt-in because it creates commits in your repo — turn it off with `/checkpoints off`.
+
+
 ---
 
 ## Documentation

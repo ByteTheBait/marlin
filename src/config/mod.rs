@@ -197,6 +197,16 @@ pub struct Config {
     /// Set with `/system <provider> <text>` or `/system <text>` for global.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub provider_system_prompts: HashMap<String, String>,
+    /// Request extended thinking / chain-of-thought reasoning from the model
+    /// (Claude extended thinking, OpenAI reasoning models). Toggle with
+    /// `/thinking [on|off]`. Off by default.
+    #[serde(default)]
+    pub thinking: bool,
+    /// Create a git checkpoint before each agentic turn so `/undo` can roll
+    /// the whole turn back. Toggle with `/checkpoints [on|off]`. Off by
+    /// default (it creates commits in the user's repo).
+    #[serde(default)]
+    pub checkpoints: bool,
 }
 
 fn default_tool_call_limit() -> usize {
@@ -372,6 +382,8 @@ impl Config {
             tool_call_limit: default_tool_call_limit(),
             status_colors: HashMap::new(),
             provider_system_prompts: HashMap::new(),
+            thinking: false,
+            checkpoints: false,
         }
     }
 }

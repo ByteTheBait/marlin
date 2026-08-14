@@ -137,6 +137,11 @@ impl Provider for ClaudeProvider {
             }
             let mut pending: Vec<PendingTool> = Vec::new();
             let mut current_tool_idx: Option<usize> = None;
+            // Accumulated extended-thinking text (Claude `thinking_delta`).
+            // Emitted as a single ` thinking... response` block once the
+            // thinking block ends, so the TUI renders it dimmed/italic.
+            let mut thinking_buf = String::new();
+            let mut in_thinking = false;
 
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk {
@@ -195,6 +200,9 @@ impl Provider for ClaudeProvider {
                                             .as_str().unwrap_or("").to_string();
                                         pending.push(PendingTool { id, name, input: String::new() });
                                         current_tool_idx = Some(pending.len() - 1);
+                                    } else if event["content_block"]["type"].as_str() == Some("thinking") {
+                                        in_thinking = true;
+                                        current_tool_idx = None;
                                     } else {
                                         current_tool_idx = None;
                                     }
@@ -216,6 +224,11 @@ impl Provider for ClaudeProvider {
                                                 }
                                             }
                                         }
+                                        "thinking_delta" => {
+                                            if let Some(text) = delta["thinking"].as_str() {
+                                                thinking_buf.push_str(text);
+                                            }
+                                        }
                                         "input_json_delta" => {
                                             if let (Some(idx), Some(part)) = (
                                                 current_tool_idx,
@@ -228,6 +241,20 @@ impl Provider for ClaudeProvider {
                                     }
                                 }
                                 "content_block_stop" => {
+                                    if in_thinking {
+                                        in_thinking = false;
+                                        if !thinking_buf.is_empty() {
+                                            let _ = tx.send(StreamChunk {
+                                                content: format!(" thinking{} response", thinking_buf),
+                                                done: false,
+                                                error: None,
+                                                tool_calls: vec![],
+                                                retry_after: 0,
+                                                rate_limit: None,
+                                            }).await;
+                                            thinking_buf.clear();
+                                        }
+                                    }
                                     current_tool_idx = None;
                                 }
                                 "message_stop" => {
@@ -302,6 +329,15 @@ fn build_claude_request(req: &StreamRequest) -> Value {
     }
     if !tools.is_empty() {
         body["tools"] = serde_json::json!(tools);
+    }
+    if req.thinking {
+        // Claude extended thinking. The budget must be a fraction of
+        // max_tokens; reserve the rest for the visible answer.
+        let budget = (req.max_tokens as f64 * 0.8) as usize;
+        body["thinking"] = serde_json::json!({
+            "type": "enabled",
+            "budget_tokens": budget.max(1024),
+        });
     }
 
     body
