@@ -7,8 +7,8 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget},
 };
 
-use marlin_snapshots::DiffLine;
 use crate::styles::*;
+use marlin_snapshots::DiffLine;
 
 /// Result of feeding a key event to the diff pane.
 pub enum DiffOutcome {

@@ -6,8 +6,8 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
-use marlin_config::AstMode;
 use crate::styles::*;
+use marlin_config::AstMode;
 
 pub struct StatusBar {
     pub provider: String,

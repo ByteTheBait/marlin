@@ -20,10 +20,10 @@ use ratatui::{
 };
 use tokio::sync::mpsc;
 
-use marlin_engine::{Action, UiUpdate};
 use crate::styles;
 use crate::views::{chat::ChatView, splash::SplashView};
 use crate::widgets::{sidebar::Sidebar, statusbar::StatusBar};
+use marlin_engine::{Action, UiUpdate};
 
 enum View {
     Splash(SplashView),

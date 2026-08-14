@@ -2,12 +2,12 @@ use chrono::Local;
 use tui_scrollview::ScrollViewState;
 use tui_textarea::TextArea;
 
-use marlin_engine::Action;
 use crate::widgets::config_menu::ConfigMenuOutcome;
 use crate::widgets::diff::DiffOutcome;
 use crate::widgets::editor::EditorOutcome;
 use crate::widgets::suggestions::{filter_suggestions, tab_complete, CmdDef};
 use crate::widgets::viewer::ViewerOutcome;
+use marlin_engine::Action;
 
 use super::entry::{ChatEntry, EntryRole};
 use super::state::ChatView;

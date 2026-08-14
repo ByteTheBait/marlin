@@ -7,8 +7,8 @@ use ratatui::{
     widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph, Widget},
 };
 
-use marlin_core::tasks::{TaskStatus, TaskStep};
 use crate::styles::*;
+use marlin_core::tasks::{TaskStatus, TaskStep};
 
 const TOKEN_HISTORY_LEN: usize = 60;
 /// Bound on the sidebar's subagent list — running entries are always kept

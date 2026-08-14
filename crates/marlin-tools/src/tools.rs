@@ -1,5 +1,5 @@
 use marlin_config::config::AstMode;
-use marlin_mcp::mcp as mcp;
+use marlin_mcp::mcp;
 use marlin_providers::{ToolDef, ToolProp};
 
 pub fn all_tools(

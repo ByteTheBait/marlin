@@ -15,6 +15,11 @@ use marlin_core::skill::{Skill, SkillDef};
 use marlin_core::tasks::{TaskStatus, TaskStep};
 use tokio::sync::mpsc;
 
+use config::{AstMode, Config, ModelTier, SandboxMode};
+use context::{estimate_tokens, maybe_prune_history};
+use history::{from_session_message, to_session_message, InputHistory, Session};
+use index::Index;
+use loop_guard::LoopGuard;
 use marlin_checkpoint as checkpoint;
 use marlin_commands as commands;
 use marlin_config as config;
@@ -30,11 +35,6 @@ use marlin_skills as skills;
 use marlin_snapshots as snapshots;
 use marlin_styles as styles;
 use marlin_tools::{all_tools, executor, policy};
-use config::{AstMode, Config, ModelTier, SandboxMode};
-use history::{from_session_message, to_session_message, InputHistory, Session};
-use index::Index;
-use context::{estimate_tokens, maybe_prune_history};
-use loop_guard::LoopGuard;
 
 pub use marlin_core::ui::{Action, ConfigState, StatusInfo, UiUpdate};
 
@@ -3336,8 +3336,7 @@ impl Engine {
 
             "/undo" => {
                 let work_dir = self.work_dir.clone();
-                match tokio::task::spawn_blocking(move || checkpoint::undo(&work_dir)).await
-                {
+                match tokio::task::spawn_blocking(move || checkpoint::undo(&work_dir)).await {
                     Ok(Ok(msg)) => sys!(format!("Undo complete: {msg}")),
                     Ok(Err(e)) => err!(format!("Undo failed: {e}")),
                     Err(e) => err!(format!("Undo failed: {e}")),

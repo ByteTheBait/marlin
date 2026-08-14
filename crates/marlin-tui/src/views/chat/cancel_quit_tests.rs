@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use marlin_engine::Action;
 use crate::widgets::viewer::ViewerPane;
+use marlin_engine::Action;
 
 use super::ChatView;
 

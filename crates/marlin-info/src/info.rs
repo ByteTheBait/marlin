@@ -74,13 +74,21 @@ impl Info {
         let _ = self.save();
     }
 
-    pub fn path(&self) -> &Path { &self.path }
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
 
     pub fn execute(&self, cmd_name: &str) -> Result<String> {
-        let cmd = self.run.get(cmd_name)
+        let cmd = self
+            .run
+            .get(cmd_name)
             .ok_or_else(|| anyhow!("no command {:?} in info.json run section", cmd_name))?;
         let work_dir = if self.cwd.is_empty() {
-            self.path.parent().unwrap_or(Path::new(".")).to_string_lossy().to_string()
+            self.path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .to_string_lossy()
+                .to_string()
         } else {
             self.cwd.clone()
         };
@@ -93,6 +101,8 @@ impl Info {
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
-        ).trim().to_string())
+        )
+        .trim()
+        .to_string())
     }
 }

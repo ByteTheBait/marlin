@@ -5,12 +5,12 @@ use tachyonfx::{fx, Effect, EffectTimer, Interpolation};
 use tui_scrollview::ScrollViewState;
 use tui_textarea::TextArea;
 
-use marlin_engine::UiUpdate;
 use crate::widgets::config_menu::ConfigMenu;
 use crate::widgets::diff::DiffPane;
 use crate::widgets::editor::EditorPane;
 use crate::widgets::suggestions::{all_commands, CmdDef};
 use crate::widgets::viewer::ViewerPane;
+use marlin_engine::UiUpdate;
 
 use super::entry::{ChatEntry, EntryRole};
 

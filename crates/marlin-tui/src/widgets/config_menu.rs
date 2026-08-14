@@ -7,8 +7,8 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget},
 };
 
-use marlin_engine::ConfigState;
 use crate::styles::*;
+use marlin_engine::ConfigState;
 
 /// Result of feeding a key event to the config menu.
 pub enum ConfigMenuOutcome {
