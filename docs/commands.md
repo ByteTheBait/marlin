@@ -5,6 +5,7 @@
 ```
 /help                              show all commands
 /clear                             clear chat history and attachments
+/compact                           manually compact older turns into a summary now
 /provider <name>                   switch provider
 /model <name>                      switch model
 /providers                         list all providers and their models
@@ -44,7 +45,7 @@
 /history clear                     delete all saved sessions
 /resume                            restore the most recent session
 
-/theme [dark|light]                switch UI theme (persists)
+/theme [dark|light|<name>]         switch UI theme (persists); named themes live in ~/.marlin/themes/
 /cat <file>                        print file contents
 /ls [dir]                          list directory
 /cd <dir>                          change working directory
@@ -55,11 +56,22 @@ See [Command permissions](security.md#command-permissions) for how `/allow` and 
 
 ---
 
+## Steering the model while it works
+
+While Marlin is streaming a response or running tools, you can type in the input box and press `Enter` to **steer** it without interrupting the in-flight work:
+
+- **Plain text** is shown as a distinct amber `steer` text field in the model's output area — a note to yourself or a reminder, without touching the model's context.
+- **Slash commands** (e.g. `/compact`, `/exec`, `/ls`) are executed instantly and their output is shown in the same text field. The model's stream is never interrupted.
+
+This is useful for checking on progress, running a quick command, or forcing a compaction mid-task without waiting for the automatic token threshold.
+
+---
+
 ## Keyboard shortcuts
 
 | Key        | Action                      |
 |------------|-----------------------------|
-| `Enter`    | Send message                |
+| `Enter`    | Send message (or steer while streaming) |
 | `Ctrl+J`   | Insert newline              |
 | `Ctrl+C`   | Cancel streaming response   |
 | `Ctrl+Q`   | Quit                        |

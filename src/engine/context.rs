@@ -1,8 +1,8 @@
 use crate::providers::Message;
 
-// Thresholds in approximate tokens
-const COMPRESS_AT_TOKENS: usize = 80_000;
-const DROP_AT_TOKENS: usize    = 95_000;
+// Thresholds in approximate tokens — scaled from the configured context budget
+// (see `maybe_prune_history`). The mechanical fallback runs after the LLM
+// summarizer when still over budget.
 const KEEP_RECENT: usize       = 6;
 const TOOL_RESULT_CAP: usize   = 300;  // chars kept per tool result in compression
 const CONTENT_TAIL: usize      = 500;  // chars kept for user/assistant messages
@@ -28,8 +28,15 @@ pub fn estimate_tokens(history: &[Message], system_prompt: &str) -> usize {
 /// Strategy: truncate tool results first (largest, lowest value), then user/assistant,
 /// then drop oldest messages.
 /// Returns (compressed, dropped) counts.
-pub fn maybe_prune_history(history: &mut Vec<Message>) -> (usize, usize) {
-    if estimate_tokens(history, "") < COMPRESS_AT_TOKENS { return (0, 0); }
+///
+/// `budget` is the configured context budget (from `/budget`). Compaction starts
+/// at 80% of budget and hard-drops at 95%, so raising the budget raises the
+/// thresholds accordingly.
+pub fn maybe_prune_history(history: &mut Vec<Message>, budget: usize) -> (usize, usize) {
+    let compress_at = (budget as f64 * 0.80) as usize;
+    let drop_at = (budget as f64 * 0.95) as usize;
+
+    if estimate_tokens(history, "") < compress_at { return (0, 0); }
     if history.len() <= KEEP_RECENT { return (0, 0); }
 
     let split_idx = history.len() - KEEP_RECENT;
@@ -44,7 +51,7 @@ pub fn maybe_prune_history(history: &mut Vec<Message>) -> (usize, usize) {
         }
     }
 
-    if estimate_tokens(history, "") < COMPRESS_AT_TOKENS { return (compressed, 0); }
+    if estimate_tokens(history, "") < compress_at { return (compressed, 0); }
 
     // Pass 2: truncate long user/assistant messages to tail (preserve recent context)
     for msg in &mut history[0..split_idx] {
@@ -62,7 +69,7 @@ pub fn maybe_prune_history(history: &mut Vec<Message>) -> (usize, usize) {
 
     // Pass 3: drop oldest messages (skip index 0 in case it's a compaction summary)
     let mut dropped = 0usize;
-    while estimate_tokens(history, "") > DROP_AT_TOKENS && history.len() > KEEP_RECENT + 1 {
+    while estimate_tokens(history, "") > drop_at && history.len() > KEEP_RECENT + 1 {
         history.remove(1);
         dropped += 1;
     }

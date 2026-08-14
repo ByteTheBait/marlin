@@ -212,12 +212,32 @@ impl ChatView {
         let content_height = all_lines.len() as u16;
         self.content_height = content_height;
 
-        // Pin to bottom: manually set the y offset so the last line is always visible
-        // when at_bottom is true (must be done before ScrollView clamps the offset).
+        // Pin to bottom: when at_bottom is true, ease the viewport toward the
+        // bottom instead of jumping. The step is a fraction of the remaining
+        // distance, so it glides fast when there's a lot to scroll through and
+        // slows down as it approaches (e.g. when the model response stops).
         if self.at_bottom {
-            let max_y = content_height.saturating_sub(area.height);
+            let max_y = content_height.saturating_sub(area.height) as f64;
+            // Snap if the target was explicitly requested (End / send) or the
+            // content now fits entirely in the viewport.
+            if self.smooth_offset >= f64::MAX / 2.0 || max_y <= 0.0 {
+                self.smooth_offset = max_y;
+            } else {
+                let remaining = max_y - self.smooth_offset;
+                if remaining > 0.5 {
+                    // Move a fraction of the remaining distance each frame —
+                    // larger absolute step when far, smaller as we near the
+                    // bottom. A floor keeps it from stalling on tiny gaps.
+                    let step = (remaining * 0.18).max(0.5).min(remaining);
+                    self.smooth_offset += step;
+                } else {
+                    self.smooth_offset = max_y;
+                }
+            }
+            self.smooth_offset = self.smooth_offset.min(max_y);
+
             self.scroll_state = ScrollViewState::default();
-            for _ in 0..max_y {
+            for _ in 0..self.smooth_offset.round() as u16 {
                 self.scroll_state.scroll_down();
             }
         }
@@ -324,6 +344,25 @@ impl ChatView {
                         format!("  ! {}", entry.content),
                         style_error(),
                     )));
+                    i += 1;
+                }
+                EntryRole::Steer => {
+                    // A steering note/command result — rendered as a distinct
+                    // text field in the model's output area. Amber "steer" label
+                    // so it reads as user input injected mid-stream, not model
+                    // output.
+                    lines.push(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled("steer".to_string(), style_steer_label()),
+                    ]));
+                    for md in render_markdown(&entry.content, md_width) {
+                        let mut spans = vec![Span::raw("  ")];
+                        for s in md.spans {
+                            spans.push(Span::styled(s.content, style_steer_text()));
+                        }
+                        lines.push(Line::from(spans));
+                    }
+                    lines.push(Line::from(""));
                     i += 1;
                 }
                 EntryRole::Output => {

@@ -29,6 +29,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let dangerously_skip_permissions = args.iter().any(|a| a == "--dangerously-skip-permissions");
+    let resume_last = args.iter().any(|a| a == "--resume-last");
     let run_prompt = flag_value(&args, "--run");
 
     let mut cfg = config::Config::load()?;
@@ -71,10 +72,30 @@ fn main() -> Result<()> {
     let marlin_dir = config::marlin_dir()?;
 
     tui::styles::set_light_theme(cfg.theme == "light");
-    tui::styles::load_palette(config::load_theme(&marlin_dir));
+    // If the persisted theme is a named theme (not "dark"/"light"), load its
+    // palette from ~/.marlin/themes/<name>.toml so the choice survives restarts.
+    let palette = if cfg.theme != "dark" && cfg.theme != "light" {
+        config::load_named_theme(&marlin_dir, &cfg.theme)
+            .unwrap_or_else(|| config::load_theme(&marlin_dir))
+    } else {
+        config::load_theme(&marlin_dir)
+    };
+    tui::styles::load_palette(palette);
     let layout = config::load_layout(&marlin_dir);
 
     let mut eng = engine::Engine::new(cfg)?;
+
+    // --resume-last: load the most recent session before the TUI starts
+    if resume_last {
+        match history::list_sessions(&marlin_dir) {
+            Ok(sessions) if !sessions.is_empty() => {
+                let s = &sessions[0];
+                eng.history = s.messages.iter().map(history::from_session_message).collect();
+                eprintln!("marlin: resumed session {} ({})", s.id, s.summary());
+            }
+            _ => eprintln!("marlin: --resume-last: no saved sessions to resume"),
+        }
+    }
 
     // Print preflight diagnostics to the real terminal before the TUI takes over
     // the alternate screen — missing binaries, unparsable config files, skill

@@ -62,11 +62,20 @@ pub struct ChatView {
     // /edit overlay
     pub editor: Option<EditorPane>,
 
+    /// When a DiffPreview is shown, this holds the tool_id so the user's
+    /// accept/reject decision can be sent back to the engine.
+    pub(super) pending_diff_tool_id: Option<String>,
+
     // Scroll
     pub scroll_state: ScrollViewState,
     pub content_height: u16,
     pub viewport_height: u16,
     pub at_bottom: bool,
+    /// Animated scroll position (in rows) used while following the bottom.
+    /// Eases toward the target bottom so the viewport glides smoothly instead
+    /// of jumping — faster when there's a lot of content to scroll through,
+    /// slowing down as it approaches (e.g. when the model response stops).
+    pub smooth_offset: f64,
     /// True when new content (a stream chunk, tool call, etc.) arrived while
     /// the user was scrolled up, so the renderer can show a "scroll to bottom"
     /// hint. Cleared once the user returns to the bottom.
@@ -128,10 +137,12 @@ impl ChatView {
             viewer: None,
             diff_pane: None,
             editor: None,
+            pending_diff_tool_id: None,
             scroll_state: ScrollViewState::default(),
             content_height: 0,
             viewport_height: 1,
             at_bottom: true,
+            smooth_offset: 0.0,
             new_content_arrived: false,
             width,
             height,
@@ -246,6 +257,15 @@ impl ChatView {
                 });
                 self.maybe_scroll_to_bottom();
             }
+            UiUpdate::SteerResult(text) => {
+                self.entries.push(ChatEntry {
+                    role: EntryRole::Steer,
+                    content: text,
+                    tool_name: String::new(),
+                    time: Local::now(),
+                });
+                self.maybe_scroll_to_bottom();
+            }
             UiUpdate::SystemMsg(msg) => {
                 self.add_system(&msg);
             }
@@ -349,6 +369,22 @@ impl ChatView {
                 | UiUpdate::PromptBudget(_) | UiUpdate::SubagentStarted { .. }
                 | UiUpdate::SubagentToolCall { .. } | UiUpdate::SubagentFinished { .. } => {}
             UiUpdate::IndexBuilt => {}
+            UiUpdate::ToolStreamChunk { chunk, .. } => {
+                // Stream tool output chunks into the stream buffer so they
+                // appear inline as they arrive, just like model text.
+                if !self.streaming {
+                    self.typewriter_pos = 0;
+                }
+                self.streaming = true;
+                self.stream_buf.push_str(&chunk);
+                self.maybe_scroll_to_bottom();
+            }
+            UiUpdate::DiffPreview { tool_id, path, diff } => {
+                self.close_overlay_panes();
+                self.diff_pane = Some(DiffPane::new(path, diff));
+                // Store the tool_id so on_key can send AcceptDiff/RejectDiff
+                self.pending_diff_tool_id = Some(tool_id);
+            }
         }
     }
 
@@ -368,6 +404,91 @@ impl ChatView {
         // renderer can show a "scroll to bottom" hint.
         if !self.at_bottom {
             self.new_content_arrived = true;
+        }
+    }
+
+    /// Tab-complete a file or directory path from the last word in the input.
+    /// Returns the full input with the completed path, or None if no match.
+    pub(super) fn tab_complete_path(&self, input: &str) -> Option<String> {
+        // Find the last word boundary — the part we're trying to complete
+        let last_space = input.rfind(' ').map(|i| i + 1).unwrap_or(0);
+        let prefix = &input[..last_space];
+        let partial = &input[last_space..];
+
+        // Only complete if the partial looks like a path (contains / or is a filename)
+        if partial.is_empty() {
+            return None;
+        }
+
+        // Resolve the partial path relative to work_dir
+        let base = std::path::Path::new(&self.work_dir);
+        let (search_dir, file_prefix) = if partial.ends_with('/') {
+            (base.join(partial), String::new())
+        } else if let Some(slash_pos) = partial.rfind('/') {
+            let dir_part = &partial[..=slash_pos];
+            let file_part = &partial[slash_pos + 1..];
+            (base.join(dir_part), file_part.to_string())
+        } else {
+            (base.to_path_buf(), partial.to_string())
+        };
+
+        let entries = match std::fs::read_dir(&search_dir) {
+            Ok(iter) => iter,
+            Err(_) => return None,
+        };
+
+        let mut matches: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name().to_string_lossy().starts_with(&file_prefix)
+            })
+            .map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    name + "/"
+                } else {
+                    name
+                }
+            })
+            .collect();
+
+        if matches.is_empty() {
+            return None;
+        }
+
+        matches.sort();
+
+        if matches.len() == 1 {
+            // Single match — complete it
+            let rel = if partial.contains('/') {
+                let dir_prefix = partial[..partial.rfind('/').map(|i| i + 1).unwrap_or(0)].to_string();
+                format!("{dir_prefix}{}", matches[0])
+            } else {
+                matches[0].clone()
+            };
+            Some(format!("{prefix}{rel}"))
+        } else {
+            // Multiple matches — find common prefix
+            let mut common = matches[0].clone();
+            for m in &matches[1..] {
+                while !m.starts_with(&common) {
+                    common.pop();
+                    if common.is_empty() {
+                        return None;
+                    }
+                }
+            }
+            if common.len() > file_prefix.len() {
+                let rel = if partial.contains('/') {
+                    let dir_prefix = partial[..partial.rfind('/').map(|i| i + 1).unwrap_or(0)].to_string();
+                    format!("{dir_prefix}{common}")
+                } else {
+                    common
+                };
+                Some(format!("{prefix}{rel}"))
+            } else {
+                None
+            }
         }
     }
 }

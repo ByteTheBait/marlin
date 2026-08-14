@@ -414,6 +414,22 @@ pub fn style_thinking() -> Style {
     Style::default().fg(col_system()).add_modifier(Modifier::ITALIC | Modifier::DIM)
 }
 
+/// Label for a steering note/command result — amber, bold, so it reads as
+/// user input injected mid-stream rather than model output.
+pub fn style_steer_label() -> Style {
+    Style::default().fg(col_amber()).add_modifier(Modifier::BOLD)
+}
+
+/// Body text of a steering note/command result — amber-tinted, slightly dimmed
+/// so it stays visually distinct from both user messages and model output.
+pub fn style_steer_text() -> Style {
+    if is_light() {
+        Style::default().fg(Color::Rgb(150, 90, 15))
+    } else {
+        Style::default().fg(Color::Rgb(215, 155, 45))
+    }
+}
+
 /// Muted, grayed-out style for the final `mark_complete` summary text — reads
 /// as a quiet closing note rather than a normal assistant message.
 pub fn style_summary() -> Style {

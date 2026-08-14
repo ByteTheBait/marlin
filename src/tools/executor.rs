@@ -44,6 +44,8 @@ pub(crate) fn shell_quote(s: &str) -> String {
 pub type SearchFn<'a> = dyn Fn(&str, usize) -> String + 'a;
 /// Callback used to snapshot a file before a write/edit tool mutates it.
 pub type SnapshotFn<'a> = dyn Fn(&str, &str) + 'a;
+/// Callback used to stream run_command output chunks as they arrive.
+pub type StreamFn<'a> = dyn Fn(&str) + 'a;
 
 #[allow(clippy::too_many_arguments)]
 pub fn execute(
@@ -53,6 +55,7 @@ pub fn execute(
     is_allowed: &dyn Fn(&str) -> bool,
     search_fn: Option<&SearchFn<'_>>,
     snapshot_fn: Option<&SnapshotFn<'_>>,
+    stream_fn: Option<&StreamFn<'_>>,
     logs_dir: Option<&Path>,
     clean_env: bool,
     ast_mode: AstMode,
@@ -201,9 +204,16 @@ pub fn execute(
                 ));
             }
 
-            let output = if *sandbox_mode == SandboxMode::Mxc {
-                run_in_mxc(cmd, work_dir)
-            } else {
+            // MXC path — no streaming support
+            if *sandbox_mode == SandboxMode::Mxc {
+                return match run_in_mxc(cmd, work_dir) {
+                    Err(e) => ToolResult::err(e.to_string()),
+                    Ok(out) => format_command_output(&out.stdout, &out.stderr, out.status.success(), logs_dir),
+                };
+            }
+
+            // Streaming path
+            if let Some(stream) = stream_fn {
                 let mut command = Command::new("sh");
                 command.arg("-c").arg(cmd).current_dir(work_dir);
                 if clean_env {
@@ -214,52 +224,98 @@ pub fn execute(
                         }
                     }
                 }
-                command.output()
-            };
+                command.stdout(std::process::Stdio::piped());
+                command.stderr(std::process::Stdio::piped());
 
-            match output {
-                Err(e) => ToolResult::err(e.to_string()),
-                Ok(out) => {
-                    let combined = format!(
-                        "{}{}",
-                        String::from_utf8_lossy(&out.stdout),
-                        String::from_utf8_lossy(&out.stderr)
-                    );
-                    let trimmed = combined.trim().to_string();
-                    let result = if trimmed.is_empty() { "(no output)".to_string() } else { trimmed };
+                let mut child = match command.spawn() {
+                    Ok(c) => c,
+                    Err(e) => return ToolResult::err(e.to_string()),
+                };
 
-                    let (display, is_err) = if out.status.success() {
-                        (result, false)
-                    } else {
-                        (result, true)
-                    };
+                use std::io::BufRead;
+                let stdout = child.stdout.take();
+                let stderr = child.stderr.take();
 
-                    let display = if display.len() > LOG_THRESHOLD_BYTES {
-                        match spill_to_log(&display, logs_dir) {
-                            Some(log_path) => {
-                                let total_lines = display.lines().count();
-                                let snippet: String = display.lines()
-                                    .rev().take(40).collect::<Vec<_>>()
-                                    .into_iter().rev()
-                                    .collect::<Vec<_>>().join("\n");
-                                format!(
-                                    "[Marlin: truncated {} lines of output. Full log saved to {}]\n\
-                                    --- last 40 lines ---\n{}",
-                                    total_lines, log_path, snippet
-                                )
+                // Read stdout in a thread, send chunks through the callback
+                let (tx, rx) = std::sync::mpsc::channel::<String>();
+                let stdout_thread = stdout.map(|out| {
+                    std::thread::spawn(move || {
+                        let reader = std::io::BufReader::new(out);
+                        for line in reader.lines() {
+                            if let Ok(l) = line {
+                                let _ = tx.send(format!("{l}\n"));
                             }
-                            None => clamp(display),
                         }
-                    } else {
-                        clamp(display)
-                    };
+                    })
+                });
 
-                    if is_err {
-                        ToolResult::err(display)
-                    } else {
-                        ToolResult::ok(display)
+                let mut stderr_buf = String::new();
+                if let Some(err) = stderr {
+                    let reader = std::io::BufReader::new(err);
+                    for line in reader.lines() {
+                        if let Ok(l) = line {
+                            stderr_buf.push_str(&l);
+                            stderr_buf.push('\n');
+                        }
                     }
                 }
+
+                let mut stdout_buf = String::new();
+                for chunk in rx {
+                    stream(&chunk);
+                    stdout_buf.push_str(&chunk);
+                }
+                if let Some(h) = stdout_thread {
+                    let _ = h.join();
+                }
+
+                let status = child.wait();
+                let combined = format!("{stdout_buf}{stderr_buf}");
+                let trimmed = combined.trim().to_string();
+                let result = if trimmed.is_empty() { "(no output)".to_string() } else { trimmed };
+                let success = status.map(|s| s.success()).unwrap_or(false);
+
+                let display = if result.len() > LOG_THRESHOLD_BYTES {
+                    match spill_to_log(&result, logs_dir) {
+                        Some(log_path) => {
+                            let total_lines = result.lines().count();
+                            let snippet: String = result.lines()
+                                .rev().take(40).collect::<Vec<_>>()
+                                .into_iter().rev()
+                                .collect::<Vec<_>>().join("\n");
+                            format!(
+                                "[Marlin: truncated {} lines of output. Full log saved to {}]\n\
+                                --- last 40 lines ---\n{}",
+                                total_lines, log_path, snippet
+                            )
+                        }
+                        None => clamp(result),
+                    }
+                } else {
+                    clamp(result)
+                };
+
+                return if success {
+                    ToolResult::ok(display)
+                } else {
+                    ToolResult::err(display)
+                };
+            }
+
+            // Non-streaming fallback
+            let mut command = Command::new("sh");
+            command.arg("-c").arg(cmd).current_dir(work_dir);
+            if clean_env {
+                command.env_clear();
+                for var in CLEAN_ENV_VARS {
+                    if let Ok(val) = std::env::var(var) {
+                        command.env(var, val);
+                    }
+                }
+            }
+            match command.output() {
+                Err(e) => ToolResult::err(e.to_string()),
+                Ok(out) => format_command_output(&out.stdout, &out.stderr, out.status.success(), logs_dir),
             }
         }
 
@@ -667,6 +723,55 @@ fn spill_to_log(content: &str, logs_dir: Option<&Path>) -> Option<String> {
     Some(path.to_string_lossy().to_string())
 }
 
+/// Format command output bytes into a ToolResult, applying size limits.
+fn format_command_output(stdout: &[u8], stderr: &[u8], success: bool, logs_dir: Option<&Path>) -> ToolResult {
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    );
+    let trimmed = combined.trim().to_string();
+    let result = if trimmed.is_empty() { "(no output)".to_string() } else { trimmed };
+
+    let display = if result.len() > LOG_THRESHOLD_BYTES {
+        match spill_to_log(&result, logs_dir) {
+            Some(log_path) => {
+                let total_lines = result.lines().count();
+                let snippet: String = result.lines()
+                    .rev().take(40).collect::<Vec<_>>()
+                    .into_iter().rev()
+                    .collect::<Vec<_>>().join("\n");
+                format!(
+                    "[Marlin: truncated {} lines of output. Full log saved to {}]\n\
+                    --- last 40 lines ---\n{}",
+                    total_lines, log_path, snippet
+                )
+            }
+            None => clamp(result),
+        }
+    } else {
+        clamp(result)
+    };
+
+    if success {
+        ToolResult::ok(display)
+    } else {
+        ToolResult::err(display)
+    }
+}
+
+fn clamp(s: String) -> String {
+    if s.len() > MAX_OUTPUT_BYTES {
+        let mut end = MAX_OUTPUT_BYTES;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}\n…(truncated)", &s[..end])
+    } else {
+        s
+    }
+}
+
 fn parse_input(json: &str) -> Option<HashMap<String, String>> {
     if let Ok(m) = serde_json::from_str::<HashMap<String, String>>(json) {
         return Some(m);
@@ -676,7 +781,13 @@ fn parse_input(json: &str) -> Option<HashMap<String, String>> {
         for (k, v) in raw {
             let s = match v {
                 serde_json::Value::String(s) => s,
-                other => other.to_string(),
+                // Numbers are common for things like {"limit": 10} — convert
+                // them so they parse correctly downstream.
+                serde_json::Value::Number(n) => n.to_string(),
+                // Booleans and null don't have a natural string representation
+                // in tool inputs — skip them rather than silently producing
+                // "true"/"false"/"null" which tools won't expect.
+                _ => continue,
             };
             out.insert(k, s);
         }

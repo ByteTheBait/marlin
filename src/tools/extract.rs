@@ -60,6 +60,14 @@ fn find_symbol_start(source: &str, pattern: &str) -> Option<usize> {
 
 fn extract_from(source: &str, start: usize) -> String {
     let tail = &source[start..];
+
+    // Find the function body's opening brace. For C-like languages this is
+    // the first '{' that follows the parameter list's closing ')'. Scanning
+    // past the signature avoids being confused by braces inside default
+    // arguments (e.g. lambdas) or template parameters.
+    let body_start = find_body_open_brace(tail).unwrap_or(0);
+
+    let tail = &tail[body_start..];
     let mut depth = 0i32;
     let mut in_string = false;
     let mut string_char = ' ';
@@ -105,5 +113,58 @@ fn extract_from(source: &str, start: usize) -> String {
         return result_lines.join("\n");
     }
 
-    tail[..end].to_string()
+    // Include the signature (everything before the body brace)
+    let sig = &source[start..][..body_start].trim_end();
+    let body = &tail[..end];
+    if sig.is_empty() {
+        body.to_string()
+    } else {
+        format!("{sig}\n{body}")
+    }
+}
+
+/// Find the position of the function body's opening `{` in `tail`.
+/// Looks for the first `{` that follows an unquoted `)` at the top
+/// parenthesis level — this is the parameter list's closing paren.
+fn find_body_open_brace(tail: &str) -> Option<usize> {
+    let mut paren_depth = 0i32;
+    let mut in_string = false;
+    let mut string_char = ' ';
+    let mut prev = ' ';
+    let mut found_close_paren = false;
+
+    for (i, ch) in tail.char_indices() {
+        if in_string {
+            if ch == string_char && prev != '\\' {
+                in_string = false;
+            }
+        } else {
+            match ch {
+                '"' | '\'' => { in_string = true; string_char = ch; }
+                '(' => { paren_depth += 1; }
+                ')' => {
+                    paren_depth -= 1;
+                    if paren_depth == 0 {
+                        found_close_paren = true;
+                    }
+                }
+                '{' => {
+                    if found_close_paren && paren_depth == 0 {
+                        return Some(i);
+                    }
+                    // A '{' before the closing ')' is something else (lambda in
+                    // a default argument, initializer in a template param, etc.)
+                    // — skip it and keep looking.
+                }
+                ';' => {
+                    // Semicolon before any brace means this is a declaration
+                    // (e.g. function pointer typedef), not a definition.
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        prev = ch;
+    }
+    None
 }

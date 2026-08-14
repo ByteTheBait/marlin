@@ -290,7 +290,7 @@ async fn run_one_tool(
             &|c: &str| sandbox || policy::is_command_allowed(c, &allowed),
             search_fn.as_deref(),
             None,
-            Some(&logs_dir),
+            None, Some(&logs_dir),
             clean_env,
             AstMode::Off,
             &sandbox_mode,

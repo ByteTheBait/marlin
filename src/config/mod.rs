@@ -192,6 +192,11 @@ pub struct Config {
     /// tell them apart at a glance. Set with `/color <#rrggbb>`.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub status_colors: HashMap<String, [u8; 3]>,
+    /// Per-provider system prompt overrides. When set for the active provider,
+    /// this replaces the global `system_prompt` for that provider only.
+    /// Set with `/system <provider> <text>` or `/system <text>` for global.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub provider_system_prompts: HashMap<String, String>,
 }
 
 fn default_tool_call_limit() -> usize {
@@ -366,6 +371,7 @@ impl Config {
             token_budget: default_token_budget(),
             tool_call_limit: default_tool_call_limit(),
             status_colors: HashMap::new(),
+            provider_system_prompts: HashMap::new(),
         }
     }
 }
@@ -625,4 +631,30 @@ pub fn load_layout(marlin_dir: &Path) -> LayoutConfig {
             LayoutConfig::default()
         }),
     }
+}
+
+/// Per-project configuration loaded from `.marlonrc.toml` in the project root.
+/// Mirrors a subset of `Config` fields that make sense to override per-project.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProjectConfig {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub system_prompt: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_commands: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_mode: Option<String>,
+}
+
+/// Load `.marlonrc.toml` from `work_dir` if it exists. Returns None if the file
+/// doesn't exist or can't be parsed.
+pub fn load_project_config(work_dir: &str) -> Option<ProjectConfig> {
+    let path = Path::new(work_dir).join(".marlonrc.toml");
+    if !path.exists() {
+        return None;
+    }
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| toml::from_str::<ProjectConfig>(&s).ok())
 }

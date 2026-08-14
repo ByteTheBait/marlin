@@ -158,7 +158,11 @@ impl ConfigMenu {
                 key: "theme",
                 label: "Theme".into(),
                 kind: FieldKind::Cycle,
-                options: vec!["dark".into(), "light".into()],
+                options: {
+                    let mut opts = vec!["dark".into(), "light".into()];
+                    opts.extend(s.named_themes.iter().cloned());
+                    opts
+                },
                 current: s.theme.clone(),
             },
             MenuItem {

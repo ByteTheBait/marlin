@@ -91,6 +91,15 @@ pub enum UiUpdate {
     /// Config snapshot for the interactive /config menu. `open` is true when
     /// the user ran /config; false for refreshes after a ConfigSet applied.
     ConfigState { state: ConfigState, open: bool },
+    /// Streaming chunk from a long-running run_command tool call.
+    ToolStreamChunk { tool_id: String, chunk: String },
+    /// Diff preview for a pending write_file/edit_file — the TUI shows a
+    /// unified diff and the user accepts or rejects before the write happens.
+    DiffPreview { tool_id: String, path: String, diff: Vec<snapshots::DiffLine> },
+    /// Result of a steering command/note the user sent while the model was
+    /// working. Rendered as a distinct text field in the model's output area
+    /// without interrupting the in-flight stream.
+    SteerResult(String),
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +139,9 @@ pub struct ConfigState {
     pub model: String,
     pub models: Vec<String>,
     pub theme: String,
+    /// Names of available named themes (~/.marlin/themes/*.toml) — the /config
+    /// menu cycles through these alongside dark/light.
+    pub named_themes: Vec<String>,
     pub sandbox_mode: String,
     pub skip_permissions: bool,
     pub clean_env: bool,
@@ -156,6 +168,14 @@ pub enum Action {
     /// preflight funnel (path-escape approval, snapshotting) as the LLM's
     /// own write_file tool call.
     SaveEditorFile { path: String, content: String },
+    /// User accepted a diff preview for a pending write_file/edit_file.
+    AcceptDiff { tool_id: String },
+    /// User rejected a diff preview for a pending write_file/edit_file.
+    RejectDiff { tool_id: String },
+    /// A steering command/note the user typed while the model was working.
+    /// If it's a slash command it's executed instantly; otherwise it's shown
+    /// as a text field in the model's output without interrupting the stream.
+    Steer(String),
     Quit,
 }
 
@@ -167,7 +187,7 @@ pub struct Engine {
     marlin_dir: PathBuf,
     work_dir: String,
 
-    history: Vec<Message>,
+    pub history: Vec<Message>,
     code_index: Option<Index>,
     session: Option<Session>,
     input_history: InputHistory,
@@ -267,7 +287,7 @@ impl Engine {
 
         startup_diagnostics.extend(preflight::startup(&cfg, &marlin_dir, &work_dir, code_index.as_ref()));
 
-        Ok(Self {
+        let mut engine = Self {
             cfg,
             registry,
             marlin_dir,
@@ -302,7 +322,9 @@ impl Engine {
             req_backup_model: String::new(),
             compact_guard_tokens: 0,
             startup_diagnostics,
-        })
+        };
+        engine.apply_project_config();
+        Ok(engine)
     }
 
     /// Preflight startup diagnostics (missing binaries, unparsable config files,
@@ -312,6 +334,32 @@ impl Engine {
     /// system message once the UI channel exists, so they're not lost either way.
     pub fn startup_diagnostics(&self) -> &[String] {
         &self.startup_diagnostics
+    }
+
+    /// Load and apply `.marlonrc.toml` from the current work directory.
+    /// Called at construction and after every `/cd`. Project config overrides
+    /// are session-only — they're never persisted to `config.json`.
+    pub fn apply_project_config(&mut self) {
+        if let Some(pc) = crate::config::load_project_config(&self.work_dir) {
+            if !pc.system_prompt.is_empty() {
+                self.cfg.system_prompt = pc.system_prompt;
+            }
+            if !pc.allowed_commands.is_empty() {
+                self.allowed_commands = pc.allowed_commands.clone();
+                self.cfg.allowed_commands = pc.allowed_commands;
+            }
+            if let Some(vc) = pc.verify_command {
+                self.cfg.verify_command = Some(vc);
+            }
+            if let Some(sm) = pc.sandbox_mode {
+                match sm.as_str() {
+                    "off" => self.cfg.sandbox_mode = SandboxMode::Off,
+                    "permissive" | "on" => self.cfg.sandbox_mode = SandboxMode::Permissive,
+                    "mxc" => self.cfg.sandbox_mode = SandboxMode::Mxc,
+                    _ => {}
+                }
+            }
+        }
     }
 
     /// Build the current `StatusInfo` (provider/model/git branch/work dir and the
@@ -390,6 +438,8 @@ impl Engine {
                 // UserAnswer is consumed inside await_ask_user while the agentic
                 // loop is blocked; if it arrives here it's a stray no-op.
                 Action::UserAnswer(_) => {}
+                // Diff preview actions received outside an agentic loop are no-ops
+                Action::AcceptDiff { .. } | Action::RejectDiff { .. } => {}
 
                 Action::ConfigSet { key, value } => {
                     self.apply_config_set(&key, &value, &ui_tx).await;
@@ -494,6 +544,13 @@ impl Engine {
                         self.agentic_loop(&ui_tx, &mut action_rx).await;
                     }
                 }
+
+                // Steering input while the model is idle. If it's a slash command
+                // it's executed instantly; otherwise it's shown as a text field in
+                // the model's output area (no agentic loop is started).
+                Action::Steer(text) => {
+                    self.handle_steer(&text, &ui_tx, &mut action_rx).await;
+                }
             }
         }
     }
@@ -503,6 +560,12 @@ impl Engine {
 
         loop {
             if self.cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            // A cancel/steer may have arrived while the previous iteration was
+            // busy (tool execution, compaction, rate-limit sleep) — drain it
+            // before starting a new stream request.
+            if self.drain_pending_actions(ui_tx, action_rx).await {
                 break;
             }
 
@@ -538,7 +601,7 @@ impl Engine {
             // LLM-based compaction first, then mechanical truncation fallback
             self.maybe_compact_history(ui_tx).await;
 
-            let (compressed, dropped) = maybe_prune_history(&mut self.history);
+            let (compressed, dropped) = maybe_prune_history(&mut self.history, self.token_budget);
             if compressed > 0 || dropped > 0 {
                 let _ = ui_tx.send(UiUpdate::SystemMsg(format!(
                     "Context managed: compressed {compressed} messages, dropped {dropped} oldest turns."
@@ -551,6 +614,12 @@ impl Engine {
                 used: tok_used,
                 budget: self.token_budget,
             }).await;
+
+            // A cancel may have arrived during compaction / rate-limit sleep
+            // above — catch it before spending a new stream request.
+            if self.drain_pending_actions(ui_tx, action_rx).await {
+                break;
+            }
 
             let provider = match self.registry.get(&self.req_provider) {
                 Ok(p) => p,
@@ -577,13 +646,39 @@ impl Engine {
             let mut done_chunk = None;
 
             // Poll every 50 ms so Ctrl+C is felt within one frame rather than
-            // waiting for the next network chunk (which can take seconds).
+            // waiting for the next network chunk (which can take seconds). Also
+            // polls for steering input (Action::Steer) so the user can nudge the
+            // model mid-stream without interrupting it.
             'recv: loop {
                 let chunk = tokio::select! {
                     maybe = stream.recv() => match maybe {
                         Some(c) => c,
                         None => break 'recv,
                     },
+                    maybe_action = action_rx.recv() => {
+                        match maybe_action {
+                            Some(Action::Steer(text)) => {
+                                self.handle_steer(&text, ui_tx, action_rx).await;
+                                continue 'recv;
+                            }
+                            Some(Action::CancelStream) => {
+                                self.cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                                self.active_goal.clear();
+                                self.tool_iterations = 0;
+                                self.stall_nudges = 0;
+                                self.plan_steps.clear();
+                                self.plan_cursor = 0;
+                                let _ = ui_tx.send(UiUpdate::PlanUpdate(vec![])).await;
+                                if !text_buf.is_empty() {
+                                    let _ = ui_tx.send(UiUpdate::StreamChunk("\n\n*[cancelled]*".into())).await;
+                                }
+                                return;
+                            }
+                            // Channel closed — nothing more to do.
+                            None => break 'recv,
+                            _ => { continue 'recv; }
+                        }
+                    }
                     _ = tokio::time::sleep(Duration::from_millis(50)) => {
                         if self.cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
                             if !text_buf.is_empty() {
@@ -690,6 +785,12 @@ impl Engine {
                 // Execute tools (run in blocking thread)
                 let results = self.execute_tools(&tool_calls, &denied, ui_tx, action_rx).await;
 
+                // A cancel may have arrived while the tools were running — stop
+                // the loop rather than feeding the results back to the model.
+                if self.cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+
                 // Track which task step index corresponds to this batch
                 let batch_task_start = self.task_steps.len().saturating_sub(tool_calls.len());
 
@@ -699,6 +800,14 @@ impl Engine {
                         output: res.output.clone(),
                         is_error: res.is_error,
                     }).await;
+
+                    // When a tool returns an error, offer a quick inline explanation
+                    if res.is_error {
+                        let hint = error_hint(&tc.name, &res.output);
+                        if !hint.is_empty() {
+                            let _ = ui_tx.send(UiUpdate::SystemMsg(format!("💡 {hint}"))).await;
+                        }
+                    }
 
                     // Update task step status, and correct the speculative group id
                     // (assigned before approval/denial was known — see
@@ -785,6 +894,10 @@ impl Engine {
                     if !summary.is_empty() {
                         let _ = ui_tx.send(UiUpdate::Summary(summary)).await;
                     }
+                    // Send desktop notification if the turn took many tool calls
+                    if self.tool_iterations >= 5 {
+                        self.send_notification("Marlin task complete", &self.active_goal);
+                    }
                     self.finish_turn(ui_tx).await;
                     break;
                 }
@@ -836,6 +949,44 @@ impl Engine {
 
                 self.finish_turn(ui_tx).await;
                 break;
+            }
+        }
+    }
+
+    /// Poll the action channel for steering/cancel input that arrived while the
+    /// agentic loop was busy — during tool execution (`execute_tools`), context
+    /// compaction, a rate-limit sleep, or a network retry — anywhere the `'recv`
+    /// loop isn't running to read it. Without this, a `CancelStream` sent while a
+    /// tool is running sits unread in the channel, `cancel_flag` never gets set,
+    /// and the loop just makes another stream request and keeps going.
+    ///
+    /// Handles `CancelStream` (sets the cancel flag and clears goal/plan state —
+    /// the TUI already shows "Cancelled." locally, so no message is sent here)
+    /// and `Steer` (executes it). Returns `true` if a cancel was requested, so
+    /// the caller should stop the loop; `false` if the channel is empty.
+    async fn drain_pending_actions(
+        &mut self,
+        ui_tx: &mpsc::Sender<UiUpdate>,
+        action_rx: &mut mpsc::Receiver<Action>,
+    ) -> bool {
+        loop {
+            match action_rx.try_recv() {
+                Ok(Action::CancelStream) => {
+                    self.cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    self.active_goal.clear();
+                    self.tool_iterations = 0;
+                    self.stall_nudges = 0;
+                    self.plan_steps.clear();
+                    self.plan_cursor = 0;
+                    let _ = ui_tx.send(UiUpdate::PlanUpdate(vec![])).await;
+                    return true;
+                }
+                Ok(Action::Steer(text)) => {
+                    self.handle_steer(&text, ui_tx, action_rx).await;
+                }
+                Ok(_) => {} // ignore other actions while the loop is busy
+                Err(mpsc::error::TryRecvError::Empty) => return false,
+                Err(mpsc::error::TryRecvError::Disconnected) => return false,
             }
         }
     }
@@ -939,7 +1090,7 @@ impl Engine {
                 // as it's called, so this is what actually makes them run
                 // concurrently rather than one-at-a-time.
                 let handles: Vec<Option<tokio::task::JoinHandle<executor::ToolResult>>> = batch.iter()
-                    .map(|c| (!denied.contains(&c.id)).then(|| self.spawn_tool(c)))
+                    .map(|c| (!denied.contains(&c.id)).then(|| self.spawn_tool(c, ui_tx)))
                     .collect();
 
                 for h in handles {
@@ -951,10 +1102,47 @@ impl Engine {
                             output: "Command denied by user.".to_string(),
                             is_error: true,
                         },
-                        Some(handle) => handle.await.unwrap_or_else(|e| executor::ToolResult {
-                            output: e.to_string(),
-                            is_error: true,
-                        }),
+                        Some(mut handle) => {
+                            // Poll for cancel while the tool runs so Ctrl+C is
+                            // felt even during a long-running command. The cancel
+                            // flag is only set once the CancelStream action is
+                            // read from the channel, so poll the channel here.
+                            let res = tokio::select! {
+                                r = &mut handle => r.unwrap_or_else(|e| executor::ToolResult {
+                                    output: e.to_string(),
+                                    is_error: true,
+                                }),
+                                maybe = action_rx.recv() => {
+                                    match maybe {
+                                        Some(Action::CancelStream) => {
+                                            self.cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                                            executor::ToolResult {
+                                                output: "Cancelled by user.".to_string(),
+                                                is_error: true,
+                                            }
+                                        }
+                                        Some(Action::Steer(text)) => {
+                                            self.handle_steer(&text, ui_tx, action_rx).await;
+                                            // Re-await the tool handle after handling
+                                            // the steer.
+                                            handle.await.unwrap_or_else(|e| executor::ToolResult {
+                                                output: e.to_string(),
+                                                is_error: true,
+                                            })
+                                        }
+                                        _ => {
+                                            // Channel closed or other action — just
+                                            // wait for the tool to finish.
+                                            handle.await.unwrap_or_else(|e| executor::ToolResult {
+                                                output: e.to_string(),
+                                                is_error: true,
+                                            })
+                                        }
+                                    }
+                                }
+                            };
+                            res
+                        }
                     };
                     results.push((result, if ran_in_batch { group } else { None }));
                 }
@@ -1050,10 +1238,95 @@ impl Engine {
                 continue;
             }
 
-            let result = self.spawn_tool(call).await.unwrap_or_else(|e| executor::ToolResult {
-                output: e.to_string(),
-                is_error: true,
-            });
+            // ── Diff preview for file-mutating tools ──────────────────────────
+            // Before executing write_file / edit_file / notebook_edit, compute
+            // what the file would look like and show a unified diff. The user
+            // can accept (tool runs) or reject (tool is skipped with a message).
+            if call.name == "write_file" || call.name == "edit_file" || call.name == "notebook_edit" {
+                if let Some(path) = extract_file_path(&call.input, &self.work_dir) {
+                    let old_content = std::fs::read_to_string(&path).unwrap_or_default();
+                    let new_content = match call.name.as_str() {
+                        "write_file" => {
+                            let input_map: std::collections::HashMap<String, String> =
+                                serde_json::from_str(&call.input).unwrap_or_default();
+                            input_map.get("content").cloned().unwrap_or_default()
+                        }
+                        "edit_file" => {
+                            let input_map: std::collections::HashMap<String, String> =
+                                serde_json::from_str(&call.input).unwrap_or_default();
+                            let old_str = input_map.get("old_string").cloned().unwrap_or_default();
+                            let new_str = input_map.get("new_string").cloned().unwrap_or_default();
+                            old_content.replacen(&old_str, &new_str, 1)
+                        }
+                        "notebook_edit" => {
+                            // For notebooks, just show the raw input as the "new" side
+                            let input_map: std::collections::HashMap<String, String> =
+                                serde_json::from_str(&call.input).unwrap_or_default();
+                            input_map.get("new_source").cloned().unwrap_or_default()
+                        }
+                        _ => String::new(),
+                    };
+
+                    if let Some(diff) = snapshots::diff_lines(&old_content, &new_content) {
+                        let _ = ui_tx.send(UiUpdate::DiffPreview {
+                            tool_id: call.id.clone(),
+                            path: path.clone(),
+                            diff,
+                        }).await;
+
+                        // Wait for user to accept or reject
+                        let accepted = loop {
+                            match action_rx.recv().await {
+                                Some(Action::AcceptDiff { tool_id }) if tool_id == call.id => break true,
+                                Some(Action::RejectDiff { tool_id }) if tool_id == call.id => break false,
+                                Some(Action::CancelStream) => break false,
+                                None => break false,
+                                _ => {} // ignore other actions while waiting
+                            }
+                        };
+
+                        if !accepted {
+                            results.push((executor::ToolResult {
+                                output: "Edit rejected by user — diff was not accepted.".to_string(),
+                                is_error: true,
+                            }, None));
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            let mut handle = self.spawn_tool(call, ui_tx);
+            let result = tokio::select! {
+                r = &mut handle => r.unwrap_or_else(|e| executor::ToolResult {
+                    output: e.to_string(),
+                    is_error: true,
+                }),
+                maybe = action_rx.recv() => {
+                    match maybe {
+                        Some(Action::CancelStream) => {
+                            self.cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                            executor::ToolResult {
+                                output: "Cancelled by user.".to_string(),
+                                is_error: true,
+                            }
+                        }
+                        Some(Action::Steer(text)) => {
+                            self.handle_steer(&text, ui_tx, action_rx).await;
+                            handle.await.unwrap_or_else(|e| executor::ToolResult {
+                                output: e.to_string(),
+                                is_error: true,
+                            })
+                        }
+                        _ => {
+                            handle.await.unwrap_or_else(|e| executor::ToolResult {
+                                output: e.to_string(),
+                                is_error: true,
+                            })
+                        }
+                    }
+                }
+            };
             results.push((result, None));
         }
         results
@@ -1062,9 +1335,14 @@ impl Engine {
     /// Build (but don't await) the blocking-pool task that actually runs one
     /// tool call. Split out of `execute_tools` so a parallel-safe batch can
     /// spawn several of these before awaiting any of them.
-    fn spawn_tool(&self, call: &ToolCall) -> tokio::task::JoinHandle<executor::ToolResult> {
+    fn spawn_tool(
+        &self,
+        call: &ToolCall,
+        ui_tx: &mpsc::Sender<UiUpdate>,
+    ) -> tokio::task::JoinHandle<executor::ToolResult> {
         let name = call.name.clone();
         let input = call.input.clone();
+        let tool_id = call.id.clone();
         let work_dir = self.work_dir.clone();
         let allowed = self.allowed_commands.clone();
         let marlin_dir = self.marlin_dir.clone();
@@ -1077,6 +1355,7 @@ impl Engine {
 
         let idx_clone = self.code_index.clone();
         let ext_tools = self.external_tools.clone();
+        let stream_tx = ui_tx.clone();
 
         tokio::task::spawn_blocking(move || {
             let search_fn: Option<Box<executor::SearchFn<'_>>> =
@@ -1087,6 +1366,21 @@ impl Engine {
                     });
                     f
                 });
+
+            // Streaming callback for run_command: sends chunks to the TUI as they arrive
+            let stream_fn: Option<Box<executor::StreamFn<'_>>> =
+                if name == "run_command" {
+                    let tid = tool_id.clone();
+                    Some(Box::new(move |chunk: &str| {
+                        let _ = stream_tx.blocking_send(UiUpdate::ToolStreamChunk {
+                            tool_id: tid.clone(),
+                            chunk: chunk.to_string(),
+                        });
+                    }))
+                } else {
+                    None
+                };
+
             executor::execute(
                 &name,
                 &input,
@@ -1096,6 +1390,7 @@ impl Engine {
                 Some(&|abs_path: &str, tool: &str| {
                     snapshots::take(&marlin_dir, &wd2, abs_path, tool);
                 }),
+                stream_fn.as_deref(),
                 Some(&logs_dir),
                 clean_env,
                 ast_mode,
@@ -1203,6 +1498,7 @@ impl Engine {
     /// else whatever the main conversation is using.
     fn subagent_model(&self) -> (String, String) {
         self.cfg.model_tiers.as_ref()
+            .filter(|t| t.enabled)
             .map(|t| (t.default.provider.clone(), t.default.model.clone()))
             .unwrap_or_else(|| (self.cfg.active_provider.clone(), self.cfg.active_model.clone()))
     }
@@ -1237,7 +1533,7 @@ impl Engine {
                 &|c: &str| sandbox || policy::is_command_allowed(c, &allowed),
                 None,
                 None,
-                Some(&logs_dir),
+                None, Some(&logs_dir),
                 clean_env,
                 crate::config::AstMode::Off,
                 &sandbox_mode,
@@ -1423,11 +1719,15 @@ impl Engine {
 
     /// LLM-based context compaction: summarize old turns when approaching token budget.
     async fn maybe_compact_history(&mut self, ui_tx: &mpsc::Sender<UiUpdate>) {
-        const COMPACT_ABOVE: usize = 70_000;
         const KEEP_RECENT: usize = 8;
 
+        // Compact when the conversation reaches ~70% of the configured context
+        // budget (default 100k → 70k, matching the old hardcoded threshold).
+        // Raising /budget raises the point at which compaction kicks in.
+        let compact_above = (self.token_budget as f64 * 0.70) as usize;
+
         let cur_tokens = estimate_tokens(&self.history, "");
-        if cur_tokens < COMPACT_ABOVE { return; }
+        if cur_tokens < compact_above { return; }
         if self.history.len() <= KEEP_RECENT { return; }
         // Don't re-compact immediately after a previous compaction; wait for 5k more tokens
         if self.compact_guard_tokens > 0 && cur_tokens < self.compact_guard_tokens + 5_000 {
@@ -1515,6 +1815,11 @@ impl Engine {
             if let Some(m) = models.iter().find(|m| m.contains("sonnet")) {
                 return (p.clone(), m.clone());
             }
+            // Fall back to the first model in the provider's list (typically the
+            // smallest/cheapest), not the active model which could be expensive.
+            if let Some(m) = models.first() {
+                return (p.clone(), m.clone());
+            }
         }
         (self.cfg.active_provider.clone(), self.cfg.active_model.clone())
     }
@@ -1577,11 +1882,17 @@ impl Engine {
             tools: vec![],
         };
         let mut text = String::new();
-        if let Ok(mut stream) = rater.stream(req).await {
-            while let Some(chunk) = stream.recv().await {
-                text.push_str(&chunk.content);
-                if chunk.done { break; }
+        let stream_fut = async {
+            if let Ok(mut stream) = rater.stream(req).await {
+                while let Some(chunk) = stream.recv().await {
+                    text.push_str(&chunk.content);
+                    if chunk.done { break; }
+                }
             }
+        };
+        // 10-second timeout — if the rater model hangs, fall back to default score.
+        if tokio::time::timeout(Duration::from_secs(10), stream_fut).await.is_err() {
+            return 50;
         }
         text.trim().parse::<u8>().unwrap_or(50).clamp(1, 100)
     }
@@ -1617,11 +1928,17 @@ impl Engine {
         };
 
         let mut text = String::new();
-        if let Ok(mut stream) = provider.stream(req).await {
-            while let Some(chunk) = stream.recv().await {
-                text.push_str(&chunk.content);
-                if chunk.done { break; }
+        let stream_fut = async {
+            if let Ok(mut stream) = provider.stream(req).await {
+                while let Some(chunk) = stream.recv().await {
+                    text.push_str(&chunk.content);
+                    if chunk.done { break; }
+                }
             }
+        };
+        // 10-second timeout — if the plan model hangs, proceed without a plan.
+        if tokio::time::timeout(Duration::from_secs(10), stream_fut).await.is_err() {
+            return;
         }
 
         let steps: Vec<TaskStep> = text
@@ -1729,6 +2046,14 @@ impl Engine {
             s.push_str(&self.cfg.system_prompt);
         }
 
+        // Per-provider system prompt override takes precedence over global
+        if let Some(override_prompt) = self.cfg.provider_system_prompts.get(&self.cfg.active_provider) {
+            if !override_prompt.is_empty() {
+                s.push_str("\nProvider-specific instructions:\n");
+                s.push_str(override_prompt);
+            }
+        }
+
         match &self.ast_mode {
             AstMode::Off => {}
             AstMode::SExpr => {
@@ -1776,6 +2101,141 @@ impl Engine {
 
     /// Handle a slash command. Returns `Some(prompt)` if a prompt-type user command
     /// expanded a template that should be injected into the agentic loop.
+    /// Handle a steering input sent while the model is working (or idle).
+    /// Slash commands are executed instantly and their output is shown as a
+    /// text field in the model's output area; plain text is shown verbatim as
+    /// a steering note. Either way the in-flight stream is never interrupted.
+    async fn handle_steer(
+        &mut self,
+        text: &str,
+        ui_tx: &mpsc::Sender<UiUpdate>,
+        action_rx: &mut mpsc::Receiver<Action>,
+    ) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        // Slash command → execute instantly, capture output as a text field.
+        if trimmed.starts_with('/') {
+            // /compact is handled specially (no agentic loop, no prompt injection).
+            let cmd_name = trimmed.split_whitespace().next().unwrap_or("").to_lowercase();
+            if cmd_name == "/compact" {
+                self.manual_compact(ui_tx).await;
+                return;
+            }
+            if let Some(prompt) = self.handle_slash_command(trimmed, ui_tx, action_rx).await {
+                // A prompt-type user command while steering — just show the
+                // expanded prompt as a text field; don't start a new agentic loop.
+                let _ = ui_tx.send(UiUpdate::SteerResult(format!(
+                    "[steer] /{} expanded prompt:\n{}",
+                    cmd_name.trim_start_matches('/'),
+                    prompt
+                ))).await;
+            }
+            return;
+        }
+
+        // Plain text → show as a steering note in the model's output area.
+        let _ = ui_tx.send(UiUpdate::SteerResult(trimmed.to_string())).await;
+    }
+
+    /// Manual `/compact` — force an LLM compaction of the older turns now,
+    /// regardless of the token threshold. Mirrors `maybe_compact_history` but
+    /// always runs (when there's enough history to compact) and reports the
+    /// result as a text field in the model's output area.
+    async fn manual_compact(&mut self, ui_tx: &mpsc::Sender<UiUpdate>) {
+        const KEEP_RECENT: usize = 8;
+        if self.history.len() <= KEEP_RECENT {
+            let _ = ui_tx.send(UiUpdate::SteerResult(
+                format!("[compact] nothing to compact — only {} turn(s) in context.", self.history.len())
+            )).await;
+            return;
+        }
+
+        let split = self.history.len() - KEEP_RECENT;
+        let old: Vec<Message> = self.history[..split].to_vec();
+
+        let (compact_provider, compact_model) = self.cheapest_model();
+        let provider = match self.registry.get(&compact_provider) {
+            Ok(p) => p,
+            Err(_) => {
+                let _ = ui_tx.send(UiUpdate::SteerResult(
+                    format!("[compact] failed: provider '{compact_provider}' unavailable.")
+                )).await;
+                return;
+            }
+        };
+
+        let ctx = compact_serialize(&old);
+        let summary_req = StreamRequest {
+            model: compact_model,
+            messages: vec![Message {
+                role: "user".into(),
+                content: format!(
+                    "Produce a dense technical summary of this coding session fragment for an AI \
+                    coding assistant. Include: files created/modified (with key changes), commands \
+                    run and their outcomes, errors encountered and how they were resolved, decisions \
+                    made, and current task state. Be precise and comprehensive — this summary \
+                    replaces the original turns in context.\n\n{ctx}"
+                ),
+                tool_calls: vec![],
+                tool_use_id: String::new(),
+                tool_call_id: String::new(),
+                is_error: false,
+            }],
+            system_prompt: String::new(),
+            max_tokens: 1500,
+            tools: vec![],
+        };
+
+        let _ = ui_tx.send(UiUpdate::SteerResult(
+            format!("[compact] summarizing {split} older turns…")
+        )).await;
+
+        let mut stream = match provider.stream(summary_req).await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = ui_tx.send(UiUpdate::SteerResult(
+                    format!("[compact] failed: {e}")
+                )).await;
+                return;
+            }
+        };
+
+        let mut summary = String::new();
+        while let Some(chunk) = stream.recv().await {
+            summary.push_str(&chunk.content);
+            if chunk.done { break; }
+        }
+
+        if summary.trim().is_empty() {
+            let _ = ui_tx.send(UiUpdate::SteerResult(
+                "[compact] failed: model returned an empty summary.".to_string()
+            )).await;
+            return;
+        }
+
+        let recent = self.history.split_off(split);
+        self.history.clear();
+        self.history.push(Message {
+            role: "user".into(),
+            content: format!("[Marlin Context Summary — {split} turns condensed]\n{}", summary.trim()),
+            tool_calls: vec![],
+            tool_use_id: String::new(),
+            tool_call_id: String::new(),
+            is_error: false,
+        });
+        self.history.extend(recent);
+
+        let new_tokens = estimate_tokens(&self.history, "");
+        self.compact_guard_tokens = new_tokens;
+
+        let _ = ui_tx.send(UiUpdate::SteerResult(
+            format!("[compact] done: {split} turns → 1 summary (~{new_tokens} tokens now).")
+        )).await;
+    }
+
     async fn handle_slash_command(
         &mut self,
         raw: &str,
@@ -1816,6 +2276,10 @@ impl Engine {
                 self.history.clear();
                 self.attachments.clear();
                 sys!("Chat cleared.");
+            }
+
+            "/compact" => {
+                self.manual_compact(ui_tx).await;
             }
 
             "/provider" | "/p" => {
@@ -2306,7 +2770,10 @@ impl Engine {
                         // Try to load a named theme from ~/.marlin/themes/<name>.toml
                         if let Some(palette) = crate::config::load_named_theme(&self.marlin_dir, name) {
                             crate::tui::styles::load_palette(palette);
-                            sys!(format!("Theme '{}' applied.", name));
+                            // Persist the named theme so it survives a restart.
+                            self.cfg.theme = name.to_string();
+                            save_cfg!();
+                            sys!(format!("Theme '{}' applied (persisted).", name));
                         } else {
                             let named = crate::config::list_themes(&self.marlin_dir);
                             if named.is_empty() {
@@ -2703,6 +3170,16 @@ impl Engine {
                     Ok(m) if m.is_dir() => {
                         self.work_dir = new_dir.clone();
                         self.cfg.work_dir = new_dir.clone();
+                        // Update the session so save_session writes with the
+                        // correct project name and work_dir after a /cd.
+                        if let Some(session) = &mut self.session {
+                            let project_name = Path::new(&new_dir).file_name()
+                                .unwrap_or_default().to_string_lossy().to_string();
+                            session.project = project_name;
+                            session.work_dir = new_dir.clone();
+                        }
+                        // Load per-project .marlonrc.toml if present
+                        self.apply_project_config();
                         save_cfg!();
                         let _ = ui_tx.send(UiUpdate::StatusUpdate(self.status_info())).await;
                         sys!(format!("Directory: {new_dir}"));
@@ -2975,6 +3452,30 @@ impl Engine {
                 }
             }
 
+            "/export" => {
+                let format = args.first().copied().unwrap_or("html");
+                let path = args.get(1).copied().unwrap_or("marlin_export");
+                match format {
+                    "html" => {
+                        let html = self.export_html();
+                        let out_path = if path.ends_with(".html") { path.to_string() } else { format!("{path}.html") };
+                        match std::fs::write(&out_path, &html) {
+                            Ok(_) => sys!(format!("Exported session to {out_path}")),
+                            Err(e) => err!(format!("Failed to write {out_path}: {e}")),
+                        }
+                    }
+                    "json" => {
+                        let json = self.export_json();
+                        let out_path = if path.ends_with(".json") { path.to_string() } else { format!("{path}.json") };
+                        match std::fs::write(&out_path, &json) {
+                            Ok(_) => sys!(format!("Exported session to {out_path}")),
+                            Err(e) => err!(format!("Failed to write {out_path}: {e}")),
+                        }
+                    }
+                    _ => sys!("Usage: /export [html|json] [filename]"),
+                }
+            }
+
             _ => {
                 // Check user-defined commands before reporting unknown.
                 let cmd_name = cmd.trim_start_matches('/');
@@ -3047,6 +3548,8 @@ impl Engine {
                 }
             }
         }
+        let named_themes: Vec<String> = crate::config::list_themes(&self.marlin_dir)
+            .into_iter().map(|(n, _)| n).collect();
         ConfigState {
             provider: self.cfg.active_provider.clone(),
             providers: self.registry.names(),
@@ -3054,6 +3557,7 @@ impl Engine {
             model: self.cfg.active_model.clone(),
             models,
             theme: self.cfg.theme.clone(),
+            named_themes,
             sandbox_mode: self.cfg.sandbox_mode.label().into(),
             skip_permissions: self.cfg.skip_permissions,
             clean_env: self.cfg.clean_env,
@@ -3139,6 +3643,11 @@ impl Engine {
                 if value == "dark" || value == "light" {
                     self.cfg.theme = value.to_string();
                     crate::tui::styles::set_light_theme(value == "light");
+                    let _ = self.cfg.save();
+                } else if let Some(palette) = crate::config::load_named_theme(&self.marlin_dir, value) {
+                    // Named theme — apply and persist it.
+                    crate::tui::styles::load_palette(palette);
+                    self.cfg.theme = value.to_string();
                     let _ = self.cfg.save();
                 }
             }
@@ -3242,7 +3751,7 @@ impl Engine {
 
         let input = serde_json::json!({ "path": path, "content": content }).to_string();
         let call = ToolCall { id: "editor-save".into(), name: "write_file".into(), input };
-        let result = self.spawn_tool(&call).await.unwrap_or_else(|e| executor::ToolResult {
+        let result = self.spawn_tool(&call, ui_tx).await.unwrap_or_else(|e| executor::ToolResult {
             output: e.to_string(),
             is_error: true,
         });
@@ -3271,6 +3780,128 @@ impl Engine {
     fn resolve_path(&self, p: &str) -> String {
         executor::resolve_path(p, &self.work_dir)
     }
+
+    /// Send a desktop notification (best-effort, non-blocking).
+    fn send_notification(&self, title: &str, body: &str) {
+        let title = title.to_string();
+        let body = body.chars().take(120).collect::<String>();
+        std::thread::spawn(move || {
+            // Try terminal-notifier (macOS) first, then notify-send (Linux)
+            let _ = std::process::Command::new("terminal-notifier")
+                .args(["-title", &title, "-message", &body, "-group", "marlin"])
+                .output();
+            let _ = std::process::Command::new("notify-send")
+                .args([&title, &body, "--app-name=marlin"])
+                .output();
+        });
+    }
+
+    /// Export the current conversation as a self-contained HTML file.
+    fn export_html(&self) -> String {
+        let mut html = String::from(
+            "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\
+            <title>Marlin Session</title>\
+            <style>body{font-family:system-ui,sans-serif;max-width:900px;margin:0 auto;padding:2em;\
+            background:#1a1b26;color:#c0caf5;}\
+            .user{color:#7aa2f7;margin:1em 0;}\
+            .assistant{color:#9ece6a;margin:1em 0;}\
+            .tool{color:#e0af68;margin:0.5em 0;font-size:0.9em;}\
+            .error{color:#f7768e;margin:0.5em 0;}\
+            .system{color:#565f89;margin:0.5em 0;font-size:0.85em;}\
+            pre{background:#24283b;padding:0.8em;border-radius:6px;overflow-x:auto;}\
+            code{font-family:monospace;}\
+            .summary{color:#9ece6a;opacity:0.7;margin:1em 0;font-style:italic;}\
+            </style></head><body>\n<h1>Marlin Session</h1>\n"
+        );
+        for msg in &self.history {
+            let role = &msg.role;
+            let content = html_escape(&msg.content);
+            match role.as_str() {
+                "user" => html.push_str(&format!("<div class=\"user\"><strong>You</strong><pre>{content}</pre></div>\n")),
+                "assistant" => {
+                    if !msg.tool_calls.is_empty() {
+                        for tc in &msg.tool_calls {
+                            html.push_str(&format!("<div class=\"tool\"><strong>🔧 {}</strong><pre>{}</pre></div>\n",
+                                html_escape(&tc.name), html_escape(&tc.input)));
+                        }
+                    }
+                    if !content.is_empty() {
+                        html.push_str(&format!("<div class=\"assistant\"><strong>Marlin</strong><pre>{content}</pre></div>\n"));
+                    }
+                }
+                "tool" => {
+                    let class = if msg.is_error { "error" } else { "tool" };
+                    html.push_str(&format!("<div class=\"{class}\"><strong>↳ result</strong><pre>{content}</pre></div>\n"));
+                }
+                _ => {}
+            }
+        }
+        html.push_str("</body></html>\n");
+        html
+    }
+
+    /// Export the current conversation as JSON (same format as session files).
+    fn export_json(&self) -> String {
+        let session_msgs: Vec<history::SessionMessage> = self.history.iter().map(to_session_message).collect();
+        serde_json::to_string_pretty(&session_msgs).unwrap_or_else(|_| "[]".into())
+    }
+}
+
+/// Escape HTML special characters in a string.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Return a short hint for common tool errors, so the user gets a quick
+/// suggestion without waiting for the model to see and respond to the error.
+fn error_hint(tool_name: &str, output: &str) -> String {
+    let out = output.to_lowercase();
+    match tool_name {
+        "run_command" => {
+            if out.contains("command not found") {
+                "The command wasn't found. Check the spelling or install it first.".into()
+            } else if out.contains("permission denied") {
+                "Permission denied. Try running with sudo or check file permissions.".into()
+            } else if out.contains("no such file") {
+                "File or directory not found. Check the path and try again.".into()
+            } else if out.contains("not permitted") {
+                "This command needs approval. Use /allow <command> to permit it.".into()
+            } else {
+                String::new()
+            }
+        }
+        "read_file" => {
+            if out.contains("no such file") {
+                "File not found. Check the path — it may need to be created first.".into()
+            } else if out.contains("permission denied") {
+                "Can't read this file due to permissions.".into()
+            } else {
+                String::new()
+            }
+        }
+        "write_file" | "edit_file" => {
+            if out.contains("permission denied") {
+                "Can't write to this location. Check directory permissions.".into()
+            } else if out.contains("no such file") && tool_name == "edit_file" {
+                "File doesn't exist yet. Use write_file to create it first.".into()
+            } else if out.contains("old_string not found") {
+                "The text to replace wasn't found. The file may have changed — re-read it and try again.".into()
+            } else {
+                String::new()
+            }
+        }
+        "search_codebase" => {
+            if out.contains("index not built") {
+                "No search index yet. Run /index to build one for this project.".into()
+            } else {
+                String::new()
+            }
+        }
+        _ => String::new(),
+    }
 }
 
 fn extract_file_path(input_json: &str, work_dir: &str) -> Option<String> {
@@ -3280,7 +3911,10 @@ fn extract_file_path(input_json: &str, work_dir: &str) -> Option<String> {
     if Path::new(p).is_absolute() {
         Some(p.to_string())
     } else {
-        Some(format!("{work_dir}/{p}"))
+        // Use resolve_path so trailing-slash work_dirs (e.g. after /cd src/)
+        // don't produce doubled slashes that break the loop-guard file-hash
+        // check (which also uses resolve_path).
+        Some(crate::tools::executor::resolve_path(p, work_dir))
     }
 }
 
@@ -3369,19 +4003,23 @@ fn is_transient_network_error(e: &anyhow::Error) -> bool {
 }
 
 fn looks_like_unfinished_stall(text: &str) -> bool {
-    let last_sentence = text
-        .rsplit(['.', '!', '?', '\n'])
-        .find(|s| !s.trim().is_empty())
-        .unwrap_or(text)
-        .trim()
-        .to_lowercase();
-
     const STALL_PHRASES: &[&str] = &[
         "let me ", "let's ", "i'll ", "i will ", "i'm going to ", "i am going to ",
         "now i'll ", "now i will ", "next i'll ", "next, i'll ", "next i will ",
         "going to now ", "i'll now ", "i will now ",
     ];
-    STALL_PHRASES.iter().any(|p| last_sentence.starts_with(p))
+
+    // Scan all sentences, not just the last one. The model may say
+    // "I'll now read the file. The file contains 200 lines of..."
+    // where the stall signal is in the penultimate sentence.
+    for sentence in text.split(['.', '!', '?', '\n']) {
+        let s = sentence.trim().to_lowercase();
+        if s.is_empty() { continue; }
+        if STALL_PHRASES.iter().any(|p| s.starts_with(p)) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Tools with no side effects and no ordering dependency on each other or on
@@ -3427,7 +4065,7 @@ fn tool_short_desc(name: &str, input_json: &str) -> String {
         }
         "run_command" => {
             let cmd = v["command"].as_str().unwrap_or("?");
-            let short = cmd.split_whitespace().take(3).collect::<Vec<_>>().join(" ");
+            let short = shell_aware_truncate(cmd, 3);
             format!("run: {short}")
         }
         "search_codebase" => {
@@ -3451,11 +4089,46 @@ fn tool_short_desc(name: &str, input_json: &str) -> String {
     }
 }
 
+/// Truncate a shell command to the first `n` "words", respecting single-quoted
+/// and double-quoted strings so `sh -c 'some long command'` becomes
+/// `sh -c 'some long command'` (3 tokens) rather than `sh -c 'some` (3
+/// whitespace-split tokens that break the quote).
+fn shell_aware_truncate(cmd: &str, n: usize) -> String {
+    let mut tokens: Vec<&str> = Vec::new();
+    let mut start = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    let bytes = cmd.as_bytes();
+
+    for (i, &b) in bytes.iter().enumerate() {
+        if in_single {
+            if b == b'\'' { in_single = false; }
+        } else if in_double {
+            if b == b'"' { in_double = false; }
+        } else if b == b'\'' {
+            in_single = true;
+        } else if b == b'"' {
+            in_double = true;
+        } else if b == b' ' || b == b'\t' {
+            if start < i {
+                tokens.push(&cmd[start..i]);
+                if tokens.len() >= n { return tokens.join(" "); }
+            }
+            start = i + 1;
+        }
+    }
+    if start < cmd.len() {
+        tokens.push(&cmd[start..]);
+    }
+    tokens.join(" ")
+}
+
 fn help_text() -> String {
     let cmds = [
         ("/help", "show this help"),
         ("/config", "open the interactive settings menu"),
         ("/clear", "clear chat history and attachments"),
+        ("/compact", "manually compact older turns into a summary now"),
         ("/provider <name>", "switch provider (claude/ollama/groq/fireworks/moonshot/custom)"),
         ("/model <name>", "switch model"),
         ("/providers", "list all providers and models"),
@@ -3474,7 +4147,7 @@ fn help_text() -> String {
         ("/verify [cmd|off]", "set shell command to run after every file edit (Write-Test-Fix)"),
         ("/ast [off|sexpr|harness]", "AST context mode: off=raw, sexpr=S-expr reads, harness=JSON surgery (persists)"),
         ("/clean-env [on|off]", "strip subprocess environment for isolation (persists)"),
-        ("/theme [dark|light|<name>]", "switch theme; named themes live in ~/.marlin/themes/"),
+        ("/theme [dark|light|<name>]", "switch theme (persists); named themes live in ~/.marlin/themes/"),
         ("/color [<#rrggbb>|off]", "set the status bar background color for this directory (persists per workdir)"),
         ("/command [list|new|reload]", "manage user-defined slash commands (~/.marlin/commands/)"),
         ("/tool [list|new|reload]", "manage user-defined LLM tools (~/.marlin/tools/)"),

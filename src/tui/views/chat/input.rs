@@ -19,6 +19,9 @@ impl ChatView {
     fn scroll_viewport(&mut self, up: bool, steps: u16) {
         if up {
             self.at_bottom = false;
+            // Sync the animated offset to the manual position so returning to
+            // the bottom eases from where the user actually is.
+            self.smooth_offset = self.scroll_state.offset().y as f64;
             for _ in 0..steps {
                 self.scroll_state.scroll_up();
             }
@@ -30,6 +33,8 @@ impl ChatView {
             self.at_bottom = self.scroll_state.offset().y >= max;
             if self.at_bottom {
                 self.new_content_arrived = false;
+                // Snap to the bottom once the user scrolls all the way down.
+                self.smooth_offset = f64::MAX;
             }
         }
     }
@@ -172,12 +177,42 @@ impl ChatView {
             return None;
         }
 
-        // Diff pane intercepts all input while open
-        if let Some(diff) = &mut self.diff_pane {
-            if let DiffOutcome::Close = diff.on_key(key) {
-                self.diff_pane = None;
+        // Diff pane intercepts all input while open.
+        // If this is a diff *preview* (pending_diff_tool_id is set), Enter
+        // accepts and Esc rejects. Otherwise it's a /diff-mode view — Esc/q
+        // just closes it.
+        if self.diff_pane.is_some() {
+            if let Some(tool_id) = self.pending_diff_tool_id.take() {
+                match key.code {
+                    KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        self.diff_pane = None;
+                        self.add_system("Diff accepted — applying edit.");
+                        return Some(Action::AcceptDiff { tool_id });
+                    }
+                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') => {
+                        self.diff_pane = None;
+                        self.add_system("Diff rejected.");
+                        return Some(Action::RejectDiff { tool_id });
+                    }
+                    _ => {
+                        // Allow scrolling within the diff
+                        if let Some(diff) = &mut self.diff_pane {
+                            diff.on_key(key);
+                        }
+                        // Put the tool_id back since we didn't decide yet
+                        self.pending_diff_tool_id = Some(tool_id);
+                        return None;
+                    }
+                }
+            } else {
+                // Regular /diff-mode view
+                if let Some(diff) = &mut self.diff_pane {
+                    if let DiffOutcome::Close = diff.on_key(key) {
+                        self.diff_pane = None;
+                    }
+                }
+                return None;
             }
-            return None;
         }
 
         // Editor pane intercepts all input while open
@@ -220,6 +255,34 @@ impl ChatView {
         }
         self.quit_armed = false;
 
+        // Ctrl+R — repeat last user message
+        if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            // Find the last user message from entries
+            if let Some(last_user) = self.entries.iter().rev()
+                .find(|e| matches!(e.role, EntryRole::User))
+            {
+                let text = last_user.content.clone();
+                self.textarea = TextArea::default();
+                self.textarea.insert_str(&text);
+                self.update_suggestions();
+            }
+            return None;
+        }
+
+        // !! — repeat last user message (shell-style shorthand)
+        let current_input: String = self.textarea.lines().join("\n");
+        if current_input == "!!" {
+            if let Some(last_user) = self.entries.iter().rev()
+                .find(|e| matches!(e.role, EntryRole::User))
+            {
+                let text = last_user.content.clone();
+                self.textarea = TextArea::default();
+                self.textarea.insert_str(&text);
+                self.update_suggestions();
+            }
+            return None;
+        }
+
         // Tab autocomplete
         if key.code == KeyCode::Tab {
             let val = self.textarea.lines().first().cloned().unwrap_or_default();
@@ -230,6 +293,14 @@ impl ChatView {
                 self.textarea = TextArea::default();
                 self.textarea.insert_str(&completed);
                 self.update_suggestions();
+            } else {
+                // File path completion: find the last word and try to complete it
+                // as a file/directory path relative to the working directory.
+                if let Some(completed) = self.tab_complete_path(&val) {
+                    self.textarea = TextArea::default();
+                    self.textarea.insert_str(&completed);
+                    self.update_suggestions();
+                }
             }
             return None;
         }
@@ -288,16 +359,20 @@ impl ChatView {
             self.at_bottom = self.scroll_state.offset().y >= max;
             if self.at_bottom {
                 self.new_content_arrived = false;
+                self.smooth_offset = f64::MAX;
             }
             return None;
         }
         if key.code == KeyCode::End {
             self.at_bottom = true;
             self.new_content_arrived = false;
+            self.smooth_offset = f64::MAX; // snap to bottom on send
+            self.smooth_offset = f64::MAX; // snap to bottom
             return None; // render_viewport will pin to bottom
         }
         if key.code == KeyCode::Home {
             self.at_bottom = false;
+            self.smooth_offset = 0.0;
             self.scroll_state = ScrollViewState::default();
             return None;
         }
@@ -337,6 +412,20 @@ impl ChatView {
                 });
                 self.add_system(&format!("Typing animation: {state}"));
                 return None;
+            }
+
+            // While the model is streaming, Enter sends a *steering* input
+            // instead of a new message — it's executed instantly (if a slash
+            // command) or shown as a text field in the model's output, without
+            // interrupting the in-flight stream.
+            if self.streaming {
+                self.entries.push(ChatEntry {
+                    role: EntryRole::User,
+                    content: input.clone(),
+                    tool_name: String::new(),
+                    time: Local::now(),
+                });
+                return Some(Action::Steer(input));
             }
 
             if input.starts_with('/') {
