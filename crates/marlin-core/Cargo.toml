@@ -1,0 +1,9 @@
+[package]
+name = "marlin-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+marlin-config = { path = "../marlin-config" }
+marlin-snapshots = { path = "../marlin-snapshots" }
+marlin-commands = { path = "../marlin-commands" }

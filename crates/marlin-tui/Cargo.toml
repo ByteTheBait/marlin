@@ -1,0 +1,23 @@
+[package]
+name = "marlin-tui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+marlin-engine = { path = "../marlin-engine" }
+marlin-config = { path = "../marlin-config" }
+marlin-core = { path = "../marlin-core" }
+marlin-skills = { path = "../marlin-skills" }
+marlin-snapshots = { path = "../marlin-snapshots" }
+marlin-styles = { path = "../marlin-styles" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+tui-textarea.workspace = true
+tachyonfx.workspace = true
+tui-scrollview.workspace = true
+unicode-width.workspace = true
+chrono.workspace = true

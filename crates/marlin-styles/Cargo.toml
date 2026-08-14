@@ -1,0 +1,9 @@
+[package]
+name = "marlin-styles"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+marlin-config = { path = "../marlin-config" }
+ratatui.workspace = true
+tachyonfx.workspace = true

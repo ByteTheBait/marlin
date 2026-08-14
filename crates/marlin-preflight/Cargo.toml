@@ -1,0 +1,15 @@
+[package]
+name = "marlin-preflight"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+marlin-core = { path = "../marlin-core" }
+marlin-config = { path = "../marlin-config" }
+marlin-tools = { path = "../marlin-tools" }
+marlin-commands = { path = "../marlin-commands" }
+marlin-providers = { path = "../marlin-providers" }
+marlin-index = { path = "../marlin-index" }
+anyhow.workspace = true
+serde.workspace = true
+toml.workspace = true

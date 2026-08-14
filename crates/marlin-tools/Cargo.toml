@@ -1,0 +1,17 @@
+[package]
+name = "marlin-tools"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+marlin-config = { path = "../marlin-config" }
+marlin-providers = { path = "../marlin-providers" }
+marlin-mcp = { path = "../marlin-mcp" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+regex.workspace = true
+glob.workspace = true
+uuid.workspace = true
+dirs.workspace = true

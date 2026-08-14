@@ -1,0 +1,17 @@
+[package]
+name = "marlin-skills"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+marlin-core = { path = "../marlin-core" }
+marlin-providers = { path = "../marlin-providers" }
+marlin-tools = { path = "../marlin-tools" }
+marlin-preflight = { path = "../marlin-preflight" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+toml.workspace = true
+tokio.workspace = true
+chrono.workspace = true

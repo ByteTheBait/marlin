@@ -1,35 +1,56 @@
-[package]
-name = "marlin"
+[workspace]
+resolver = "2"
+members = [
+    "crates/marlin-core",
+    "crates/marlin-config",
+    "crates/marlin-providers",
+    "crates/marlin-index",
+    "crates/marlin-snapshots",
+    "crates/marlin-commands",
+    "crates/marlin-info",
+    "crates/marlin-checkpoint",
+    "crates/marlin-history",
+    "crates/marlin-mcp",
+    "crates/marlin-tools",
+    "crates/marlin-skills",
+    "crates/marlin-preflight",
+    "crates/marlin-styles",
+    "crates/marlin-engine",
+    "crates/marlin-tui",
+    "crates/marlin",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 
-[profile.release]
-opt-level = "z"     # Optimize aggressively for size (or "s" for a speed/size balance)
-strip = true        # Automatically remove all debug symbols and annotations
-lto = true          # Enable Link-Time Optimization across all dependency crates
-codegen-units = 1   # Reduce parallel compilation blocks to maximize size optimizations
-panic = "abort"   
- 
-[dependencies]
-ratatui          = ">=0.30"
-crossterm        = "0.28"
-tui-textarea     = { version = "0.7", features = ["crossterm"] }
-tokio            = { version = "1", features = ["full"] }
-reqwest          = { version = "0.12", features = ["stream", "json"] }
-serde            = { version = "1", features = ["derive"] }
-serde_json       = "1"
-futures          = "0.3"
-async-trait      = "0.1"
-dirs             = "5"
-unicode-width    = "0.2"
-chrono           = { version = "0.4", features = ["serde"] }
-uuid             = { version = "1", features = ["v4"] }
-anyhow           = "1"
-tachyonfx    = "0.25.0"
-sha2         = "0.10"
-glob         = "0.3"
-regex        = "1"
-base64       = "0.22"
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+toml = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["stream", "json"] }
+async-trait = "0.1"
+dirs = "5"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+glob = "0.3"
+regex = "1"
+base64 = "0.22"
+ratatui = ">=0.30"
+crossterm = "0.28"
+tui-textarea = { version = "0.7", features = ["crossterm"] }
+tachyonfx = "0.25.0"
 tui-scrollview = "0.6"
-toml         = "1"
-serde_yaml   = "0.9"
+futures = "0.3"
+unicode-width = "0.2"
+
+[profile.release]
+opt-level = "z"
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"

@@ -1,0 +1,11 @@
+[package]
+name = "marlin-mcp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+marlin-providers = { path = "../marlin-providers" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

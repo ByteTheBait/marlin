@@ -1263,27 +1263,225 @@ name = "marlin"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "marlin-config",
+ "marlin-engine",
+ "marlin-history",
+ "marlin-tui",
+ "tokio",
+]
+
+[[package]]
+name = "marlin-checkpoint"
+version = "0.1.0"
+dependencies = [
+ "uuid",
+]
+
+[[package]]
+name = "marlin-commands"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "toml",
+]
+
+[[package]]
+name = "marlin-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
+name = "marlin-core"
+version = "0.1.0"
+dependencies = [
+ "marlin-commands",
+ "marlin-config",
+ "marlin-snapshots",
+]
+
+[[package]]
+name = "marlin-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "async-trait",
  "base64",
  "chrono",
- "crossterm 0.28.1",
- "dirs",
  "futures",
- "glob",
- "ratatui 0.30.2",
- "regex",
+ "marlin-checkpoint",
+ "marlin-commands",
+ "marlin-config",
+ "marlin-core",
+ "marlin-history",
+ "marlin-index",
+ "marlin-mcp",
+ "marlin-preflight",
+ "marlin-providers",
+ "marlin-skills",
+ "marlin-snapshots",
+ "marlin-styles",
+ "marlin-tools",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "marlin-history"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "marlin-providers",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "marlin-index"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "marlin-info"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "marlin-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "marlin-providers",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "marlin-preflight"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "marlin-commands",
+ "marlin-config",
+ "marlin-core",
+ "marlin-index",
+ "marlin-providers",
+ "marlin-tools",
+ "serde",
+ "toml",
+]
+
+[[package]]
+name = "marlin-providers"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures",
+ "marlin-config",
  "reqwest",
  "serde",
  "serde_json",
- "serde_yaml",
- "sha2",
- "tachyonfx",
  "tokio",
  "toml",
+]
+
+[[package]]
+name = "marlin-skills"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "marlin-core",
+ "marlin-preflight",
+ "marlin-providers",
+ "marlin-tools",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "toml",
+]
+
+[[package]]
+name = "marlin-snapshots"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "marlin-styles"
+version = "0.1.0"
+dependencies = [
+ "marlin-config",
+ "ratatui 0.30.2",
+ "tachyonfx",
+]
+
+[[package]]
+name = "marlin-tools"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "glob",
+ "marlin-config",
+ "marlin-mcp",
+ "marlin-providers",
+ "regex",
+ "serde",
+ "serde_json",
+ "toml",
+ "uuid",
+]
+
+[[package]]
+name = "marlin-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "crossterm 0.28.1",
+ "marlin-config",
+ "marlin-core",
+ "marlin-engine",
+ "marlin-skills",
+ "marlin-snapshots",
+ "marlin-styles",
+ "ratatui 0.30.2",
+ "serde",
+ "serde_json",
+ "tachyonfx",
+ "tokio",
  "tui-scrollview",
  "tui-textarea",
  "unicode-width 0.2.0",
- "uuid",
 ]
 
 [[package]]
@@ -1965,7 +2163,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3127,15 +3325,6 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
-dependencies = [
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets 0.52.6",
 ]

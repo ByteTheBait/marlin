@@ -1,0 +1,12 @@
+[package]
+name = "marlin"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+marlin-engine = { path = "../marlin-engine" }
+marlin-config = { path = "../marlin-config" }
+marlin-history = { path = "../marlin-history" }
+marlin-tui = { path = "../marlin-tui" }
+anyhow.workspace = true
+tokio.workspace = true
