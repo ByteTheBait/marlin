@@ -13,9 +13,8 @@ pub fn all_tools(
         ToolDef {
             name: "read_file".into(),
             description: {
-                let base = "Read a file. Supply 'function' to extract only that named function \
-                    or method instead of the whole file — much more token-efficient for large files. \
-                    Supports Rust, Go, Python, and C-family languages.";
+                let base = "Read a file. 'function' extracts only that named function/method — \
+                    more token-efficient for large files. Supports Rust, Go, Python, C-family.";
                 match ast_mode {
                     AstMode::SExpr => format!(
                         "{base} [AST/SEXPR active: output is a compact S-expression AST, not raw source.]"
@@ -51,10 +50,8 @@ pub fn all_tools(
         ToolDef {
             name: "multi_edit".into(),
             description: "Apply several old_string→new_string replacements to one file in a single \
-                call, in order. Each edit runs against the file after the previous edits in the \
-                same call, so later edits can build on earlier ones. Use for a batch of related \
-                edits to one file instead of repeated edit_file calls. An empty old_string is not \
-                allowed (use edit_file for inserts).".into(),
+                call, in order. Use for a batch of related edits instead of repeated edit_file calls. \
+                An empty old_string is not allowed (use edit_file for inserts).".into(),
             properties: vec![
                 ToolProp { name: "path".into(), ty: "string".into(), description: "File path.".into() },
                 ToolProp { name: "edits".into(), ty: "string".into(), description: "JSON array of {old_string, new_string} in apply order, e.g. [{\"old_string\":\"a\",\"new_string\":\"b\"}]".into() },
@@ -63,10 +60,10 @@ pub fn all_tools(
         },
         ToolDef {
             name: "notebook_edit".into(),
-            description: "Replace, insert, or delete a single cell in a Jupyter notebook (.ipynb file).".into(),
+            description: "Replace, insert, or delete a single cell in a Jupyter notebook (.ipynb).".into(),
             properties: vec![
                 ToolProp { name: "path".into(), ty: "string".into(), description: "Path to the .ipynb file, relative to working directory or absolute.".into() },
-                ToolProp { name: "cell_id".into(), ty: "string".into(), description: "id of the target cell. Required for edit_mode=replace and edit_mode=delete. For edit_mode=insert, the new cell is inserted after this cell, or at the start of the notebook if omitted.".into() },
+                ToolProp { name: "cell_id".into(), ty: "string".into(), description: "id of the target cell. Required for edit_mode=replace/delete; for insert, the new cell goes after this cell (or at the start if omitted).".into() },
                 ToolProp { name: "cell_type".into(), ty: "string".into(), description: "One of: code, markdown. Required for edit_mode=insert; if omitted for replace, the existing cell's type is kept.".into() },
                 ToolProp { name: "edit_mode".into(), ty: "string".into(), description: "One of: replace, insert, delete. Defaults to replace.".into() },
                 ToolProp { name: "new_source".into(), ty: "string".into(), description: "New source for the cell. Not used for edit_mode=delete.".into() },
@@ -75,10 +72,10 @@ pub fn all_tools(
         },
         ToolDef {
             name: "run_command".into(),
-            description: "Run a shell command in the working directory and return combined stdout/stderr. \
-                If the command exceeds 'timeout' seconds it is killed and partial output is returned. \
-                For long-running work (a dev server, a watch build, a long test) prefer bg_start so the \
-                process keeps running while you continue working — poll it later with bg_status/bg_log.".into(),
+            description: "Run a shell command in the working directory, returning combined stdout/stderr. \
+                If it exceeds 'timeout' seconds it is killed and partial output is returned. For \
+                long-running work prefer bg_start so it keeps \
+                running".into(),
             properties: vec![
                 ToolProp { name: "command".into(), ty: "string".into(), description: "Shell command to execute.".into() },
                 ToolProp { name: "timeout".into(), ty: "string".into(), description: "Optional timeout in seconds (default 120). The command is killed if it runs longer.".into() },
@@ -87,9 +84,9 @@ pub fn all_tools(
         },
         ToolDef {
             name: "bg_start".into(),
-            description: "Start a long-running process in the background (dev server, watch build, long test) \
-                and return immediately with a process id — it keeps running while you continue working. \
-                Poll it later with bg_status / bg_log, and stop it with bg_kill.".into(),
+            description: "Start a long-running process in the background (dev server, watch build, \
+                long test) and return immediately with a process id — it keeps running while you \
+                continue working. Poll it later with bg_status / bg_log, stop it with bg_kill.".into(),
             properties: vec![
                 ToolProp { name: "command".into(), ty: "string".into(), description: "Shell command to run in the background.".into() },
             ],
@@ -98,8 +95,7 @@ pub fn all_tools(
         ToolDef {
             name: "bg_status".into(),
             description: "Report the status of background process(es): running or exited, exit code, \
-                elapsed time, and output size. With no id, lists all background processes. Use this \
-                to check whether a bg_start'd server/watch/test is still alive.".into(),
+                elapsed time, and output size. With no id, lists all background processes.".into(),
             properties: vec![
                 ToolProp { name: "id".into(), ty: "string".into(), description: "Optional background process id. Omit to list all.".into() },
             ],
@@ -107,7 +103,7 @@ pub fn all_tools(
         },
         ToolDef {
             name: "bg_log".into(),
-            description: "Read the new stdout+stderr that a background process has produced since the \
+            description: "Read the new stdout+stderr a background process has produced since the \
                 last bg_log call. Poll this after bg_status shows the process is running to see its \
                 output (logs, errors, readiness messages).".into(),
             properties: vec![
@@ -117,8 +113,8 @@ pub fn all_tools(
         },
         ToolDef {
             name: "bg_kill".into(),
-            description: "Terminate a background process started with bg_start (SIGTERM then SIGKILL on \
-                unix). Use this to stop a dev server or watch build you no longer need.".into(),
+            description: "Terminate a background process started with bg_start (SIGTERM then SIGKILL \
+                on unix). Use this to stop a dev server or watch build you no longer need.".into(),
             properties: vec![
                 ToolProp { name: "id".into(), ty: "string".into(), description: "Background process id to terminate.".into() },
             ],
@@ -152,26 +148,22 @@ pub fn all_tools(
         },
         ToolDef {
             name: "grep".into(),
-            description: "Search file contents with a regular expression, returning matching lines with \
-                line numbers and context. Use this to find where a symbol is used, a string appears, or \
-                a pattern occurs across the project — faster and more precise than search_codebase for \
-                exact/regex matches. Skips binary files and common junk directories (node_modules, \
-                target, .git, etc.).".into(),
+            description: "Search file contents with a regular expression, returning matching lines \
+                with line numbers and context. Faster and more precise than search_codebase for \
+                exact/regex matches. Skips binary files and common junk dirs.".into(),
             properties: vec![
-                ToolProp { name: "pattern".into(), ty: "string".into(), description: "Regular expression to search for (Rust regex syntax).".into() },
-                ToolProp { name: "path".into(), ty: "string".into(), description: "File or directory to search. Defaults to the working directory.".into() },
-                ToolProp { name: "glob".into(), ty: "string".into(), description: "Optional file glob to filter which files are searched (e.g. '*.rs' or 'src/**/*.ts').".into() },
-                ToolProp { name: "context".into(), ty: "string".into(), description: "Number of lines of context before/after each match (default 0).".into() },
+                ToolProp { name: "pattern".into(), ty: "string".into(), description: "Search term(Rust regex syntax)".into() },
+                ToolProp { name: "path".into(), ty: "string".into(), description: "File or directory to search.".into() },
+                ToolProp { name: "glob".into(), ty: "string".into(), description: "Optional filter what file extensions are searched".into() },
+                ToolProp { name: "context".into(), ty: "string".into(), description: "Number of context lines before/after each match (default 0).".into() },
                 ToolProp { name: "limit".into(), ty: "string".into(), description: "Maximum number of matches to return (default 50, max 200).".into() },
             ],
             required: vec!["pattern".into()],
         },
         ToolDef {
             name: "glob".into(),
-            description: "Find files and directories by path pattern (glob). Use this to locate files by \
-                name or path shape — e.g. '**/*.test.ts', 'src/**/mod.rs', '*.toml'. Returns matching \
-                paths relative to the working directory. Skips common junk directories (node_modules, \
-                target, .git, etc.).".into(),
+            description: "Find files and directories by path pattern (glob). Returns matching paths \
+                relative to the working directory. Skips common junk dirs (node_modules, target, .git, etc.).".into(),
             properties: vec![
                 ToolProp { name: "pattern".into(), ty: "string".into(), description: "Glob pattern to match (e.g. '**/*.rs' or 'src/**/*.test.ts').".into() },
                 ToolProp { name: "limit".into(), ty: "string".into(), description: "Maximum number of results to return (default 100, max 500).".into() },
@@ -181,8 +173,8 @@ pub fn all_tools(
         ToolDef {
             name: "search_symbols".into(),
             description: "Find which file *defines* a symbol (function, type, class, const, enum, trait). \
-                Returns the file path and a snippet of the definition line. Use this when you know a \
-                function or type name and want to jump to its definition, instead of grepping broadly.".into(),
+                Returns the file path and a snippet of the definition line. Use when you know a symbol \
+                name and want to jump to its definition, instead of grepping broadly.".into(),
             properties: vec![
                 ToolProp { name: "symbol".into(), ty: "string".into(), description: "The symbol name to find (e.g. 'parse_args' or 'Config').".into() },
                 ToolProp { name: "limit".into(), ty: "string".into(), description: "Maximum number of results to return (default 5, max 20).".into() },
@@ -191,10 +183,10 @@ pub fn all_tools(
         },
         ToolDef {
             name: "mark_complete".into(),
-            description: "Call this — alone, with no other tool calls in the same turn — when \
-                the goal is fully achieved (every requested change actually made, not just \
-                described) or you're permanently blocked. This is the only way to end the turn \
-                as done; plain text alone is not recognized as completion.".into(),
+            description: "Call this — alone, with no other tool calls in the same turn — when the goal \
+                is fully achieved (every requested change actually made, not just described) or you're \
+                permanently blocked. This is the only way to end the turn as done; plain text alone is \
+                not recognized as completion.".into(),
             properties: vec![
                 ToolProp { name: "summary".into(), ty: "string".into(), description: "One or two sentences: what was accomplished, or if blocked, what's blocking you and what you need from the user.".into() },
             ],
@@ -202,12 +194,11 @@ pub fn all_tools(
         },
         ToolDef {
             name: "ask_user".into(),
-            description: "Ask the user a question and wait for their typed answer. Use this when \
-                you need a decision, clarification, a preference, or information only the user \
-                has (e.g. which option they want, whether to proceed a certain way, a value \
-                you can't infer). The user's reply is returned as the tool result. Phrase the \
-                question clearly and self-contained so they can answer without extra context. \
-                Do not call this when the answer is already available or inferable.".into(),
+            description: "Ask the user a question and wait for their typed answer. Use when you need a \
+                decision, clarification, a preference, or information only the user has (e.g. which \
+                option they want, whether to proceed a certain way, a value you can't infer). The \
+                user's reply is returned as the tool result. Do not call this when the answer is \
+                already available or inferable.".into(),
             properties: vec![
                 ToolProp { name: "question".into(), ty: "string".into(), description: "The question to ask the user. Be specific and single-focus.".into() },
             ],
@@ -244,9 +235,9 @@ pub fn all_tools(
         tools.push(ToolDef {
             name: "run_skill".into(),
             description: format!(
-                "Run a pre-built Marlin skill by name. Use this when a skill matches \
-                the user's request — it's faster and more reliable than writing a \
-                shell command from scratch. {delegation_note} Candidate skills for this turn:\n{skill_list}"
+                "Run a pre-built Marlin skill by name. Use when a skill matches the user's \
+                request — faster and more reliable than writing a shell command from scratch. \
+                {delegation_note} Candidate skills for this turn:\n{skill_list}"
             ),
             properties: vec![
                 ToolProp {

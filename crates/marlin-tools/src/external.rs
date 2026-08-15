@@ -94,6 +94,8 @@ impl ExternalTool {
 
         let output = if *sandbox_mode == marlin_config::config::SandboxMode::Mxc {
             super::executor::run_in_mxc(cmd, work_dir)
+        } else if *sandbox_mode == marlin_config::config::SandboxMode::Docker {
+            super::executor::run_in_docker(cmd, work_dir)
         } else {
             let mut command = Command::new("sh");
             command.arg("-c").arg(cmd).current_dir(work_dir);

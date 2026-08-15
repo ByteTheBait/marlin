@@ -600,6 +600,28 @@ pub fn style_cursor_pulse(frame: u64) -> Style {
     Style::default().fg(pulse_rgb(base, dim, frame, 40))
 }
 
+/// Input cursor that fades in and out — the block's background color oscillates
+/// between the app background (invisible) and the full aqua cursor color, so the
+/// cursor gently blinks rather than sitting as a solid block. `frame` drives the
+/// sine wave; `period_frames` is the full on→off→on cycle length.
+pub fn style_cursor_fade(frame: u64, period_frames: u64) -> Style {
+    let bg = col_app_bg();
+    let cursor = if is_light() {
+        Color::Rgb(0, 115, 150)
+    } else {
+        Color::Rgb(0, 200, 200)
+    };
+    let fg = if is_light() {
+        Color::Rgb(255, 255, 255)
+    } else {
+        Color::Rgb(8, 12, 24)
+    };
+    // Fade the block background between the app bg and the cursor color.
+    Style::default()
+        .fg(fg)
+        .bg(pulse_rgb(bg, cursor, frame, period_frames))
+}
+
 /// Pulsing variant of the tool badge — gently brightens the chip background.
 pub fn style_tool_badge_pulse(frame: u64) -> Style {
     let (fg, bg) = if is_light() {

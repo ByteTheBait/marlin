@@ -84,6 +84,14 @@ pub struct ChatView {
     /// the user was scrolled up, so the renderer can show a "scroll to bottom"
     /// hint. Cleared once the user returns to the bottom.
     pub new_content_arrived: bool,
+    /// Smoothed mouse-wheel velocity in notches per second, used to scroll
+    /// the viewport proportionally to how fast the wheel is spinning. Fast
+    /// spins move more lines per notch; slow spins move fewer. Reset after a
+    /// pause so a fresh scroll starts clean instead of inheriting stale
+    /// momentum.
+    pub scroll_velocity: f64,
+    /// Timestamp of the last mouse-wheel event, used to measure wheel speed.
+    pub last_scroll_time: Option<Instant>,
 
     pub width: u16,
     pub height: u16,
@@ -114,7 +122,7 @@ pub struct ChatView {
 impl ChatView {
     pub fn new(width: u16, height: u16) -> Self {
         let mut ta = TextArea::default();
-        ta.set_placeholder_text("Message Marlin... (Enter to send, Ctrl+J for newline)");
+        ta.set_placeholder_text("Message Marlin... (Enter to send, Shift+Enter for newline)");
 
         let builtin_cmds = all_commands();
         let builtin_count = builtin_cmds.len();
@@ -149,6 +157,8 @@ impl ChatView {
             at_bottom: true,
             smooth_offset: 0.0,
             new_content_arrived: false,
+            scroll_velocity: 0.0,
+            last_scroll_time: None,
             width,
             height,
             provider: String::new(),

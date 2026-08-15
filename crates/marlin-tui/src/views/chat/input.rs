@@ -46,6 +46,12 @@ impl ChatView {
     /// scrolls the viewport directly instead, since a literal ↑/↓ *keypress*
     /// there can mean "navigate input history" depending on cursor/history
     /// state — a wheel notch should always mean "scroll", never that.
+    ///
+    /// The number of lines scrolled per notch is proportional to how fast the
+    /// wheel is spinning: a fast flick moves many lines, a slow nudge moves
+    /// few. Velocity is measured from the time between consecutive notches
+    /// and smoothed, so a burst of momentum scrolls quickly but stops the
+    /// moment the wheel does — no lingering glide that swallows keystrokes.
     pub fn on_mouse_scroll(&mut self, up: bool) -> Option<Action> {
         let overlay_open = self.approval_pending.is_some()
             || self.config_menu.is_some()
@@ -65,7 +71,30 @@ impl ChatView {
             ));
         }
 
-        self.scroll_viewport(up, 3);
+        // Measure wheel speed from the time since the last notch. A long gap
+        // (or no prior notch) means a slow/fresh scroll, so start from a
+        // modest baseline rather than inheriting stale momentum.
+        let now = std::time::Instant::now();
+        let dt = self
+            .last_scroll_time
+            .map(|t| now.duration_since(t).as_secs_f64())
+            .unwrap_or(0.2);
+        self.last_scroll_time = Some(now);
+
+        // Instantaneous notches-per-second, smoothed toward the running
+        // average so a single fast notch doesn't overreact but a sustained
+        // flick builds up. A long pause resets the average to the baseline.
+        let inst = 1.0 / dt.max(0.001);
+        self.scroll_velocity = if dt > 0.5 {
+            inst
+        } else {
+            self.scroll_velocity * 0.6 + inst * 0.4
+        };
+
+        // Map velocity to lines-per-notch. Slow scrolls (≈2/s) move 1 line,
+        // fast flicks (≈30/s) move up to ~12. Clamp to a sane range.
+        let steps = (self.scroll_velocity * 0.4).clamp(1.0, 12.0).round() as u16;
+        self.scroll_viewport(up, steps);
         None
     }
 
@@ -124,7 +153,7 @@ impl ChatView {
                     self.ask_pending = None;
                     self.textarea = TextArea::default();
                     self.textarea.set_placeholder_text(
-                        "Message Marlin... (Enter to send, Ctrl+J for newline)",
+                        "Message Marlin... (Enter to send, Shift+Enter for newline)",
                     );
                     return Some(Action::UserAnswer(answer));
                 }
@@ -132,7 +161,7 @@ impl ChatView {
                     self.ask_pending = None;
                     self.textarea = TextArea::default();
                     self.textarea.set_placeholder_text(
-                        "Message Marlin... (Enter to send, Ctrl+J for newline)",
+                        "Message Marlin... (Enter to send, Shift+Enter for newline)",
                     );
                     return Some(Action::CancelStream);
                 }
@@ -402,7 +431,14 @@ impl ChatView {
             return None;
         }
 
-        // Enter to send (not Alt+Enter or Ctrl+J)
+        // Shift+Enter — insert a newline (instead of sending).
+        if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
+            self.textarea.insert_newline();
+            self.update_suggestions();
+            return None;
+        }
+
+        // Enter to send (not Alt+Enter or Shift+Enter)
         if key.code == KeyCode::Enter && !key.modifiers.contains(KeyModifiers::ALT) {
             let input: String = self.textarea.lines().join("\n").trim().to_string();
             if input.is_empty() {
@@ -411,7 +447,7 @@ impl ChatView {
 
             self.textarea = TextArea::default();
             self.textarea
-                .set_placeholder_text("Message Marlin... (Enter to send, Ctrl+J for newline)");
+                .set_placeholder_text("Message Marlin... (Enter to send, Shift+Enter for newline)");
             self.suggestions.clear();
             self.history_idx = -1;
             self.history_draft.clear();
@@ -461,14 +497,11 @@ impl ChatView {
             // While the model is streaming, Enter sends a *steering* input
             // instead of a new message — it's executed instantly (if a slash
             // command) or shown as a text field in the model's output, without
-            // interrupting the in-flight stream.
+            // interrupting the in-flight stream. The engine echoes it back as a
+            // SteerResult, which renders the "steer" field — so we don't push a
+            // User entry here, or the same text would appear twice (once as
+            // "you", once as "steer").
             if self.streaming {
-                self.entries.push(ChatEntry {
-                    role: EntryRole::User,
-                    content: input.clone(),
-                    tool_name: String::new(),
-                    time: Local::now(),
-                });
                 return Some(Action::Steer(input));
             }
 

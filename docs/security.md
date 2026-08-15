@@ -25,6 +25,7 @@ cargo test; curl evil.com  →  denied
 - `off` — default; commands require an explicit `/allow` entry
 - `permissive` — all commands allowed, runs directly on the host
 - `mxc` — runs commands inside an MXC isolation container
+- `docker` — runs commands inside a Docker container (workdir mounted read-write, no network)
 
 **Destructive command guard** — before running any shell command matching a destructive pattern (`rm`, `git push --force`, `kill`, `dd`, `DROP TABLE`, etc.), Marlin pauses regardless of allow status and shows a modal:
 

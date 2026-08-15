@@ -19,7 +19,7 @@
 /detach [file]                     remove attachment(s)
 /exec <cmd>                        run a shell command (/allow-ed prefix required)
 /allow <prefix>                    permit an executable or command prefix (e.g. /allow cargo test)
-/sandbox [off|permissive|mxc]      command isolation mode (permissive allows all commands)
+/sandbox [off|permissive|mxc|docker]      command isolation mode (permissive allows all commands)
 /permissions [skip|require]        skip or require permission checks (persists)
 
 /verify [cmd|off]                  run a command after every file edit (Write-Test-Fix)
@@ -75,7 +75,7 @@ This is useful for checking on progress, running a quick command, or forcing a c
 | Key        | Action                      |
 |------------|-----------------------------|
 | `Enter`    | Send message (or steer while streaming) |
-| `Ctrl+J`   | Insert newline              |
+| `Shift+Enter` | Insert newline              |
 | `Ctrl+C`   | Cancel streaming response   |
 | `Ctrl+Q`   | Quit                        |
 | `↑` / `↓`  | Scroll history / chat       |

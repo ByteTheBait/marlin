@@ -598,15 +598,20 @@ impl ChatView {
             }
         }
 
-        // Block cursor
+        // Block cursor — drawn at the textarea's *actual* cursor position
+        // (row, col), not the end of the last line, so it follows the cursor
+        // as the user moves it. It fades in and out via a sine-driven block
+        // background rather than sitting as a solid block.
         if !self.streaming {
-            let last_row = show_rows.saturating_sub(1);
-            let last_line = lines_to_show.get(last_row).copied().unwrap_or("");
-            let col = last_line.chars().count().min(text_w);
-            let cx = text_x + col as u16;
-            let cy = area.y + last_row as u16;
-            if cx < area.right() && cy < area.bottom() {
-                buf[(cx, cy)].set_style(style_cursor());
+            let (cursor_row, cursor_col) = self.textarea.cursor();
+            if cursor_row < show_rows {
+                let line = lines_to_show[cursor_row];
+                let col = cursor_col.min(line.chars().count()).min(text_w);
+                let cx = text_x + col as u16;
+                let cy = area.y + cursor_row as u16;
+                if cx < area.right() && cy < area.bottom() {
+                    buf[(cx, cy)].set_style(style_cursor_fade(self.frame, 60));
+                }
             }
         }
     }
@@ -646,7 +651,7 @@ impl ChatView {
             Line::from(vec![
                 Span::styled("  enter", style_help_key()),
                 Span::styled(" send    ", style_system()),
-                Span::styled("ctrl+j", style_help_key()),
+                Span::styled("shift+enter", style_help_key()),
                 Span::styled(" newline    ", style_system()),
                 Span::styled("ctrl+c", style_help_key()),
                 Span::styled(" cancel    ", style_system()),

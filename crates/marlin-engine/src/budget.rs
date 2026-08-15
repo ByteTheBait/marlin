@@ -1,13 +1,13 @@
 //! Estimates the token cost of the *base prompt injection* — the system
 //! prompt plus the structured tool defs sent with every request — as opposed
 //! to `context::estimate_tokens`, which sizes the growing conversation
-//! history. Target is ~2k tokens; enforcement is a warning, never a hard cap
+//! history. Target is ~4k tokens; enforcement is a warning, never a hard cap
 //! (see engine::mod's `/tokens` command and the status bar badge).
 
 use marlin_providers::ToolDef;
 
 /// Warn (never block) once the base injection exceeds this many tokens.
-pub const WARN_THRESHOLD: usize = 2_000;
+pub const WARN_THRESHOLD: usize = 4_000;
 
 pub struct Component {
     pub name: String,
@@ -81,6 +81,27 @@ mod tests {
     use super::*;
     use marlin_config::AstMode;
     use marlin_tools::all_tools;
+
+    #[test]
+    fn debug_real_prompt() {
+        let system_prompt = "You are Marlin, an AI coding assistant running in a terminal.\n\
+            You help the user write, debug, and understand code.\n\n\
+            When asked to create a file, write code, edit something, or run a command — DO IT with the appropriate tool. \
+            Do not explain how the user could do it themselves. Do not ask for confirmation before using tools. Just act.\n\n\
+            Working directory: /Users/henry/Developer/marlin\n\n\
+            ## Active Goal\nhi\n\n\
+            Work toward this goal using tools. Keep calling tools until the task is fully complete.\n\
+            When — and only when — every part of the goal is actually done, call the mark_complete tool \
+                (alone, with no other tool calls in that turn) with a short summary. Do not just say you're done or \
+                describe what you're about to do in plain text and stop; if you catch yourself writing \"let me now...\" \
+                or \"I'll...\", make that tool call instead. Plain text with no tool call is only for asking the user \
+                a question or reporting you're permanently blocked.\n\
+            Progress so far: 0 tool calls made.\n";
+        let tools = all_tools(&AstMode::Off, &[("explore".into(), "explore the codebase".into())], &[], false, &[]);
+        let report = compute(system_prompt, &tools);
+        eprintln!("DEBUG REPORT:\n{}", report.format());
+        assert!(false, "debug");
+    }
 
     #[test]
     fn default_config_stays_under_budget() {

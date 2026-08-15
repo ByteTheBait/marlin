@@ -225,83 +225,100 @@ pub fn run(
             }
         })?;
 
-        // Poll for terminal events (16ms ≈ 60fps)
+        // Poll for terminal events (16ms ≈ 60fps). Drain ALL pending events
+        // in this frame rather than one-per-frame: a burst of scroll-wheel
+        // notches (trackpad momentum) is consumed together, so keystrokes
+        // queued behind a long scroll aren't starved until every notch is
+        // handled one frame at a time.
         if event::poll(Duration::from_millis(16))? {
-            match event::read()? {
-                Event::Key(key) => {
-                    if key.code == KeyCode::Char('q')
-                        && key.modifiers.contains(KeyModifiers::CONTROL)
-                    {
-                        let _ = action_tx.blocking_send(Action::Quit);
-                        break;
-                    }
-
-                    if let View::Splash(_) = &view {
-                        view = View::Chat;
-                        status_bar.mode = "chat".into();
-                        continue;
-                    }
-
-                    // Right arrow focuses the sidebar; Left arrow (or Esc)
-                    // returns to the text input. Tab is left free for slash-command
-                    // autocomplete in the input box.
-                    if key.code == KeyCode::Right {
-                        sidebar.focused = true;
-                        if sidebar.selected_category.is_none() {
-                            sidebar.selected_category = Some(0);
+            loop {
+                match event::read()? {
+                    Event::Key(key) => {
+                        if key.code == KeyCode::Char('q')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            let _ = action_tx.blocking_send(Action::Quit);
+                            break 'outer;
                         }
-                        continue;
-                    }
 
-                    if sidebar.focused {
-                        match key.code {
-                            KeyCode::Left | KeyCode::Esc => sidebar.focused = false,
-                            KeyCode::Up => sidebar.move_selection(-1),
-                            KeyCode::Down => sidebar.move_selection(1),
-                            KeyCode::Enter => sidebar.toggle_expand(),
-                            _ => {}
+                        if let View::Splash(_) = &view {
+                            view = View::Chat;
+                            status_bar.mode = "chat".into();
+                            continue;
                         }
-                        continue;
-                    }
 
-                    if let Some(action) = chat.on_key(key) {
-                        match &action {
-                            Action::Quit => {
-                                let _ = action_tx.blocking_send(Action::Quit);
-                                break;
+                        // Shift+Right focuses the sidebar; Shift+Left (or Esc)
+                        // returns to the text input. Plain Left/Right arrows are
+                        // left alone so they move the cursor in the input box.
+                        // Tab is left free for slash-command autocomplete.
+                        if key.code == KeyCode::Right
+                            && key.modifiers.contains(KeyModifiers::SHIFT)
+                        {
+                            sidebar.focused = true;
+                            if sidebar.selected_category.is_none() {
+                                sidebar.selected_category = Some(0);
                             }
-                            _ => {
+                            continue;
+                        }
+
+                        if sidebar.focused {
+                            match key.code {
+                                KeyCode::Left if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                                    sidebar.focused = false
+                                }
+                                KeyCode::Esc => sidebar.focused = false,
+                                KeyCode::Up => sidebar.move_selection(-1),
+                                KeyCode::Down => sidebar.move_selection(1),
+                                KeyCode::Enter => sidebar.toggle_expand(),
+                                _ => {}
+                            }
+                            continue;
+                        }
+
+                        if let Some(action) = chat.on_key(key) {
+                            match &action {
+                                Action::Quit => {
+                                    let _ = action_tx.blocking_send(Action::Quit);
+                                    break 'outer;
+                                }
+                                _ => {
+                                    let _ = action_tx.blocking_send(action);
+                                }
+                            }
+                        }
+                    }
+                    Event::Paste(text) => {
+                        if let View::Splash(_) = &view {
+                            continue;
+                        }
+                        chat.on_paste(&text);
+                    }
+                    Event::Resize(w, h) => {
+                        status_bar.width = w;
+                        chat.resize(w, h.saturating_sub(1));
+                    }
+                    Event::Mouse(mouse) => {
+                        if let View::Splash(_) = &view {
+                            continue;
+                        }
+                        let scrolled = match mouse.kind {
+                            MouseEventKind::ScrollUp => Some(true),
+                            MouseEventKind::ScrollDown => Some(false),
+                            _ => None,
+                        };
+                        if let Some(up) = scrolled {
+                            if let Some(action) = chat.on_mouse_scroll(up) {
                                 let _ = action_tx.blocking_send(action);
                             }
                         }
                     }
+                    _ => {}
                 }
-                Event::Paste(text) => {
-                    if let View::Splash(_) = &view {
-                        continue;
-                    }
-                    chat.on_paste(&text);
+                // Stop draining once the queue is empty; the outer loop
+                // re-renders and polls again.
+                if !event::poll(Duration::ZERO)? {
+                    break;
                 }
-                Event::Resize(w, h) => {
-                    status_bar.width = w;
-                    chat.resize(w, h.saturating_sub(1));
-                }
-                Event::Mouse(mouse) => {
-                    if let View::Splash(_) = &view {
-                        continue;
-                    }
-                    let scrolled = match mouse.kind {
-                        MouseEventKind::ScrollUp => Some(true),
-                        MouseEventKind::ScrollDown => Some(false),
-                        _ => None,
-                    };
-                    if let Some(up) = scrolled {
-                        if let Some(action) = chat.on_mouse_scroll(up) {
-                            let _ = action_tx.blocking_send(action);
-                        }
-                    }
-                }
-                _ => {}
             }
         }
     }

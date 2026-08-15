@@ -102,6 +102,9 @@ pub enum SandboxMode {
     /// Commands run via Microsoft eXecution Containers (MXC) — no outbound network,
     /// only the workdir mounted read-write.
     Mxc,
+    /// Commands run inside a Docker container — the workdir is mounted read-write
+    /// at its host path and the container has no network access.
+    Docker,
 }
 
 impl SandboxMode {
@@ -110,6 +113,7 @@ impl SandboxMode {
             Self::Off => "off",
             Self::Permissive => "permissive",
             Self::Mxc => "mxc",
+            Self::Docker => "docker",
         }
     }
 

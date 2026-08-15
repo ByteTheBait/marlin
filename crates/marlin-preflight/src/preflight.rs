@@ -501,6 +501,9 @@ pub fn startup(
             executor::mxc_binary_name()
         ));
     }
+    if !executor::detect_docker() {
+        lines.push("docker CLI not found — sandbox_mode=docker will fail".into());
+    }
 
     check_toml_file::<marlin_config::config::ThemePalette>(
         &marlin_dir.join("theme.toml"),

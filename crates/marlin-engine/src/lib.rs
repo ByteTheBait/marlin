@@ -280,6 +280,7 @@ impl Engine {
                     "off" => self.cfg.sandbox_mode = SandboxMode::Off,
                     "permissive" | "on" => self.cfg.sandbox_mode = SandboxMode::Permissive,
                     "mxc" => self.cfg.sandbox_mode = SandboxMode::Mxc,
+                    "docker" => self.cfg.sandbox_mode = SandboxMode::Docker,
                     _ => {}
                 }
             }
@@ -3181,6 +3182,15 @@ impl Engine {
                         ));
                     }
                 }
+                Some("docker") => {
+                    if !executor::detect_docker() {
+                        err!("docker CLI not found in PATH. Install Docker and retry.");
+                    } else {
+                        self.cfg.sandbox_mode = SandboxMode::Docker;
+                        save_cfg!();
+                        sys!("Sandbox docker — AI commands run inside a Docker container (network blocked, only workdir mounted rw).");
+                    }
+                }
                 _ => {
                     let mode = self.cfg.sandbox_mode.label();
                     let mxc = if executor::detect_mxc() {
@@ -3188,9 +3198,14 @@ impl Engine {
                     } else {
                         format!("not found ({})", executor::mxc_binary_name())
                     };
+                    let docker = if executor::detect_docker() {
+                        "available (docker)"
+                    } else {
+                        "not found (docker)"
+                    };
                     sys!(format!(
-                        "Sandbox: {mode}  |  mxc: {mxc}\n\
-                             /sandbox [off|permissive|mxc]"
+                        "Sandbox: {mode}  |  mxc: {mxc}  |  docker: {docker}\n\
+                             /sandbox [off|permissive|mxc|docker]"
                     ));
                 }
             },
@@ -4538,6 +4553,15 @@ impl Engine {
                             .await;
                         None
                     }
+                    "docker" if executor::detect_docker() => Some(SandboxMode::Docker),
+                    "docker" => {
+                        let _ = ui_tx
+                            .send(UiUpdate::ErrorMsg(
+                                "docker CLI not found in PATH. Install Docker and retry.".into(),
+                            ))
+                            .await;
+                        None
+                    }
                     _ => None,
                 };
                 if let Some(mode) = mode {
@@ -5119,7 +5143,7 @@ fn help_text() -> String {
         ("/detach [file]", "remove attachment(s)"),
         ("/exec <cmd>", "run a shell command (must be /allow-ed first, or /sandbox on)"),
         ("/allow <prefix>", "allow a shell command prefix (e.g. /allow npm)"),
-        ("/sandbox [off|permissive|mxc]", "command isolation: off=require /allow, permissive=allow all, mxc=MS eXecution Containers"),
+        ("/sandbox [off|permissive|mxc|docker]", "command isolation: off=require /allow, permissive=allow all, mxc=MS eXecution Containers, docker=Docker container"),
         ("/permissions [skip|require]", "skip or require permission checks (persists)"),
         ("/verify [cmd|off]", "set shell command to run after every file edit (Write-Test-Fix)"),
         ("/ast [off|sexpr|harness]", "AST context mode: off=raw, sexpr=S-expr reads, harness=JSON surgery (persists)"),

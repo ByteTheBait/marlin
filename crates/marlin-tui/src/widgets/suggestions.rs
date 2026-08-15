@@ -38,7 +38,7 @@ pub fn all_commands() -> Vec<CmdDef> {
         ("/detach",    "[file]",            "remove attachment(s)"),
         ("/exec",        "<cmd>",             "run shell command (must be /allow-ed)"),
         ("/allow",       "<prefix>",          "allow a shell command prefix"),
-        ("/sandbox",     "[off|permissive|mxc]", "command isolation: off=require /allow, permissive=allow all, mxc=MS eXecution Containers"),
+        ("/sandbox",     "[off|permissive|mxc|docker]", "command isolation: off=require /allow, permissive=allow all, mxc=MS eXecution Containers, docker=Docker"),
         ("/permissions", "[skip|require]",    "skip or require permission checks (persists)"),
         ("/verify",      "[cmd|off]",         "run command after every file edit (Write-Test-Fix)"),
         ("/ast",         "[off|sexpr|harness]", "AST context mode: sexpr=S-expr reads, harness=JSON surgery"),

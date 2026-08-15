@@ -294,6 +294,19 @@ pub fn execute(
                 };
             }
 
+            // Docker path — no streaming support
+            if *sandbox_mode == SandboxMode::Docker {
+                return match run_in_docker(cmd, work_dir) {
+                    Err(e) => ToolResult::err(e.to_string()),
+                    Ok(out) => format_command_output(
+                        &out.stdout,
+                        &out.stderr,
+                        out.status.success(),
+                        logs_dir,
+                    ),
+                };
+            }
+
             // Streaming path
             if let Some(stream) = stream_fn {
                 let timeout_secs: u64 = input
@@ -945,6 +958,47 @@ pub(crate) fn run_in_mxc(cmd: &str, work_dir: &str) -> std::io::Result<std::proc
 
     let _ = std::fs::remove_file(&tmp); // best-effort cleanup
     result
+}
+
+// ── Docker isolation ─────────────────────────────────────────────────────────
+
+/// Returns true if the `docker` CLI is present in PATH.
+pub fn detect_docker() -> bool {
+    // Command::new().output() returns Err(NotFound) when the binary doesn't exist.
+    Command::new("docker").arg("--version").output().is_ok()
+}
+
+/// Build the `docker run` invocation that runs `cmd` inside a sandboxed
+/// container:
+///   - workdir mounted read-write at its host path
+///   - no outbound network (--network none)
+///   - removed after exit
+///   - a common base image so typical dev commands (sh, cargo, git, python…)
+///     are available without a one-off pull
+fn docker_command(cmd: &str, work_dir: &str) -> Command {
+    // Resolve to a canonical absolute path so the mount source is exact.
+    let abs = resolve_path(work_dir, work_dir);
+    let mut command = Command::new("docker");
+    command
+        .arg("run")
+        .arg("--rm")
+        .arg("--network")
+        .arg("none")
+        .arg("-v")
+        .arg(format!("{abs}:{abs}"))
+        .arg("-w")
+        .arg(&abs)
+        .arg("--entrypoint")
+        .arg("sh")
+        .arg("alpine:latest")
+        .arg("-c")
+        .arg(cmd);
+    command
+}
+
+/// Execute `cmd` inside a Docker sandbox container.
+pub(crate) fn run_in_docker(cmd: &str, work_dir: &str) -> std::io::Result<std::process::Output> {
+    docker_command(cmd, work_dir).output()
 }
 
 // ── AST subprocess helpers ───────────────────────────────────────────────────

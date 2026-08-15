@@ -20,7 +20,7 @@ pub struct StatusBar {
     /// Current git branch of the work directory (None if not a git repo).
     pub git_branch: Option<String>,
     /// Set when the base prompt injection (system prompt + tool defs) exceeds
-    /// its ~2k token target. Informational only — never blocks a request.
+    /// its ~4k token target. Informational only — never blocks a request.
     pub prompt_budget_over: Option<usize>,
     /// Number of running background processes (started via bg_start).
     pub bg_count: usize,
