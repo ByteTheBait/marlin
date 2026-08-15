@@ -241,11 +241,13 @@ pub fn all_tools(
             ),
             properties: vec![
                 ToolProp {
-                    name: "name".into(), ty: "string".into(),
+                    name: "name".into(),
+                    ty: "string".into(),
                     description: "Skill name (exactly as listed above).".into(),
                 },
                 ToolProp {
-                    name: "query".into(), ty: "string".into(),
+                    name: "query".into(),
+                    ty: "string".into(),
                     description: "Input text or search query to pass to the skill.".into(),
                 },
             ],

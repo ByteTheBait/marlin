@@ -251,8 +251,7 @@ pub fn run(
                         // returns to the text input. Plain Left/Right arrows are
                         // left alone so they move the cursor in the input box.
                         // Tab is left free for slash-command autocomplete.
-                        if key.code == KeyCode::Right
-                            && key.modifiers.contains(KeyModifiers::SHIFT)
+                        if key.code == KeyCode::Right && key.modifiers.contains(KeyModifiers::SHIFT)
                         {
                             sidebar.focused = true;
                             if sidebar.selected_category.is_none() {

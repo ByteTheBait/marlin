@@ -180,7 +180,12 @@ impl ConfigMenu {
                 key: "sandbox",
                 label: "Sandbox".into(),
                 kind: FieldKind::Cycle,
-                options: vec!["off".into(), "permissive".into(), "mxc".into(), "docker".into()],
+                options: vec![
+                    "off".into(),
+                    "permissive".into(),
+                    "mxc".into(),
+                    "docker".into(),
+                ],
                 current: s.sandbox_mode.clone(),
             },
             MenuItem {

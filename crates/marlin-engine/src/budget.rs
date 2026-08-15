@@ -97,7 +97,13 @@ mod tests {
                 or \"I'll...\", make that tool call instead. Plain text with no tool call is only for asking the user \
                 a question or reporting you're permanently blocked.\n\
             Progress so far: 0 tool calls made.\n";
-        let tools = all_tools(&AstMode::Off, &[("explore".into(), "explore the codebase".into())], &[], false, &[]);
+        let tools = all_tools(
+            &AstMode::Off,
+            &[("explore".into(), "explore the codebase".into())],
+            &[],
+            false,
+            &[],
+        );
         let report = compute(system_prompt, &tools);
         eprintln!("DEBUG REPORT:\n{}", report.format());
         assert!(false, "debug");
